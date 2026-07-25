@@ -146,7 +146,9 @@ def query_structured_memory(
     Use this only for true list/count requests. ``owner`` is a condition already
     present in the question, never the person the user is asking you to discover.
     ``category`` is required; use ``all`` only when the request intentionally
-    spans categories or names no category.
+    spans categories or names no category. A category name plus "전체"/"목록"/
+    "개수" (e.g. "액션 아이템 전체 목록", "결정사항 목록", "리스크 전체 개수") is this
+    tool, not get_project_overview, even though it says "전체".
     ``completion_status`` is ``open``, ``completed``, or ``unknown``; do not
     turn an unknown status into open.
     Put a concrete target phrase in ``text_query`` so list records can be ranked
@@ -245,10 +247,11 @@ def get_project_overview(
 ) -> tuple[str, dict]:
     """Return the current project overview summary and complete active Action Plan.
 
-    Use only when the user explicitly asks for a briefing or overall project status.
-    A phrase such as "전체 정답률" is a specific metric and must use evidence search.
-    The Action Plan is reference data: select only what the question needs, and list
-    every item only when the user explicitly asks for the complete list.
+    Use only when the user explicitly asks for a briefing or overall project status
+    without naming a specific category. A phrase such as "전체 정답률" is a specific
+    metric and must use evidence search. The Action Plan is reference data: during
+    a general briefing, select only what the question needs, and list every item
+    only when the user explicitly asks for the complete list.
     Treat ``completion_status`` as the only status evidence. ``unknown`` means the
     status is unconfirmed, never open, unfinished, or in progress. ``status_counts``
     is the authoritative aggregate when summary wording conflicts with action rows.
