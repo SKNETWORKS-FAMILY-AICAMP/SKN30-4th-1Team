@@ -11,6 +11,10 @@ google-generativeai
 pymysql
 chromadb
 
+# 문서 변환 (멀티포맷 입력)
+pypdf
+python-docx
+
 # 유틸
 pydantic
 python-dotenv

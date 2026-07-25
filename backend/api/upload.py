@@ -1,4 +1,3 @@
-import io
 import logging
 import threading
 from pathlib import Path
@@ -7,6 +6,12 @@ from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 from ..db.mysql import get_connection
+from ..pipeline.converters import (
+    ConversionError,
+    ConvertedDocument,
+    convert,
+    supported_suffixes,
+)
 from ..pipeline.extractor import extract
 from ..pipeline.ingestor import ingest
 from ..retriever.memory_vector import delete_memory_vector, upsert_memory_vector
@@ -17,7 +22,7 @@ from .auth import get_current_user_id, require_project_access
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-_ALLOWED_SUFFIXES = {".md", ".txt", ".pdf"}
+# 지원 포맷은 변환기 레지스트리가 단일 출처다 — 새 포맷을 등록하면 업로드도 함께 열린다.
 _MAX_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
 _UPLOAD_PROCESS_LOCK = threading.Lock()
 
@@ -34,22 +39,22 @@ def _infer_doc_type(filename: str) -> str:
     return "document"
 
 
-# ── 파일 텍스트 추출 ──────────────────────────────────────────────
+# ── 파일 변환 ─────────────────────────────────────────────────────
 
-def _read_pdf(data: bytes) -> str:
+def _convert_upload(filename: str, data: bytes) -> ConvertedDocument:
+    """업로드 파일을 변환한다. 실패는 사유를 담은 400으로 되돌린다.
+
+    변환은 백그라운드가 아니라 요청 경로에서 수행한다 — 실패 사유를 즉시
+    사용자에게 알려야 하고, 변환된 문서를 폴링 없이 확인할 수 있어야 한다.
+    """
     try:
-        from pypdf import PdfReader
-        reader = PdfReader(io.BytesIO(data))
-        return "\n".join(page.extract_text() or "" for page in reader.pages)
-    except Exception:
-        return ""
-
-
-def _extract_text(filename: str, data: bytes) -> str:
-    suffix = Path(filename).suffix.lower()
-    if suffix == ".pdf":
-        return _read_pdf(data)
-    return data.decode("utf-8", errors="replace")
+        return convert(filename, data)
+    except ConversionError as exc:
+        logger.info("문서 변환 실패 filename=%s code=%s", filename, exc.code)
+        raise HTTPException(
+            status_code=400,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
 
 
 # ── 내부 헬퍼 ─────────────────────────────────────────────────────
@@ -155,7 +160,7 @@ def _process_upload(
     project_id: int,
     doc_id: int,
     old_doc_ids: list,
-    content: str,
+    document: ConvertedDocument,
     filename: str,
     date: str,
     doc_type: str,
@@ -164,20 +169,21 @@ def _process_upload(
     """LLM extract → ingest → status 갱신 → 이전 문서 정리."""
     # ponytail: global lock; per-project queues if folder ingest throughput matters.
     with _UPLOAD_PROCESS_LOCK:
-        _process_upload_locked(project_id, doc_id, old_doc_ids, content, filename, date, doc_type, file_path)
+        _process_upload_locked(project_id, doc_id, old_doc_ids, document, filename, date, doc_type, file_path)
 
 
 def _process_upload_locked(
     project_id: int,
     doc_id: int,
     old_doc_ids: list,
-    content: str,
+    document: ConvertedDocument,
     filename: str,
     date: str,
     doc_type: str,
     file_path: str,
 ):
     """실제 업로드 처리 본문. 호출자는 동시 실행을 제한한다."""
+    content = document.text
     try:
         items = extract(
             content,
@@ -204,6 +210,7 @@ def _process_upload_locked(
                 "source_type": doc_type,
                 "source_path": filename,
             },
+            converted=document,
         )
     except Exception as exc:
         logger.error("ingest 실패 doc_id=%s", doc_id, exc_info=True)
@@ -241,16 +248,18 @@ async def upload_document(
         filename = safe_upload_name(file.filename or "")
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid filename")
-    if Path(filename).suffix.lower() not in _ALLOWED_SUFFIXES:
-        raise HTTPException(status_code=400, detail="지원하지 않는 파일 형식입니다. (.md / .txt / .pdf)")
+    if Path(filename).suffix.lower() not in supported_suffixes():
+        raise HTTPException(
+            status_code=400,
+            detail="지원하지 않는 파일 형식입니다. ("
+                   + " / ".join(sorted(supported_suffixes())) + ")",
+        )
     doc_type = _infer_doc_type(filename)
 
     data = await file.read()
     if len(data) > _MAX_FILE_BYTES:
         raise HTTPException(status_code=413, detail="파일 크기는 10 MB를 초과할 수 없습니다.")
-    content = _extract_text(filename, data)
-    if not content.strip():
-        raise HTTPException(status_code=400, detail="content must not be empty")
+    document = _convert_upload(filename, data)
 
     conn = get_connection()
     try:
@@ -287,10 +296,26 @@ async def upload_document(
 
     background_tasks.add_task(
         _process_upload, project_id, doc_id, old_doc_ids,
-        content, filename, date, doc_type, file_path,
+        document, filename, date, doc_type, file_path,
     )
 
-    return {"doc_id": doc_id, "status": "processing"}
+    if document.warnings:
+        logger.info(
+            "문서 변환 경고 doc_id=%s count=%s codes=%s",
+            doc_id, len(document.warnings),
+            sorted({w.code for w in document.warnings}),
+        )
+
+    # 변환 경고는 폴링 없이 즉시 돌려준다 — 표 평탄화·머리말 제거처럼 "성공했지만
+    # 원본과 다른" 부분을 사용자가 업로드 직후에 알 수 있어야 한다.
+    return {
+        "doc_id": doc_id,
+        "status": "processing",
+        "format": document.format,
+        "blocks": len(document.blocks),
+        "pages": document.page_count,
+        "warnings": document.warning_dicts(),
+    }
 
 
 @router.get("/projects/{project_id}/documents")

@@ -504,7 +504,7 @@
         <div class="res-label">Request — <code>multipart/form-data</code></div>
         <table>
           <tr><th>필드</th><th>타입</th><th>필수</th><th>설명</th></tr>
-          <tr><td><code>file</code></td><td>File</td><td>✅</td><td>.md / .txt / .pdf (최대 10 MB)</td></tr>
+          <tr><td><code>file</code></td><td>File</td><td>✅</td><td>.md / .markdown / .txt / .docx / .pdf (최대 10 MB)</td></tr>
           <tr><td><code>date</code></td><td>string</td><td>-</td><td>문서 날짜 YYYY-MM-DD</td></tr>
         </table>
         <div class="note" style="margin-bottom:8px">
@@ -516,7 +516,8 @@
         <div class="res-label"><span class="s201">201</span> Created</div>
         <pre><code>{ "doc_id": 12, "status": "processing" }</code></pre>
         <div class="res-label"><span class="s400">400</span> Bad Request</div>
-        <pre><code>{ "detail": "지원하지 않는 파일 형식입니다. (.md / .txt / .pdf)" }</code></pre>
+        <pre><code>{ "detail": "지원하지 않는 파일 형식입니다. (.docx / .markdown / .md / .pdf / .txt)" }
+{ "detail": { "code": "no_text_layer", "message": "PDF에서 텍스트를 추출하지 못했습니다. 스캔 이미지 PDF는 지원하지 않습니다." } }</code></pre>
         <div class="res-label"><span class="s413">413</span> Content Too Large</div>
         <pre><code>{ "detail": "파일 크기는 10 MB를 초과할 수 없습니다." }</code></pre>
         <div class="res-label"><span class="s403">403</span> Forbidden</div>
@@ -1196,7 +1197,7 @@
     { "filename": "meeting.md", "content_base64": "&lt;base64&gt;" }
   ]
 }</code></pre>
-        <div class="res-label">첨부 <code>attachments</code>: <code>.md</code>/<code>.txt</code>/<code>.pdf</code>, 파일당 최대 10 MB. 형식 미지원 400, 초과 413. 첨부 시 항상 <code>route: "semantic"</code>.</div>
+        <div class="res-label">첨부 <code>attachments</code>: <code>.md</code>/<code>.markdown</code>/<code>.txt</code>/<code>.docx</code>/<code>.pdf</code>, 파일당 최대 10 MB. 형식 미지원 400, 초과 413. 첨부 시 항상 <code>route: "semantic"</code>.</div>
         <div class="res-label"><span class="s200">200</span> OK</div>
         <pre><code>{
   "answer": "현재 가장 큰 리스크는 API 계약 변경 가능성입니다. (출처: planning.pdf)",

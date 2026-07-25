@@ -19,7 +19,8 @@ from ..retriever.query_intent import (
     answer_overview,
     classify_question,
 )
-from .upload import _ALLOWED_SUFFIXES, _MAX_FILE_BYTES, _delete_document, _extract_text
+from ..pipeline.converters import ConversionError, convert, supported_suffixes
+from .upload import _MAX_FILE_BYTES, _delete_document
 from .auth import require_project_access
 
 router = APIRouter()
@@ -57,8 +58,12 @@ def _prepare_attachment_context(attachments: List[QueryAttachment]) -> tuple[str
 
     for attachment in attachments:
         filename = Path(attachment.filename).name
-        if Path(filename).suffix.lower() not in _ALLOWED_SUFFIXES:
-            raise HTTPException(status_code=400, detail="지원하지 않는 첨부 파일 형식입니다. (.md / .txt / .pdf)")
+        if Path(filename).suffix.lower() not in supported_suffixes():
+            raise HTTPException(
+                status_code=400,
+                detail="지원하지 않는 첨부 파일 형식입니다. ("
+                       + " / ".join(sorted(supported_suffixes())) + ")",
+            )
 
         try:
             data = base64.b64decode(attachment.content_base64, validate=True)
@@ -72,7 +77,14 @@ def _prepare_attachment_context(attachments: List[QueryAttachment]) -> tuple[str
         if remaining <= 0:
             break
 
-        text = _extract_text(filename, data).strip() or "(텍스트를 추출할 수 없습니다.)"
+        # 첨부 변환 실패는 질의 전체를 막지 않는다 — 나머지 첨부와 프로젝트 기억만으로도
+        # 답할 수 있어야 하므로, 실패 사유를 본문에 남기고 계속 진행한다.
+        try:
+            text = convert(filename, data).text.strip()
+        except ConversionError as exc:
+            logger.info("첨부 변환 실패 filename=%s code=%s", filename, exc.code)
+            text = ""
+        text = text or "(텍스트를 추출할 수 없습니다.)"
         text = _clip_attachment_text(text, _ATTACHMENT_MAX_CHARS_PER_FILE, "첨부 내용 잘림")
         text = _clip_attachment_text(text, remaining, "전체 첨부 한도 초과로 잘림")
         # 표준 출처 마커를 붙여 SYSTEM_QA의 인용 규칙이 첨부에도 적용되도록 한다

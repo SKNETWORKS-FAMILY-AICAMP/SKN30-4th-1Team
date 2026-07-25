@@ -286,8 +286,11 @@ prefix). CORS `OPTIONS` 프리플라이트도 통과.
 
 | 필드 | 타입 | 필수 | 설명 |
 |------|------|------|------|
-| `file` | File | ✅ | `.md` / `.txt` / `.pdf` (최대 10 MB) |
+| `file` | File | ✅ | `.md` / `.markdown` / `.txt` / `.docx` / `.pdf` (최대 10 MB) |
 | `date` | string | - | 문서 날짜 `YYYY-MM-DD` |
+
+> **멀티포맷 지원 (2026-07-25)**: `.docx`와 텍스트 기반 PDF를 지원합니다. 스캔 이미지 PDF(OCR)는
+> 지원하지 않으며 `no_text_layer` 오류로 거절됩니다. 전처리 규칙은 [문서 전처리 정책서](DOCUMENT_INGESTION_POLICY.md) 참고.
 
 > **`doc_type` 변경 (2026-07-02)**: 프론트에서 전송하지 않습니다. 서버가 파일명 기반으로 자동 추론합니다.
 > - `회의`, `meeting`, `minutes` 포함 → `meeting`
@@ -298,14 +301,40 @@ prefix). CORS `OPTIONS` 프리플라이트도 통과.
 ```json
 {
   "doc_id": 12,
-  "status": "processing"
+  "status": "processing",
+  "format": "pdf",
+  "blocks": 87,
+  "pages": 12,
+  "warnings": [
+    { "code": "table_flattened",
+      "message": "표를 행 단위 텍스트로 변환했습니다. 열 구조는 보존되지 않습니다.",
+      "location": "table 2" }
+  ]
 }
 ```
 
-**응답 `400`**
+| 필드 | 타입 | 설명 |
+|------|------|------|
+| `format` | string | `docx` / `pdf` / `text` |
+| `blocks` | int | 추출된 문단·표행 수 |
+| `pages` | int\|null | PDF 페이지 수. DOCX·평문은 `null` |
+| `warnings` | array | 변환 경고 목록(비치명적 손실). 없으면 `[]` |
+
+> **변환 경고**: 변환은 요청 경로에서 수행되므로 폴링 없이 즉시 확인할 수 있습니다.
+> 경고 코드 전체 목록은 [문서 전처리 정책서 §8](DOCUMENT_INGESTION_POLICY.md) 참고.
+
+**응답 `400`** — 미지원 확장자
 ```json
-{ "detail": "지원하지 않는 파일 형식입니다. (.md / .txt / .pdf)" }
+{ "detail": "지원하지 않는 파일 형식입니다. (.docx / .markdown / .md / .pdf / .txt)" }
 ```
+
+**응답 `400`** — 변환 실패 (`detail`이 객체)
+```json
+{ "detail": { "code": "no_text_layer",
+              "message": "PDF에서 텍스트를 추출하지 못했습니다. 스캔 이미지 PDF는 지원하지 않습니다." } }
+```
+
+`code`는 `unsupported_format` / `missing_dependency` / `corrupt_file` / `empty_document` / `no_text_layer` 중 하나입니다.
 
 **응답 `404`**
 ```json
@@ -1098,7 +1127,7 @@ Git 로그 텍스트를 동기 처리해 메모리로 추출·적재한다. (최
 |------|------|------|------|
 | `question` | string | ✅ | 질문 |
 | `history` | array | - | `{role, content}` 대화 이력 |
-| `attachments` | array | - | 첨부 자료 `{filename, content_base64}`. `.md`/`.txt`/`.pdf`, 파일당 최대 10 MB |
+| `attachments` | array | - | 첨부 자료 `{filename, content_base64}`. `.md`/`.markdown`/`.txt`/`.docx`/`.pdf`, 파일당 최대 10 MB |
 
 > **`attachments`**: 첨부가 있으면 라우터를 우회해 항상 `route: "semantic"`으로
 > 처리된다. 형식 미지원 시 **400**, 10 MB 초과 시 **413**.
