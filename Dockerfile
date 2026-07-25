@@ -50,4 +50,4 @@ EXPOSE 8000
 #      다른 워커로 가면 state를 찾지 못한다.
 #   2. Chroma 임베디드 PersistentClient가 벡터 디렉터리를 단일 점유한다.
 # 운영 compose도 WEB_CONCURRENCY=1을 고정해 이중으로 막는다.
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--proxy-headers"]

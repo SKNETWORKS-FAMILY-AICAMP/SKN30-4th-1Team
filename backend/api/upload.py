@@ -1,24 +1,28 @@
-import io
 import logging
 import threading
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, BackgroundTasks, HTTPException, UploadFile, File, Form, Request
 from pydantic import BaseModel
 from ..db.mysql import get_connection
+from ..document_content import (
+    ALLOWED_SUFFIXES as _ALLOWED_SUFFIXES,
+    MAX_FILE_BYTES as _MAX_FILE_BYTES,
+    DocumentContentError,
+    extract_document_text,
+)
 from ..pipeline.extractor import extract
 from ..pipeline.ingestor import ingest
 from ..retriever.memory_vector import delete_memory_vector, upsert_memory_vector
 from ..storage import save_file, delete_file, safe_upload_name
 from ..graph import refresh_project_memory_after_delete, update_project_memory
+from ..rate_limit import RATE_LIMIT_UPLOAD, authenticated_user_key, limiter
 from .auth import get_current_user_id, require_project_access
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-_ALLOWED_SUFFIXES = {".md", ".txt", ".pdf"}
-_MAX_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
 _UPLOAD_PROCESS_LOCK = threading.Lock()
 
 _DOC_TYPE_KEYWORDS = {
@@ -37,19 +41,11 @@ def _infer_doc_type(filename: str) -> str:
 # ── 파일 텍스트 추출 ──────────────────────────────────────────────
 
 def _read_pdf(data: bytes) -> str:
-    try:
-        from pypdf import PdfReader
-        reader = PdfReader(io.BytesIO(data))
-        return "\n".join(page.extract_text() or "" for page in reader.pages)
-    except Exception:
-        return ""
+    return extract_document_text("document.pdf", data)
 
 
 def _extract_text(filename: str, data: bytes) -> str:
-    suffix = Path(filename).suffix.lower()
-    if suffix == ".pdf":
-        return _read_pdf(data)
-    return data.decode("utf-8", errors="replace")
+    return extract_document_text(filename, data)
 
 
 # ── 내부 헬퍼 ─────────────────────────────────────────────────────
@@ -230,7 +226,9 @@ def _process_upload_locked(
 # ── Documents ─────────────────────────────────────────────────────
 
 @router.post("/projects/{project_id}/documents", status_code=201)
+@limiter.limit(RATE_LIMIT_UPLOAD, key_func=authenticated_user_key)
 async def upload_document(
+    request: Request,
     project_id: int,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -248,7 +246,13 @@ async def upload_document(
     data = await file.read()
     if len(data) > _MAX_FILE_BYTES:
         raise HTTPException(status_code=413, detail="파일 크기는 10 MB를 초과할 수 없습니다.")
-    content = _extract_text(filename, data)
+    try:
+        content = extract_document_text(filename, data)
+    except DocumentContentError as exc:
+        raise HTTPException(
+            status_code=415,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
     if not content.strip():
         raise HTTPException(status_code=400, detail="content must not be empty")
 

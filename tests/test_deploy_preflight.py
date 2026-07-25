@@ -21,6 +21,18 @@ _ALWAYS_REQUIRED = {
     "PAIM_JWT_SECRET": "x" * 48,
     "SESSION_MEMORY_KEY": "base64key",
     "OPENAI_API_KEY": "sk-test",
+    "DB_HOST": "db",
+    "DB_PORT": "3306",
+    "PAIM_AUTH_MODE": "jwt",
+    "RATE_LIMIT_SIGNUP": "5/minute",
+    "RATE_LIMIT_LOGIN": "5/minute",
+    "RATE_LIMIT_UPLOAD": "20/minute",
+    "RATE_LIMIT_QUERY": "30/minute",
+    "RATE_LIMIT_CHAT": "30/minute",
+    "PAIM_PROXY_SUBNET": "172.30.12.0/24",
+    "PAIM_CADDY_PROXY_IP": "172.30.12.10",
+    "PAIM_BACKEND_PROXY_IP": "172.30.12.20",
+    "FORWARDED_ALLOW_IPS": "172.30.12.10/32",
 }
 
 

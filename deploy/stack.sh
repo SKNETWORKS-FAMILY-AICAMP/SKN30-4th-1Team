@@ -86,7 +86,17 @@ for arg in "$@"; do
 done
 
 # preflight가 실패하면 docker compose를 호출하지 않는다. set -e가 여기서 끊는다.
-"$ROOT/deploy/preflight.sh" --env-file "$ENV_FILE" --mode "$MODE"
+SUBCOMMAND="${1:-}"
+NETWORK_GATE=()
+case "$SUBCOMMAND" in
+  up|create|run) NETWORK_GATE=(--check-network) ;;
+esac
+"$ROOT/deploy/preflight.sh" \
+  --env-file "$ENV_FILE" \
+  --mode "$MODE" \
+  --profile "$PROFILE" \
+  --project "$PROJECT" \
+  "${NETWORK_GATE[@]}"
 
 # 보간에서 호스트 셸 값이 --env-file보다 우선한다. 셸에 DB_PASSWORD나
 # PAIM_HTTP_PORT가 export되어 있으면 preflight는 프로필 파일을 PASS로 판정했는데

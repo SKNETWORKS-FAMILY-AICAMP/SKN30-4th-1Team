@@ -182,6 +182,20 @@ def test_prod_does_not_override_backend_command(prod: dict):
     assert "command" not in prod["services"]["backend"]
 
 
+# ── MySQL 초기화 완료 ────────────────────────────────────────────────────────
+
+def test_db_health_waits_for_final_mysqld_process(prod: dict):
+    """공식 이미지의 init용 임시 mysqld도 ping에는 응답한다.
+
+    backend 의존성과 빈 restore DB 복구가 초기화 SQL과 경합하지 않으려면 최종
+    mysqld가 entrypoint를 대체해 PID 1이 된 뒤에만 healthy여야 한다.
+    """
+    health = prod["services"]["db"]["healthcheck"]["test"]
+    assert health[0] == "CMD-SHELL"
+    assert "/proc/1/comm" in health[1]
+    assert "mysqladmin ping" in health[1]
+
+
 # ── 재시작·로그 ──────────────────────────────────────────────────────────────
 
 def test_all_services_restart_unless_stopped(prod: dict):

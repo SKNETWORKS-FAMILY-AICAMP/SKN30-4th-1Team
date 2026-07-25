@@ -5,9 +5,10 @@ import os
 from pathlib import Path
 from typing import List, Dict
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from ..db.mysql import get_connection
+from ..document_content import DocumentContentError, extract_document_text
 from ..pipeline.extractor import extract
 from ..pipeline.ingestor import ingest
 from ..graph import update_project_memory, run_qa
@@ -19,8 +20,9 @@ from ..retriever.query_intent import (
     answer_overview,
     classify_question,
 )
-from .upload import _ALLOWED_SUFFIXES, _MAX_FILE_BYTES, _delete_document, _extract_text
+from .upload import _ALLOWED_SUFFIXES, _MAX_FILE_BYTES, _delete_document
 from .auth import require_project_access
+from ..rate_limit import RATE_LIMIT_QUERY, authenticated_user_key, limiter
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -72,7 +74,14 @@ def _prepare_attachment_context(attachments: List[QueryAttachment]) -> tuple[str
         if remaining <= 0:
             break
 
-        text = _extract_text(filename, data).strip() or "(텍스트를 추출할 수 없습니다.)"
+        try:
+            text = extract_document_text(filename, data).strip()
+        except DocumentContentError as exc:
+            raise HTTPException(
+                status_code=415,
+                detail={"code": exc.code, "message": exc.message},
+            ) from exc
+        text = text or "(텍스트를 추출할 수 없습니다.)"
         text = _clip_attachment_text(text, _ATTACHMENT_MAX_CHARS_PER_FILE, "첨부 내용 잘림")
         text = _clip_attachment_text(text, remaining, "전체 첨부 한도 초과로 잘림")
         # 표준 출처 마커를 붙여 SYSTEM_QA의 인용 규칙이 첨부에도 적용되도록 한다
@@ -87,7 +96,8 @@ def _prepare_attachment_context(attachments: List[QueryAttachment]) -> tuple[str
 
 
 @router.post("/projects/{project_id}/query")
-def query(project_id: int, body: QueryRequest):
+@limiter.limit(RATE_LIMIT_QUERY, key_func=authenticated_user_key)
+def query(request: Request, project_id: int, body: QueryRequest):
     require_project_access(project_id)
     attachment_context, attachment_sources = _prepare_attachment_context(body.attachments)
     conn = get_connection()
