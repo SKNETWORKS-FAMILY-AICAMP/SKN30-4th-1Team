@@ -124,6 +124,27 @@ def test_docx_table_emits_flatten_warning():
     assert WarningCode.TABLE_FLATTENED in {w.code for w in doc.warnings}
 
 
+def test_docx_detects_heading_by_style_name_not_style_id():
+    """styleId가 불투명해도 스타일 '이름'으로 제목을 알아본다.
+
+    국내에서 작성된 DOCX는 styleId가 `a3` 같은 값이고 이름에만 `제목 1`이 담기는
+    경우가 흔하다. 성능을 위해 styleId를 직접 읽으므로 이름 해석 경로를 고정한다.
+    """
+    import docx
+    from docx.enum.style import WD_STYLE_TYPE
+
+    document = docx.Document()
+    style = document.styles.add_style("제목 1", WD_STYLE_TYPE.PARAGRAPH)
+    document.add_paragraph("한글 제목", style=style)
+    document.add_paragraph("본문 내용")
+    buffer = io.BytesIO()
+    document.save(buffer)
+
+    doc = convert("한글.docx", buffer.getvalue())
+    assert [b.kind for b in doc.blocks] == ["heading", "paragraph"]
+    assert doc.blocks[1].heading_path == ("한글 제목",)
+
+
 def test_docx_has_no_page_numbers():
     """DOCX는 페이지가 렌더링 시점에 정해지므로 page를 지어내지 않는다."""
     doc = convert("x.docx", _make_docx(lambda d: d.add_paragraph("내용")))

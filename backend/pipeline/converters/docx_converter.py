@@ -10,6 +10,7 @@ DOCX에는 페이지 개념이 없다(페이지는 렌더링 시점에 결정된
 from __future__ import annotations
 
 import io
+import logging
 import re
 
 from .base import (
@@ -20,6 +21,8 @@ from .base import (
     assemble,
 )
 from .cleaning import drop_duplicate_blocks, is_noise_line, normalize_text
+
+logger = logging.getLogger(__name__)
 
 SUFFIXES = (".docx",)
 
@@ -51,13 +54,42 @@ def _iter_body(document, qn, Table, Paragraph):
             yield Table(child, document)
 
 
-def _paragraph_kind(paragraph) -> tuple[str, int | None]:
-    """문단 스타일에서 (kind, level)을 판정한다."""
+def _style_name_map(document) -> dict[str, str]:
+    """styleId → 표시 이름 사전을 문서당 한 번만 만든다.
+
+    `paragraph.style`을 문단마다 읽으면 python-docx가 문단마다 기본 스타일을
+    다시 해석해(styles.default_for) 대형 문서에서 변환 시간의 대부분을 차지한다.
+    스타일 수는 보통 수십 개뿐이라 미리 한 번 펼쳐 두는 편이 훨씬 싸다.
+
+    styleId를 그대로 쓰지 않고 이름으로 바꾸는 이유는, 국내에서 작성된 DOCX가
+    styleId를 `a3` 같은 불투명한 값으로 갖고 이름에만 `제목 1`이 담기는 경우가
+    흔하기 때문이다.
+    """
+    names: dict[str, str] = {}
+    try:
+        for style in document.styles:
+            style_id = getattr(style, "style_id", None)
+            if style_id:
+                names[style_id] = (getattr(style, "name", None) or style_id).strip()
+    except Exception:
+        # 스타일 파트가 손상된 문서에서도 본문 변환은 계속돼야 한다.
+        logger.debug("DOCX 스타일 목록을 읽지 못했습니다. styleId로 대체합니다.", exc_info=True)
+    return names
+
+
+def _paragraph_kind(paragraph, style_names: dict[str, str]) -> tuple[str, int | None]:
+    """문단 스타일에서 (kind, level)을 판정한다.
+
+    pStyle이 없는 문단은 기본 스타일(본문)이므로 이름 해석 없이 paragraph로 본다.
+    """
     style_name = ""
     try:
-        style_name = (paragraph.style.name or "").strip()
+        properties = paragraph._p.pPr
+        if properties is not None and properties.pStyle is not None:
+            style_id = properties.pStyle.val
+            style_name = style_names.get(style_id, style_id or "").strip()
     except Exception:
-        # 스타일이 삭제된 문서에서 python-docx가 예외를 던지는 경우가 있다.
+        # 스타일 참조가 깨진 문서에서도 문단 자체는 살려 본문으로 취급한다.
         style_name = ""
 
     heading = _HEADING_STYLE.match(style_name)
@@ -117,6 +149,7 @@ def convert(filename: str, data: bytes):
     raw_blocks: list[dict] = []
     warnings: list[ConversionWarning] = []
     table_index = 0
+    style_names = _style_name_map(document)
 
     for item in _iter_body(document, qn, Table, Paragraph):
         if isinstance(item, Table):
@@ -130,7 +163,7 @@ def convert(filename: str, data: bytes):
         text = normalize_text(item.text).replace("\n", " ").strip()
         if not text or is_noise_line(text):
             continue
-        kind, level = _paragraph_kind(item)
+        kind, level = _paragraph_kind(item, style_names)
         raw_blocks.append({"kind": kind, "text": text, "level": level})
 
     # 이미지·차트·도형은 텍스트가 없어 그대로 유실된다. 조용히 버리지 않고 알린다.
