@@ -19,5 +19,24 @@ class MemoryItem(BaseModel):
     )
 
 
+class CompletionReport(BaseModel):
+    action_id: int = Field(description="id of an existing open action from the provided list — never invent one")
+    evidence: str = Field(description="The literal sentence from the input text reporting this action's status")
+    fully_complete: bool = Field(
+        description="True only when the text confirms every sub-task of this action is done. "
+        "False when the text confirms only part of it is done while another part remains — "
+        "in that case fill done_part and remaining_part instead of marking it fully complete."
+    )
+    done_part: Optional[str] = Field(
+        default=None,
+        description="Only when fully_complete is false: the sub-task the text confirms is done, in the action's own words",
+    )
+    remaining_part: Optional[str] = Field(
+        default=None,
+        description="Only when fully_complete is false: the sub-task that is still open, in the action's own words",
+    )
+
+
 class ExtractionResult(BaseModel):
     items: List[MemoryItem]
+    completions: List[CompletionReport] = Field(default_factory=list)

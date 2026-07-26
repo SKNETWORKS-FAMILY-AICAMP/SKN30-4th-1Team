@@ -106,7 +106,7 @@ def test_extract_reports_progress_when_chunk_fails(monkeypatch):
     calls = []
     monkeypatch.setattr("backend.pipeline.extractor.get_llm_client", lambda provider=None: object())
     monkeypatch.setattr("backend.pipeline.extractor._split_chunks", lambda text: ["one", "two"])
-    mock_extract = MagicMock(side_effect=[[], ValueError("bad chunk")])
+    mock_extract = MagicMock(side_effect=[([], []), ValueError("bad chunk")])
     monkeypatch.setattr("backend.pipeline.extractor._extract_chunk", mock_extract)
 
     try:
@@ -115,6 +115,34 @@ def test_extract_reports_progress_when_chunk_fails(monkeypatch):
         pass
 
     assert calls == [(0, 2), (1, 2), (2, 2)]
+
+
+def test_dedup_completions_later_report_wins_even_if_less_complete():
+    """뒷 청크의 더 정확한 부분완료 보고가, 앞 청크의 부정확한 "전체 완료" 요약을
+    덮어써야 한다 — fully_complete를 무조건 우선하면 이 케이스가 거꾸로 됨."""
+    from backend.pipeline.extractor import _dedup_completions
+    from backend.pipeline.models import CompletionReport
+
+    early_optimistic = CompletionReport(
+        action_id=1, evidence="모든 액션 완료", fully_complete=True,
+    )
+    later_precise = CompletionReport(
+        action_id=1, evidence="인원관리는 완료, 알림은 진행중", fully_complete=False,
+        done_part="인원관리", remaining_part="알림",
+    )
+    result = _dedup_completions([early_optimistic, later_precise])
+    assert len(result) == 1
+    assert result[0] is later_precise
+
+
+def test_dedup_completions_keeps_different_action_ids():
+    from backend.pipeline.extractor import _dedup_completions
+    from backend.pipeline.models import CompletionReport
+
+    a = CompletionReport(action_id=1, evidence="a", fully_complete=True)
+    b = CompletionReport(action_id=2, evidence="b", fully_complete=True)
+    result = _dedup_completions([a, b])
+    assert {c.action_id for c in result} == {1, 2}
 
 
 # ─── upload_document 비동기 경로 ──────────────────────────────────────────────
@@ -188,6 +216,7 @@ def test_extract_failure_sets_failed_status():
          patch("backend.api.upload.finalize_document", return_value=_finalized((42,))), \
          patch("backend.api.upload.processing_owned", return_value=True), \
          patch("backend.api.upload.extract", side_effect=ValueError("LLM error")), \
+         patch("backend.api.upload._fetch_open_actions", return_value=[]), \
          patch("backend.api.upload.fail_document") as fail_document:
 
         resp = _client.post(_URL, files={"file": _FILE}, data=_DATA)
@@ -204,7 +233,8 @@ def test_ingest_failure_sets_failed_status():
          patch("backend.api.upload.write_reserved_file"), \
          patch("backend.api.upload.finalize_document", return_value=_finalized((42,))), \
          patch("backend.api.upload.processing_owned", return_value=True), \
-         patch("backend.api.upload.extract", return_value=[]), \
+         patch("backend.api.upload.extract", return_value=([], [])), \
+         patch("backend.api.upload._fetch_open_actions", return_value=[]), \
          patch("backend.api.upload.ingest", side_effect=RuntimeError("DB error")), \
          patch("backend.api.upload.fail_document") as fail_document:
 
@@ -222,8 +252,9 @@ def test_success_cleans_up_all_old_docs():
          patch("backend.api.upload.write_reserved_file"), \
          patch("backend.api.upload.finalize_document", return_value=_finalized((10, 11))), \
          patch("backend.api.upload.processing_owned", return_value=True), \
-         patch("backend.api.upload.extract", return_value=[]), \
-         patch("backend.api.upload.ingest"), \
+         patch("backend.api.upload.extract", return_value=([], [])) as mock_extract, \
+         patch("backend.api.upload._fetch_open_actions", return_value=[{"id": 7, "content": "x"}]), \
+         patch("backend.api.upload.ingest") as mock_ingest, \
          patch("backend.api.upload._delete_document") as mock_del, \
          patch("backend.api.upload.refresh_project_memory_after_delete") as mock_refresh:
 
@@ -235,6 +266,10 @@ def test_success_cleans_up_all_old_docs():
         assert call(11, refresh_project_memory=False) in mock_del.call_args_list
         assert call(99, refresh_project_memory=False) not in mock_del.call_args_list
         mock_refresh.assert_called_once_with(1)
+        # open_actions 조회 결과가 실제로 extract()에 전달되고, extract()의 completions
+        # 반환값이 실제로 ingest()에 전달되는지 — 배선 자체를 검증(2번 finding 대응).
+        assert mock_extract.call_args.kwargs["open_actions"] == [{"id": 7, "content": "x"}]
+        assert mock_ingest.call_args.kwargs["completions"] == []
 
 
 def test_no_old_doc_skips_cleanup():
@@ -244,7 +279,8 @@ def test_no_old_doc_skips_cleanup():
          patch("backend.api.upload.write_reserved_file"), \
          patch("backend.api.upload.finalize_document", return_value=_finalized()), \
          patch("backend.api.upload.processing_owned", return_value=True), \
-         patch("backend.api.upload.extract", return_value=[]), \
+         patch("backend.api.upload.extract", return_value=([], [])), \
+         patch("backend.api.upload._fetch_open_actions", return_value=[]), \
          patch("backend.api.upload.ingest"), \
          patch("backend.api.upload._delete_document") as mock_del:
 

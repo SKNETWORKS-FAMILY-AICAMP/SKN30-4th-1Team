@@ -1,8 +1,8 @@
 # 문서 텍스트에서 결정/액션/이슈/리스크를 LLM으로 추출하는 모듈.
 # 대용량 문서는 문단 경계 기반 청크로 분할해 각각 추출한 뒤 합산하고 중복을 제거한다.
 import re
-from typing import Callable, List, Optional, Set, Tuple
-from .models import MemoryItem, ExtractionResult
+from typing import Callable, List, Optional, Set, Tuple, Union
+from .models import MemoryItem, ExtractionResult, CompletionReport
 from ..llm import get_llm_client, Message
 
 
@@ -86,6 +86,42 @@ _CHUNK_OVERLAP = 200  # 청크 경계에서 문맥 유지를 위해 앞 청크�
 def _system_prompt(source_kind: str) -> str:
     """기본 회의록 프롬프트는 유지하고 repo 소스에만 우선 지침을 더한다."""
     return _REPO_PROMPTS.get(source_kind, "") + SYSTEM_PROMPT
+
+
+def _open_actions_prompt(open_actions: List[dict]) -> str:
+    """현재 열린 action 목록을 프롬프트에 덧붙여, 이 문서가 그중 일부를 완료로
+    보고하는지 같은 추출 호출 안에서 함께 판정하게 한다(사후 reconciler 대체).
+    """
+    lines = "\n".join(
+        f"- id={a['id']}: {a['content']}" + (f" (담당: {a['owner']})" if a.get("owner") else "")
+        for a in open_actions
+    )
+    return f"""
+
+Additionally, here is the list of currently open (not yet completed) action items from
+earlier meetings, each with its id:
+{lines}
+
+If this document reports progress on one or more of these exact items (e.g. in a
+"지난 액션 이행 확인" or progress-report section), return them in `completions` with the
+literal sentence as evidence.
+- Only use action_id values from the list above — never invent one.
+- One sentence can report progress on multiple items at once.
+- Skip an item entirely (do not include it in `completions`) when the text gives no
+  concrete progress on it, or only says it is planned/not started.
+- Set fully_complete=true only when the text explicitly states the entire item is
+  already done. Do not set it true for in-progress, partially done work, or a bare
+  percentage (e.g. "80% 진행됐습니다").
+- If an item bundles multiple sub-tasks (e.g. "X 기능 및 Y 로직 구현") and the text
+  confirms only some of them done while another part remains in-progress or unmentioned,
+  do NOT set fully_complete=true. Instead set fully_complete=false and fill done_part
+  (the confirmed-done sub-task, in the action's own words) and remaining_part (the
+  sub-task that is not yet confirmed done, in the action's own words) — this splits the
+  item so the finished part is recorded without prematurely closing the rest.
+  The text may name a sub-task with different wording than the item's own text (e.g.
+  item says "알림 로직 구현", text says "알림은 푸시 연동 중입니다" — that is the same
+  sub-task, still open).
+- If nothing on the list has any reportable progress, return an empty completions array."""
 
 
 _README_ACTION_BLOCKLIST = (
@@ -205,14 +241,21 @@ def _notify_progress(on_progress: Optional[Callable[[int, int], None]], done: in
         pass
 
 
-def _extract_chunk(client, text: str, default_source: str, source_kind: str) -> List[MemoryItem]:
+def _extract_chunk(
+    client, text: str, default_source: str, source_kind: str,
+    open_actions: Optional[List[dict]] = None,
+) -> Tuple[List[MemoryItem], List[CompletionReport]]:
     """단일 청크를 LLM function calling으로 구조화 추출.
     tool_input=None → LLM이 tool call 자체를 안 한 것(실패), ValueError raise.
     items=[] → 추출할 내용 없음(정상 빈 결과).
+    open_actions가 있으면 같은 호출에서 그중 완료 보고된 항목도 함께 판정한다.
     """
+    system = _system_prompt(source_kind)
+    if open_actions:
+        system += _open_actions_prompt(open_actions)
     response = client.chat(
         messages=[Message(role="user", content=f"Input:\n{text}")],
-        system=_system_prompt(source_kind),
+        system=system,
         tool_schema=ExtractionResult.model_json_schema(),
         tool_name="extract_memory",
     )
@@ -220,11 +263,24 @@ def _extract_chunk(client, text: str, default_source: str, source_kind: str) -> 
     # items가 빈 리스트면 추출할 내용이 없는 것 (정상)
     if response.tool_input is None:
         raise ValueError("LLM did not return tool output for chunk")
-    items = ExtractionResult(**response.tool_input).items
+    result = ExtractionResult(**response.tool_input)
+    items = result.items
     for item in items:
         if not item.source:
             item.source = default_source  # LLM이 source 미반환 시 파일명으로 fallback
-    return _post_process_items(items, source_kind)
+    return _post_process_items(items, source_kind), result.completions
+
+
+def _dedup_completions(completions: List[CompletionReport]) -> List[CompletionReport]:
+    """같은 action_id가 여러 청크에서 보고되면 마지막 보고만 남긴다(청크 순서 = 문서 내
+    등장 순서). 앞부분 요약이 "전체 완료"라고 뭉뚱그려도, 뒷부분 구체 섹션이 "일부만
+    완료"라고 더 정확히 정정하면 그게 이겨야 한다 — fully_complete를 무조건 우선하면
+    이른 시점의 부정확한 낙관적 보고가 나중의 더 정확한 부분완료 보고를 덮어써버린다.
+    """
+    best: dict[int, CompletionReport] = {}
+    for c in completions:
+        best[c.action_id] = c
+    return list(best.values())
 
 
 def _norm_date_key(date_str: str) -> str:
@@ -266,31 +322,34 @@ def extract(
     default_source: str = "",
     source_kind: str = "document",
     on_progress: Optional[Callable[[int, int], None]] = None,
-) -> List[MemoryItem]:
+    open_actions: Optional[List[dict]] = None,
+) -> Union[List[MemoryItem], Tuple[List[MemoryItem], List[CompletionReport]]]:
     """메인 추출 함수.
     1. 텍스트를 청크로 분할
     2. 청크별 LLM 추출 (_extract_chunk)
     3. 결과 합산 후 중복 제거 (_dedup)
     일부 청크 실패 시 PartialExtractionError(부분 결과 포함) raise.
     전체 실패 시 ValueError raise.
+
+    open_actions를 넘기면 이 문서가 그 목록 중 일부를 완료로 보고하는지 같은 LLM
+    호출에서 함께 판정하고(사후 reconciler 대체), 반환값이 (items, completions)
+    튜플이 된다. 넘기지 않으면 기존과 동일하게 items 리스트만 반환한다(하위 호환).
     """
     client = get_llm_client(provider)
     chunks = _split_chunks(text)
     total_chunks = len(chunks)
     _notify_progress(on_progress, 0, total_chunks)
 
-    # 단일 청크면 바로 추출 후 반환 (dedup 불필요)
-    if total_chunks == 1:
-        try:
-            return _extract_chunk(client, chunks[0], default_source, source_kind)
-        finally:
-            _notify_progress(on_progress, 1, total_chunks)
-
     all_items: List[MemoryItem] = []
+    all_completions: List[CompletionReport] = []
     failed_chunks = 0
     for idx, chunk in enumerate(chunks, start=1):
         try:
-            all_items.extend(_extract_chunk(client, chunk, default_source, source_kind))
+            items, completions = _extract_chunk(
+                client, chunk, default_source, source_kind, open_actions
+            )
+            all_items.extend(items)
+            all_completions.extend(completions)
         except ValueError:
             failed_chunks += 1  # 청크 실패 카운트, 나머지 청크는 계속 처리
         finally:
@@ -304,4 +363,6 @@ def extract(
     if failed_chunks > 0:
         raise PartialExtractionError(deduped, failed_chunks, len(chunks))
 
+    if open_actions is not None:
+        return deduped, _dedup_completions(all_completions)
     return deduped

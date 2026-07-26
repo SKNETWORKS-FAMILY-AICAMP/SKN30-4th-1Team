@@ -45,6 +45,7 @@ def _suggestion_response(row: dict) -> dict:
 # suggestion.kind별로 대상 memory가 가져야 하는 category — accept 시 잘못된 대상 방지.
 _KIND_TARGET_CATEGORY = {
     "complete_action": "action",
+    "split_action": "action",
     "supersede": "decision",
 }
 
@@ -58,7 +59,9 @@ def _suggestion_or_404(cursor, project_id: int, suggestion_id: int) -> dict:
     cursor.execute(
         "SELECT s.*, m.category AS memory_category,"
         " m.completed_at AS memory_completed_at,"
-        " m.superseded_by AS memory_superseded_by"
+        " m.superseded_by AS memory_superseded_by,"
+        " m.owner AS memory_owner, m.date AS memory_date, m.source AS memory_source,"
+        " m.doc_id AS memory_doc_id, m.repo_id AS memory_repo_id"
         " FROM memory_suggestions s"
         " JOIN memory m ON m.id = s.memory_id AND m.project_id = s.project_id"
         " WHERE s.id = %s AND s.project_id = %s",
@@ -107,7 +110,9 @@ def list_suggestions(project_id: int, status: str = "pending", kind: str = "comp
 def _apply_accepted_effect(cursor, project_id: int, row: dict) -> None:
     """accept 시 suggestion.kind에 따라 대상 memory에 효과를 반영한다.
 
-    - complete_action: 미완료 action이면 completed_at=NOW().
+    - complete_action: 미완료 action이면 completed_at 설정. evidence.type='document'면
+      그 문서의 날짜를 쓰고(과거 회의록 재처리 시 오늘 날짜로 잘못 찍히는 걸 방지),
+      그 외(PR 등)는 지금까지처럼 NOW().
     - supersede: 아직 살아있는 decision이면 superseded_by=evidence.superseding_memory_id,
       superseded_at=NOW() 설정(계층1 필터가 이때부터 실효).
     지원하지 않는 kind는 명시적으로 거부한다 — 알 수 없는 kind가 기본 분기로 흘러
@@ -156,14 +161,93 @@ def _apply_accepted_effect(cursor, project_id: int, row: dict) -> None:
         return
 
     if kind == "complete_action":
-        # 미완료 action 완료 처리.
-        if not row.get("memory_completed_at"):
-            cursor.execute(
-                "UPDATE memory SET completed_at = NOW(), completion_status = 'completed',"
-                " completion_status_source = 'pr', updated_by = 'user'"
-                " WHERE id = %s AND project_id = %s",
-                (row["memory_id"], project_id),
+        # 미완료 action 완료 처리. 행 잠금 + 최신 상태 재확인: split_action이 먼저 승인돼
+        # 이 action의 content가 이미 바뀌었으면(예: 이 제안은 "인원관리 및 알림" 전체를
+        # 근거로 만들어졌는데, 그 사이 split으로 "알림"만 남았다면) 그 변경을 반영 못 하는
+        # 낡은 근거이므로 적용하지 않는다. evidence에 original_content가 없는(PR 기반 등
+        # 기존 경로) 제안은 이 검사를 건너뛰고 기존 동작을 유지한다.
+        cursor.execute(
+            "SELECT content, completed_at FROM memory"
+            " WHERE id = %s AND project_id = %s FOR UPDATE",
+            (row["memory_id"], project_id),
+        )
+        current = cursor.fetchone()
+        if current is None:
+            raise HTTPException(status_code=404, detail="Target action no longer exists")
+        if current["completed_at"] is None:
+            evidence = _decode_evidence(row["evidence"]) or {}
+            original_content = evidence.get("original_content")
+            if original_content is not None and current["content"] != original_content:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Action content changed since this suggestion was created — stale, please re-derive",
+                )
+            if evidence.get("type") == "document" and evidence.get("date"):
+                cursor.execute(
+                    "UPDATE memory SET completed_at = %s, completion_status = 'completed',"
+                    " completion_status_source = 'document', updated_by = 'user'"
+                    " WHERE id = %s AND project_id = %s",
+                    (evidence["date"], row["memory_id"], project_id),
+                )
+            else:
+                cursor.execute(
+                    "UPDATE memory SET completed_at = NOW(), completion_status = 'completed',"
+                    " completion_status_source = 'pr', updated_by = 'user'"
+                    " WHERE id = %s AND project_id = %s",
+                    (row["memory_id"], project_id),
+                )
+        return
+
+    if kind == "split_action":
+        # 묶음 action의 일부만 완료 보고된 경우: 원본은 남은 부분만 남기고 계속 열어두고,
+        # 완료된 부분은 새 action으로 떼어내 바로 completed 처리한다.
+        evidence = _decode_evidence(row["evidence"]) or {}
+        done_part = evidence.get("done_part")
+        remaining_part = evidence.get("remaining_part")
+        if not done_part or not remaining_part:
+            raise HTTPException(status_code=400, detail="Split evidence missing done_part/remaining_part")
+        # 행 잠금 + 최신 상태 재확인: 이 제안이 만들어진 뒤 다른 제안(같은 memory_id)이
+        # 먼저 승인돼 completed 되거나 content가 바뀌었으면, 이 제안은 그 사이 상황을
+        # 반영 못 하는 낡은 근거이므로 그대로 적용하지 않고 거부한다(정확도 우선).
+        cursor.execute(
+            "SELECT content, completed_at FROM memory"
+            " WHERE id = %s AND project_id = %s FOR UPDATE",
+            (row["memory_id"], project_id),
+        )
+        current = cursor.fetchone()
+        if current is None:
+            raise HTTPException(status_code=404, detail="Target action no longer exists")
+        if current["completed_at"] is not None:
+            return  # 이미 다른 경로로 완료 처리됨 — 분할 대상 없음, 멱등 처리
+        original_content = evidence.get("original_content")
+        if original_content is not None and current["content"] != original_content:
+            raise HTTPException(
+                status_code=409,
+                detail="Action content changed since this suggestion was created — stale, please re-derive",
             )
+        cursor.execute(
+            "UPDATE memory SET content = %s, updated_by = 'user'"
+            " WHERE id = %s AND project_id = %s",
+            (remaining_part, row["memory_id"], project_id),
+        )
+        # complete_action과 동일하게: evidence에 문서 날짜가 있으면 그 날짜를, 없으면(빈
+        # 문자열 등 — 업로드 폼에서 날짜를 안 넣은 경우) NOW()를 쓴다. 빈 문자열을 그대로
+        # DATETIME 컬럼에 넣으면 안 됨.
+        completed_sql = "%s" if evidence.get("date") else "NOW()"
+        completed_params = [evidence["date"]] if evidence.get("date") else []
+        cursor.execute(
+            f"""
+            INSERT INTO memory
+                (project_id, doc_id, repo_id, category, content, owner, date, source,
+                 completed_at, completion_status, completion_status_source, updated_by)
+            VALUES (%s, %s, %s, 'action', %s, %s, %s, %s, {completed_sql}, 'completed', 'document', 'user')
+            """,
+            [
+                project_id, row.get("memory_doc_id"), row.get("memory_repo_id"),
+                done_part, row.get("memory_owner"), row.get("memory_date"), row.get("memory_source"),
+            ] + completed_params,
+        )
+        row["_split_new_memory_id"] = cursor.lastrowid  # 아래 post-commit 벡터 동기화용
         return
 
     raise HTTPException(status_code=400, detail="Unsupported suggestion kind")
@@ -227,6 +311,26 @@ def _resolve_suggestion(project_id: int, suggestion_id: int, status: str) -> dic
         # (삭제 경로들과 동일한 best-effort 헬퍼 재사용, 실패해도 accept 결과는 유지)
         from ..graph import refresh_project_memory_after_delete
         refresh_project_memory_after_delete(project_id)
+
+    # split_action accept가 확정되면 원본(남은 부분)·신규(완료된 부분) 두 행 모두 벡터를
+    # 최신 상태로 맞춘다 — 그러지 않으면 원본 벡터에 방금 떼어낸 완료 내용이 그대로 남는다.
+    if status == "accepted" and row["kind"] == "split_action" and row.get("_split_new_memory_id"):
+        try:
+            from ..retriever.memory_vector import upsert_memory_vectors
+            conn2 = get_connection()
+            try:
+                with conn2.cursor() as cursor2:
+                    cursor2.execute(
+                        "SELECT * FROM memory WHERE id IN (%s, %s) AND project_id = %s",
+                        (row["memory_id"], row["_split_new_memory_id"], project_id),
+                    )
+                    upsert_memory_vectors(cursor2.fetchall())
+            finally:
+                conn2.close()
+        except Exception:
+            logger.warning(
+                "split_action 벡터 동기화 실패 memory_id=%s", row["memory_id"], exc_info=True
+            )
 
     return _suggestion_response(updated)
 

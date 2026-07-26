@@ -1,9 +1,10 @@
 # 추출된 MemoryItem 목록을 MySQL(구조화)과 ChromaDB(벡터) 두 저장소에 적재하는 모듈.
 # MySQL은 카테고리별 검색, ChromaDB는 의미 유사도 검색에 사용.
+import json
 import logging
 import re
 from typing import List, Optional
-from .models import MemoryItem
+from .models import MemoryItem, CompletionReport
 from ..db.mysql import get_connection
 from ..db.chroma import get_collection
 from ..retriever.memory_vector import upsert_memory_vectors
@@ -168,6 +169,7 @@ def ingest(
     repo_id: Optional[int] = None,
     source_metadata: Optional[dict] = None,
     processing_token: Optional[str] = None,
+    completions: Optional[List[CompletionReport]] = None,
 ):
     """추출 결과를 두 DB에 순서대로 저장.
     1단계: MySQL — items 각각을 memory + memory_sources 테이블에 INSERT (같은 트랜잭션)
@@ -328,3 +330,77 @@ def ingest(
                 "supersede_detection_failed",
                 extra={"project_id": project_id, "code": "SUPERSEDE_DETECTION_FAILED"},
             )
+
+    # 문서 기반 완료 판정(extract()가 open_actions를 받아 같은 호출에서 함께 판정한 결과):
+    # 사후 reconciler 없이도 이 문서가 기존 열린 action의 진행 상황을 보고했으면 여기서
+    # pending 제안으로만 남긴다(자동 반영 아님). fully_complete면 완료 제안, 아니면(묶음
+    # action의 일부만 확인) 완료된 부분만 떼어내는 분할 제안 — 둘 다 사람 승인이 있어야
+    # 실제 반영되고, 완료 시점은 이 문서 날짜를 쓴다.
+    if completions:
+        conn = get_connection()
+        try:
+            # 항목별로 개별 커밋 — completions 하나(예: LLM이 목록에 없는 action_id를
+            # 잘못 반환해 FK 위반)가 실패해도 같은 문서의 다른 정상 제안까지 같이
+            # 롤백되지 않게 격리한다.
+            for c in completions:
+                try:
+                    with conn.cursor() as cursor:
+                        # 제안 생성 시점의 실제 content를 같이 저장 — 승인 시점에 그 사이
+                        # 다른 제안이 먼저 적용돼 content가 바뀌었는지 대조하기 위함
+                        # (complete_action/split_action 둘 다 — 낡은 제안이 최신 content를
+                        # 잘못 덮어쓰는 것 방지).
+                        cursor.execute(
+                            "SELECT content FROM memory WHERE id = %s AND project_id = %s",
+                            (c.action_id, project_id),
+                        )
+                        current = cursor.fetchone()
+                        original_content = current["content"] if current else None
+
+                        if c.fully_complete:
+                            kind = "complete_action"
+                            evidence = {
+                                "type": "document", "doc_id": doc_id,
+                                "source": source, "date": date, "quote": c.evidence,
+                                "original_content": original_content,
+                            }
+                            rationale = f"'{source}' 문서가 완료로 보고: {c.evidence}"
+                        else:
+                            if not c.done_part or not c.remaining_part:
+                                continue  # 부분 완료인데 분할 근거가 없으면 애매하니 건너뜀
+                            kind = "split_action"
+                            evidence = {
+                                "type": "document", "doc_id": doc_id,
+                                "source": source, "date": date, "quote": c.evidence,
+                                "done_part": c.done_part, "remaining_part": c.remaining_part,
+                                "original_content": original_content,
+                            }
+                            rationale = (
+                                f"'{source}' 문서가 일부만 완료로 보고: {c.evidence}"
+                                f" (완료: {c.done_part} / 남음: {c.remaining_part})"
+                            )
+                        cursor.execute(
+                            """
+                            INSERT INTO memory_suggestions
+                                (project_id, memory_id, kind, evidence, rationale, confidence, status)
+                            SELECT %s, %s, %s, %s, %s, 'high', 'pending'
+                            FROM DUAL
+                            WHERE NOT EXISTS (
+                                SELECT 1 FROM memory_suggestions
+                                WHERE memory_id = %s AND kind = %s AND status = 'pending'
+                            )
+                            """,
+                            (
+                                project_id, c.action_id, kind,
+                                json.dumps(evidence, ensure_ascii=False), rationale,
+                                c.action_id, kind,
+                            ),
+                        )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    logger.warning(
+                        "문서 기반 완료 제안 저장 실패(이 action만 건너뜀) action_id=%s project_id=%s",
+                        c.action_id, project_id, exc_info=True,
+                    )
+        finally:
+            conn.close()

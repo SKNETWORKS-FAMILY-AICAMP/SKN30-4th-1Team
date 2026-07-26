@@ -15,6 +15,7 @@ from ..document_content import (
 )
 from ..pipeline.extractor import extract
 from ..pipeline.ingestor import ingest
+from ..reconciler.pr_actions import _fetch_open_actions
 from ..retriever.memory_vector import delete_memory_vector, upsert_memory_vector
 from ..storage import delete_file, safe_upload_name, write_reserved_file
 from ..quota import (
@@ -186,12 +187,19 @@ def _process_upload_locked(
 ):
     """실제 업로드 처리 본문. 호출자는 동시 실행을 제한한다."""
     try:
+        open_actions = _fetch_open_actions(project_id)
+    except Exception:
+        logger.warning("open action 목록 조회 실패, 완료 판정 없이 진행 doc_id=%s", doc_id, exc_info=True)
+        open_actions = []
+
+    try:
         if processing_token is not None and not processing_owned(doc_id, processing_token, renew=True):
             return
-        items = extract(
+        items, completions = extract(
             content,
             default_source=filename,
             on_progress=lambda done, total: _set_doc_progress(doc_id, done, total, processing_token),
+            open_actions=open_actions,
         )
         if processing_token is not None and not processing_owned(doc_id, processing_token, renew=True):
             return
@@ -218,6 +226,7 @@ def _process_upload_locked(
                 "source_path": filename,
             },
             processing_token=processing_token,
+            completions=completions,
         )
     except asyncio.CancelledError:
         compensate_cancelled_document(doc_id)

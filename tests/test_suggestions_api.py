@@ -37,6 +37,28 @@ def _suggestion_row(status="pending", completed_at=None):
     }
 
 
+def _split_action_row(status="pending"):
+    evidence = (
+        '{"type":"document","doc_id":5,"source":"2026-04-13.md","date":"2026-04-13",'
+        '"quote":"인원관리는 완료, 알림은 진행중","done_part":"인원 관리 로직 완료",'
+        '"remaining_part":"알림 로직 구현","original_content":"인원 관리 및 알림 로직 구현"}'
+    )
+    return {
+        "id": 9,
+        "project_id": 1,
+        "memory_id": 10,
+        "kind": "split_action",
+        "evidence": evidence,
+        "rationale": "'2026-04-13.md' 문서가 일부만 완료로 보고",
+        "confidence": "high",
+        "status": status,
+        "created_at": "2026-07-02 10:00:00",
+        "resolved_at": None,
+        "memory_category": "action",
+        "memory_completed_at": None,
+    }
+
+
 def _supersede_row(status="pending", superseded_by=None, memory_category="decision"):
     return {
         "id": 8,
@@ -324,7 +346,9 @@ def test_accept_suggestion_completes_open_action_and_resolves_suggestion():
     """POST accept — 미완료 action은 completed_at=NOW(), suggestion은 accepted."""
     row = _suggestion_row(completed_at=None)
     updated = {**row, "status": "accepted", "resolved_at": "2026-07-02 11:00:00"}
-    conn, cur = _make_conn(fetchone=[row, updated])
+    # 두 번째 fetchone: _apply_accepted_effect의 SELECT ... FOR UPDATE(최신 상태 재확인)용.
+    locked = {"content": "원본 action 내용", "completed_at": None}
+    conn, cur = _make_conn(fetchone=[row, locked, updated])
     with patch("backend.api.suggestion.require_project_access"), \
          patch("backend.api.suggestion.get_connection", return_value=conn):
         resp = _client.post("/api/v1/projects/1/suggestions/7/accept")
@@ -342,7 +366,9 @@ def test_accept_completed_action_only_resolves_suggestion():
     """POST accept — 이미 완료된 action이면 memory는 건드리지 않는다."""
     row = _suggestion_row(completed_at="2026-07-01 09:00:00")
     updated = {**row, "status": "accepted", "resolved_at": "2026-07-02 11:00:00"}
-    conn, cur = _make_conn(fetchone=[row, updated])
+    # SELECT ... FOR UPDATE 재확인도 이미 완료 상태를 봐야 멱등 반환 경로를 탄다.
+    locked = {"content": "원본 action 내용", "completed_at": "2026-07-01 09:00:00"}
+    conn, cur = _make_conn(fetchone=[row, locked, updated])
     with patch("backend.api.suggestion.require_project_access"), \
          patch("backend.api.suggestion.get_connection", return_value=conn):
         resp = _client.post("/api/v1/projects/1/suggestions/7/accept")
@@ -350,6 +376,56 @@ def test_accept_completed_action_only_resolves_suggestion():
     assert resp.status_code == 200
     sql_calls = [call.args[0] for call in cur.execute.call_args_list]
     assert not any("UPDATE memory SET completed_at = NOW()" in sql for sql in sql_calls)
+
+
+def test_accept_split_action_rewrites_original_and_creates_completed_row():
+    """POST accept(split_action) — 원본은 remaining_part만 남기고 열어두고, done_part는
+    새 행으로 분리해 그 문서 날짜로 즉시 completed 처리한다."""
+    row = _split_action_row()
+    updated = {**row, "status": "accepted", "resolved_at": "2026-07-02 11:00:00"}
+    locked = {"content": "인원 관리 및 알림 로직 구현", "completed_at": None}  # original_content와 일치 = 안 낡음
+    conn, cur = _make_conn(fetchone=[row, locked, updated])
+    cur.lastrowid = 55  # 새로 분리되는 행의 id
+    with patch("backend.api.suggestion.require_project_access"), \
+         patch("backend.api.suggestion.get_connection", return_value=conn), \
+         patch("backend.retriever.memory_vector.upsert_memory_vectors") as mock_upsert:
+        resp = _client.post("/api/v1/projects/1/suggestions/7/accept")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "accepted"
+    sql_calls = [call.args[0] for call in cur.execute.call_args_list]
+
+    rewrite_sql = next(sql for sql in sql_calls if sql.startswith("UPDATE memory SET content"))
+    rewrite_params = next(
+        c.args[1] for c in cur.execute.call_args_list if c.args[0] is rewrite_sql
+    )
+    assert rewrite_params[0] == "알림 로직 구현"  # remaining_part만 남음
+
+    insert_sql = next(sql for sql in sql_calls if "INSERT INTO memory" in sql and "category" in sql)
+    insert_params = next(
+        c.args[1] for c in cur.execute.call_args_list if c.args[0] is insert_sql
+    )
+    assert "인원 관리 로직 완료" in insert_params  # done_part로 새 행 생성
+    assert "2026-04-13" in insert_params  # 문서 날짜로 completed_at
+
+    mock_upsert.assert_called_once()  # 원본·신규 두 행 벡터 재동기화
+
+
+def test_accept_split_action_rejects_stale_content():
+    """POST accept(split_action) — 그 사이 content가 바뀌었으면(다른 제안이 먼저 승인됨
+    등) 409로 거부하고 memory를 건드리지 않는다."""
+    row = _split_action_row()
+    locked = {"content": "이미 바뀐 내용", "completed_at": None}  # original_content와 불일치
+    conn, cur = _make_conn(fetchone=[row, locked])
+    with patch("backend.api.suggestion.require_project_access"), \
+         patch("backend.api.suggestion.get_connection", return_value=conn):
+        resp = _client.post("/api/v1/projects/1/suggestions/7/accept")
+
+    assert resp.status_code == 409
+    assert conn.rollback.called
+    sql_calls = [call.args[0] for call in cur.execute.call_args_list]
+    assert not any(sql.startswith("UPDATE memory SET content") for sql in sql_calls)
+    assert not any("INSERT INTO memory" in sql and "category" in sql for sql in sql_calls)
 
 
 def test_reject_suggestion_only_resolves_suggestion():
@@ -387,7 +463,8 @@ def test_resolve_suggestion_allows_member():
     """R-003: member는 accept/reject가 허용된다 (viewer 거부와 대칭 확인)."""
     row = _suggestion_row(completed_at=None)
     updated = {**row, "status": "accepted", "resolved_at": "2026-07-02 11:00:00"}
-    conn, _ = _make_conn(fetchone=[row, updated])
+    locked = {"content": "원본 action 내용", "completed_at": None}
+    conn, _ = _make_conn(fetchone=[row, locked, updated])
     with patch("backend.api.auth.get_current_user_id", return_value=99), \
          patch("backend.api.auth.get_project_role", return_value="member"), \
          patch("backend.api.suggestion.get_connection", return_value=conn):
