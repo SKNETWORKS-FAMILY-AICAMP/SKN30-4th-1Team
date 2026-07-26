@@ -55,11 +55,6 @@ def _dedupe_rows(rows: list[dict]) -> list[dict]:
     return result
 
 
-def _row_evidence(row: dict) -> str:
-    line = qa_engine._format_mysql_row(row)
-    if row.get("reason"):
-        line += f" 이유: {row['reason']}"
-    return line
 
 
 def _compact_retrieval_debug(debug: dict) -> dict:
@@ -220,7 +215,7 @@ def query_structured_memory(
         )
     ranked = ranked[:limit]
     if ranked:
-        content = "\n".join(_row_evidence(row) for row in ranked)
+        content = "\n".join(qa_engine._format_mysql_row(row) for row in ranked)
     else:
         content = (
             "구조화 조건으로 일치하는 행을 찾지 못했습니다. 이것만으로 기록 부재를 "

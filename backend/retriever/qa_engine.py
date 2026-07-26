@@ -375,7 +375,10 @@ def _row_line_body(r: Dict) -> str:
             meta.append(f"상태 근거: {r['completion_status_source']}")
 
     meta_text = f" ({', '.join(meta)})" if meta else ""
-    return f"{r['content']}{meta_text} (출처: {_row_source_label(r)})"
+    line = f"{r['content']}{meta_text} (출처: {_row_source_label(r)})"
+    if r.get("reason"):
+        line += f" 이유: {r['reason']}"
+    return line
 
 
 def _format_mysql_row(r: Dict) -> str:
