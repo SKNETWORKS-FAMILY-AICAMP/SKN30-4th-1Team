@@ -33,6 +33,16 @@ MYSQL_TOP_N = 12    # 구조화 기록 상한 (category 미매칭 시) — 초�
 QA_MYSQL_ROWS_LIMIT = max(1, int(os.getenv("QA_MYSQL_ROWS_LIMIT", "60")))
 MYSQL_SUPPLEMENT = 5  # category 매칭 시 타 카테고리에서 BM25 유관 상위 보충 개수
 BM25_WEIGHT = 0.5   # 구조화 기록(MySQL) 융합 가중치 (BM25 : memory vector = 0.5 : 0.5)
+# ponytail: 쿼리별 최고 점수 대비 이 비율 미만인 행은 "약한 토큰 중복"으로 보고 랭크에서 제외.
+# 진단 사례(Flutter 질문) 재현으로 0.5 확정 — 실제 무관 행(4.4/10.3=0.43)은 컷하고 진짜 2위
+# 관련 행(6.1/10.3=0.59)은 살아남는 지점. 다른 코퍼스로 재측정해 필요하면 조정할 것.
+BM25_RELEVANCE_RATIO = 0.5
+# ponytail: memory 벡터(코사인 거리, 작을수록 유사) 축도 BM25와 같은 문제 — Chroma가
+# 반환한 최근접 n개를 무조건 다 랭크에 넣어 threshold가 전혀 없었음. 쿼리별 최근접
+# 거리 대비 이 마진 밖의 이웃은 제외한다. 실측(Flutter 질문, context_precision 0.36
+# 베이스라인 재현 사례)으로 잡은 값 — 코퍼스가 작아 관련/무관 거리 구간이 겹쳐
+# 완벽한 컷은 어려움. 26문항 재측정 결과 보고 조정할 것.
+VECTOR_DISTANCE_MARGIN = 0.15
 _RRF_K = 60         # RRF 표준 상수 (score = w / (k + rank))
 # 원문 청크 융합 가중치 (로드맵 권고 0.4/0.4/0.2). 축별로 정규화해
 # 멀티쿼리 개수와 무관하게 축 총 가중치가 고정된다.
@@ -253,7 +263,12 @@ def _generate_multi_queries(question: str) -> List[str]:
 
 
 def _memory_vector_rank_lists(project_id: int, queries: List[str], rows: List[Dict]) -> tuple[List[List[int]], List[Dict]]:
-    """ChromaDB memory 벡터 검색 결과를 rows 인덱스 rank list로 변환한다."""
+    """ChromaDB memory 벡터 검색 결과를 rows 인덱스 rank list로 변환한다.
+
+    쿼리별 최근접 거리 대비 VECTOR_DISTANCE_MARGIN 밖의 이웃은 제외한다 — 작은
+    코퍼스에서는 같은 회의록 소속이라는 이유만으로도 코사인 거리가 가까워, 무제한
+    top-n이면 무관한 행까지 전부 랭크에 실려 RRF 융합 점수를 받아간다.
+    """
     if not rows:
         return [], []
 
@@ -274,17 +289,21 @@ def _memory_vector_rank_lists(project_id: int, queries: List[str], rows: List[Di
         result.get("ids") or [],
         result.get("distances") or [[] for _ in queries],
     ):
+        min_dist = min(distances, default=None)
         ranks: List[int] = []
         for rank, memory_id in enumerate(ids):
             idx = id_to_idx.get(memory_id)
             if idx is None or idx in ranks:
+                continue
+            dist = distances[rank] if rank < len(distances) else None
+            if min_dist is not None and dist is not None and dist > min_dist + VECTOR_DISTANCE_MARGIN:
                 continue
             ranks.append(idx)
             hits.append({
                 "query": query,
                 "memory_id": rows[idx]["id"],
                 "rank": rank + 1,
-                "distance": distances[rank] if rank < len(distances) else None,
+                "distance": dist,
                 "content": rows[idx].get("content"),
             })
         if ranks:
@@ -293,7 +312,13 @@ def _memory_vector_rank_lists(project_id: int, queries: List[str], rows: List[Di
 
 
 def _rank_mysql_rows(project_id: int, rows: List[Dict], queries: List[str], limit: int) -> tuple[List[Dict], List[Dict]]:
-    """BM25와 memory vector rank를 RRF로 합쳐 MySQL memory rows를 선별한다."""
+    """BM25와 memory vector rank를 RRF로 합쳐 MySQL memory rows를 선별한다.
+
+    관련도 threshold: BM25 랭크는 쿼리별 최고점 대비 BM25_RELEVANCE_RATIO 미만인 행을 제외
+    (무관한 행이 약한 토큰 중복만으로 순위를 차지해 RRF 점수를 받아가는 것을 방지), 최종
+    선정도 fused score>0인 행으로만 제한한다 — 이전엔 진짜 관련 행이 부족해도 limit개를
+    억지로 채워 무관한 행이 컨텍스트에 섞였다(context_precision 저하 원인).
+    """
     if not rows:
         return [], []
 
@@ -302,8 +327,11 @@ def _rank_mysql_rows(project_id: int, rows: List[Dict], queries: List[str], limi
     texts = [row.get("content") or "" for row in rows]
     for query in queries:
         scores = _bm25_scores(query, texts)
-        if any(score > 0 for score in scores):
-            rank_lists.append(sorted(range(len(rows)), key=lambda i: -scores[i]))
+        top_score = max(scores, default=0.0)
+        floor = top_score * BM25_RELEVANCE_RATIO
+        ranked = [i for i in sorted(range(len(rows)), key=lambda i: -scores[i]) if scores[i] >= floor and scores[i] > 0]
+        if ranked:
+            rank_lists.append(ranked)
             weights.append(BM25_WEIGHT)
 
     vector_rank_lists, vector_hits = _memory_vector_rank_lists(project_id, queries, rows)
@@ -314,7 +342,8 @@ def _rank_mysql_rows(project_id: int, rows: List[Dict], queries: List[str], limi
         return rows[:limit], vector_hits
 
     fused = _rrf_fuse(rank_lists, weights, len(rows))
-    top = sorted(range(len(rows)), key=lambda i: -fused[i])[:limit]
+    relevant = [i for i in range(len(rows)) if fused[i] > 0]
+    top = sorted(relevant, key=lambda i: -fused[i])[:limit]
     return [rows[i] for i in top], vector_hits
 
 

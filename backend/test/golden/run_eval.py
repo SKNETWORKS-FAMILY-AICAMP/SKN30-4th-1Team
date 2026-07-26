@@ -151,10 +151,10 @@ def normalize_tag(tag: str) -> str:
 def load_golden(golden_dir: Path = HERE) -> list[dict]:
     """QA 60문항 + 라우팅 라벨 병합. 카운트 계약(코퍼스당 비환각 26·환각 4)을 단언."""
     routing = {(r["corpus"], r["id"]): r
-               for r in json.loads((golden_dir / "routing_expected.json").read_text())}
+               for r in json.loads((golden_dir / "routing_expected.json").read_text(encoding="utf-8"))}
     questions: list[dict] = []
     for corpus, spec in CORPORA.items():
-        items = json.loads((golden_dir / spec["qa"]).read_text())
+        items = json.loads((golden_dir / spec["qa"]).read_text(encoding="utf-8"))
         assert len(items) == 30, f"{corpus}: 30문항이어야 함, {len(items)}"
         for item in items:
             label = routing.get((corpus, item["id"]))
@@ -179,7 +179,7 @@ def load_golden(golden_dir: Path = HERE) -> list[dict]:
 
 
 def load_pairs(golden_dir: Path = HERE) -> list[dict]:
-    return json.loads((golden_dir / "golden_supersede_pairs.json").read_text())["pairs"]
+    return json.loads((golden_dir / "golden_supersede_pairs.json").read_text(encoding="utf-8"))["pairs"]
 
 
 # ── pair 매칭·상태 검사 (결정론 — 단위 테스트 대상) ──────────────────────────
