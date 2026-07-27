@@ -337,7 +337,21 @@ prefix). CORS `OPTIONS` 프리플라이트도 통과.
 ```
 
 `detail`은 **문자열**(사람이 읽는 사유), `code`는 응답 **최상위**의 기계 판독용 식별자입니다.
-`code`는 `unsupported_format` / `missing_dependency` / `corrupt_file` / `empty_document` / `no_text_layer` 중 하나입니다.
+`code`는 아래 중 하나입니다.
+
+| `code` | 의미 | 사용자 조치 |
+|--------|------|-------------|
+| `unsupported_format` | 등록되지 않은 확장자 | 지원 포맷으로 변환 후 재업로드 |
+| `missing_dependency` | 서버에 변환 라이브러리 미설치 | 운영자 문의 |
+| `corrupt_file` | 파일을 열 수 없음, 암호 보호 PDF | 원본 확인 / 암호 해제 |
+| `empty_document` | 추출된 텍스트가 0건 | 내용이 있는 문서인지 확인 |
+| `no_text_layer` | PDF 전 페이지에 텍스트 레이어 없음 | 스캔본 대신 원본 PDF 사용 |
+| `file_too_large` | 구조는 정상이나 안전 처리 한도 초과 | 문서를 나누거나 내용을 줄여 재업로드 |
+
+> `file_too_large`는 `corrupt_file`과 **구분해서 표시**해야 합니다. 파일이 손상된 것이
+> 아니라 크기·압축률 한도를 넘은 것이므로, "손상"으로 안내하면 사용자가 복구·재다운로드
+> 같은 불필요한 조치를 하게 됩니다. HTTP 상태는 다른 변환 실패와 동일하게 `400`입니다
+> (`413`은 업로드 원본이 10 MB를 넘는 경우 전용).
 
 > **`detail`을 객체로 바꾸지 마세요.** 데스크톱 클라이언트(`desktop/src/paimApi.ts`)는
 > `detail`이 문자열이 아니면 사유를 버리고 `"PaiM API 요청 실패"`만 표시합니다.

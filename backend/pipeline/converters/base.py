@@ -24,6 +24,9 @@ class ErrorCode:
     CORRUPT_FILE = "corrupt_file"
     EMPTY_DOCUMENT = "empty_document"
     NO_TEXT_LAYER = "no_text_layer"
+    # 구조는 정상이지만 안전 처리 한도를 넘은 경우. CORRUPT_FILE과 반드시 구분한다 —
+    # "손상"이라고 알리면 사용자가 복구·재다운로드 같은 엉뚱한 조치를 하게 된다.
+    FILE_TOO_LARGE = "file_too_large"
 
 
 class WarningCode:

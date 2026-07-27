@@ -202,9 +202,20 @@ ChromaDB metadata는 `str`/`int`/`float`/`bool`만 허용한다. `None`은 `-1`(
 
 - **압축 폭탄 방어**: DOCX는 ZIP이라 업로드 크기 제한(10 MB)이 *압축된* 바이트에만 걸린다.
   반복 텍스트만으로도 압축비 250:1이 나와 10 MB가 2.5 GB로 전개될 수 있다. 파싱 전에
-  ZIP 중앙 디렉터리를 검사해 아래 한도를 넘으면 `corrupt_file`로 거절한다.
+  ZIP 중앙 디렉터리를 검사해 아래 한도를 넘으면 **`file_too_large`** 로 거절한다.
   정상 DOCX의 압축비는 보통 10:1 미만이라 실사용을 방해하지 않는다.
   - 전체 전개 크기 200 MB / 엔트리 1개 100 MB / 전체 압축비 120:1
+  - 한도 초과는 `corrupt_file`이 **아니다** — 구조는 멀쩡한 파일이므로 "손상"으로
+    안내하면 사용자가 복구·재다운로드 같은 엉뚱한 조치를 하게 된다.
+  - ZIP 중앙 디렉터리 자체를 읽지 못하는 경우(`BadZipFile`, 지원 범위를 넘는 extraction
+    version, 잘못된 UTF-8 파일명 등)는 `corrupt_file`로 정규화한다. 가드를 넣기 전에는
+    `docx.Document()` 주변의 넓은 예외 처리가 흡수하던 입력이라, 여기서 잡지 않으면
+    400이어야 할 응답이 500으로 누출된다. 단 `MemoryError` 같은 자원 고갈 예외는
+    잡지 않는다 — 입력 오류가 아니라 서버 장애이므로 숨기면 안 된다.
+- **중첩 표**: 셀 안의 표까지 재귀적으로 평탄화한다(최대 5단). `cell.text`는 셀의
+  **직계 문단만** 이어 붙여 중첩 표가 통째로 사라지므로, 셀 내부를 XML 순서대로 순회해
+  `w:p`와 `w:tbl`을 모두 처리한다. 중첩 표의 행은 ` ; `로, 바깥 셀은 ` | `로 구분한다.
+  깊이 상한을 넘어 버리는 내용이 있으면 `unsupported_element` 경고를 남긴다.
 - 페이지 번호 없음 (`page = None`, `page_count = None`)
 - 이미지·차트·도형은 텍스트가 없어 유실 → `unsupported_element` 경고로 개수를 알린다
 - 표는 행 단위 평탄화 → `table_flattened` 경고
@@ -248,7 +259,8 @@ ChromaDB metadata는 `str`/`int`/`float`/`bool`만 허용한다. `None`은 `-1`(
 |------|-----------|-------------|
 | `unsupported_format` | 등록되지 않은 확장자 | 지원 포맷으로 변환 후 재업로드 |
 | `missing_dependency` | python-docx / pypdf 미설치 | 서버 의존성 설치 (운영 이슈) |
-| `corrupt_file` | 파일을 열 수 없음, 암호 보호 PDF, **DOCX 압축 해제 크기 초과** | 원본 확인 / 암호 해제 |
+| `corrupt_file` | 파일을 열 수 없음, 암호 보호 PDF, ZIP 중앙 디렉터리 손상 | 원본 확인 / 암호 해제 |
+| `file_too_large` | 구조는 정상이나 DOCX 압축 해제 크기·압축률 한도 초과 | 문서를 나누거나 내용을 줄여 재업로드 |
 | `empty_document` | 추출된 텍스트가 0건 | 내용이 있는 문서인지 확인 |
 | `no_text_layer` | PDF 전 페이지에 텍스트 레이어 없음 | 스캔본 대신 원본 PDF 사용 |
 
@@ -276,7 +288,7 @@ ChromaDB metadata는 `str`/`int`/`float`/`bool`만 허용한다. `None`은 `-1`(
 | `page_no_text` | 해당 페이지에 텍스트 레이어 없음(내용 누락) |
 | `page_extract_failed` | 해당 페이지 파싱 실패 |
 | `table_flattened` | 표를 행 단위로 평탄화(열 구조 유실) |
-| `unsupported_element` | 이미지·차트·도형이 텍스트로 변환되지 않음 |
+| `unsupported_element` | 이미지·차트·도형·텍스트 상자가 텍스트로 변환되지 않음, 또는 중첩 표 깊이 상한 초과 |
 | `repeated_line_dropped` | 머리말·꼬리말로 판단해 제거 |
 | `duplicate_block_dropped` | 중복 문단 제거 |
 | `decode_fallback` | UTF-8 아닌 인코딩으로 읽음(글자 깨짐 가능) |

@@ -514,10 +514,14 @@
           그 외 → <code>document</code>
         </div>
         <div class="res-label"><span class="s201">201</span> Created</div>
-        <pre><code>{ "doc_id": 12, "status": "processing" }</code></pre>
+        <pre><code>{ "doc_id": 12, "status": "processing", "format": "pdf", "blocks": 87, "pages": 12,
+  "warnings": [ { "code": "table_flattened", "message": "표를 행 단위 텍스트로 변환했습니다. 열 구조는 보존되지 않습니다.", "location": "table 2" } ] }</code></pre>
+        <div class="res-label">format=docx|pdf|text · blocks=추출 문단·표행 수 · pages=PDF 페이지 수(그 외 null) · warnings=변환 경고(없으면 [])</div>
         <div class="res-label"><span class="s400">400</span> Bad Request</div>
         <pre><code>{ "detail": "지원하지 않는 파일 형식입니다. (.docx / .markdown / .md / .pdf / .txt)" }
-{ "detail": "PDF에서 텍스트를 추출하지 못했습니다. 스캔 이미지 PDF는 지원하지 않습니다.", "code": "no_text_layer" }</code></pre>
+{ "detail": "PDF에서 텍스트를 추출하지 못했습니다. 스캔 이미지 PDF는 지원하지 않습니다.", "code": "no_text_layer" }
+{ "detail": "DOCX의 압축 해제 크기가 안전한 처리 한도를 초과했습니다. 문서를 나누거나 내용을 줄여서 다시 올려주세요.", "code": "file_too_large" }</code></pre>
+        <div class="res-label">code: unsupported_format | missing_dependency | corrupt_file | empty_document | no_text_layer | file_too_large</div>
         <div class="res-label"><span class="s413">413</span> Content Too Large</div>
         <pre><code>{ "detail": "파일 크기는 10 MB를 초과할 수 없습니다." }</code></pre>
         <div class="res-label"><span class="s403">403</span> Forbidden</div>

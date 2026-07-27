@@ -312,84 +312,181 @@ def test_chunk_text_covers_document_content():
 
 # ─── 리뷰 지적 회귀 (PR-001-R001~R006) ──────────────────────────────────────
 
-def test_docx_rejects_zip_bomb_before_parsing():
-    """R001: 압축 크기는 작지만 전개 크기가 큰 DOCX는 파싱 전에 거절한다."""
-    import zipfile
+def _ordinary_docx() -> bytes:
+    """가드 검증용 **온전한** 소형 DOCX. 대형 파일을 만들 필요가 없다."""
+    return _make_docx(lambda d: d.add_paragraph("평범한 회의록 본문입니다."))
 
-    paragraph = "<w:p><w:r><w:t>" + "A" * 200 + "</w:t></w:r></w:p>"
-    xml = (
-        '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org'
-        '/wordprocessingml/2006/main"><w:body>' + paragraph * 200000 + "</w:body></w:document>"
-    )
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-        archive.writestr("word/document.xml", xml.encode())
-    bomb = buffer.getvalue()
 
-    # 업로드 크기 제한(10MB)은 통과하지만 전개하면 수십 MB다.
-    assert len(bomb) < 10 * 1024 * 1024
+def test_docx_rejects_oversized_archive_before_parsing(monkeypatch):
+    """R001: 한도를 넘는 DOCX는 python-docx에 넘기기 전에 거절한다.
+
+    R2B01: 이전 테스트는 `[Content_Types].xml`이 없는 무효 ZIP을 써서, 가드를
+    통째로 지워도 python-docx가 같은 오류를 내며 통과했다(False Green).
+    온전한 DOCX + 한도 monkeypatch로 **가드만** 발동시켜 그 함정을 없앤다.
+    """
+    import backend.pipeline.converters.docx_converter as module
+
+    data = _ordinary_docx()
+    # 정상 파일이 한도에 걸리도록 압축비 상한만 1로 낮춘다.
+    monkeypatch.setattr(module, "_MAX_COMPRESSION_RATIO", 1)
+
+    # 가드가 실제로 파싱을 막았는지 확인하기 위해 파서 호출을 감시한다.
+    called = []
+    real_document = module.docx.Document if hasattr(module, "docx") else None
 
     with pytest.raises(ConversionError) as exc:
-        convert("폭탄.docx", bomb)
-    assert exc.value.code == ErrorCode.CORRUPT_FILE
+        convert("보통.docx", data)
+
+    # 손상이 아니라 "한도 초과"로 분류돼야 한다 (R2B03).
+    assert exc.value.code == ErrorCode.FILE_TOO_LARGE
+    assert "한도" in exc.value.message
+    assert real_document is None or not called
 
 
-def test_query_attachment_also_rejects_zip_bomb():
-    """R001: 질의 첨부도 같은 변환 경로를 쓰므로 동일하게 막혀야 한다."""
-    import base64
+def test_guard_runs_before_python_docx_parses(monkeypatch):
+    """R2B01: 가드가 파서보다 먼저 동작함을 spy로 증명한다."""
+    import docx as docx_module
+
+    import backend.pipeline.converters.docx_converter as module
+
+    data = _ordinary_docx()
+    monkeypatch.setattr(module, "_MAX_COMPRESSION_RATIO", 1)
+
+    parsed = []
+    original = docx_module.Document
+    monkeypatch.setattr(
+        docx_module, "Document",
+        lambda *a, **k: (parsed.append(1), original(*a, **k))[1],
+    )
+
+    with pytest.raises(ConversionError):
+        convert("보통.docx", data)
+    assert parsed == [], "가드가 막았어야 하는데 python-docx가 호출됐다"
+
+
+def test_malformed_zip_directory_does_not_leak_500():
+    """R2B02: 중앙 디렉터리가 깨진 ZIP도 ConversionError로 정규화된다.
+
+    가드 추가 전에는 docx.Document() 주변의 넓은 except가 흡수하던 입력이라,
+    여기서 잡지 않으면 400이어야 할 응답이 500으로 누출된다.
+    """
     import zipfile
+
+    data = bytearray(_ordinary_docx())
+    # 중앙 디렉터리 시그니처(PK\x01\x02) 뒤의 extraction version을 비정상 값으로 변조.
+    index = data.rfind(b"PK\x01\x02")
+    assert index != -1
+    data[index + 6] = 0xFF  # version needed to extract
+
+    with pytest.raises(ConversionError) as exc:
+        convert("변조.docx", bytes(data))
+    assert exc.value.code in (ErrorCode.CORRUPT_FILE, ErrorCode.FILE_TOO_LARGE)
+
+
+def test_upload_rejects_oversized_archive_with_400(monkeypatch):
+    """R2B02: 업로드 경로에서 500이 아니라 400 + 코드가 나와야 한다."""
     from unittest.mock import patch
 
     from fastapi.testclient import TestClient
 
+    import backend.pipeline.converters.docx_converter as module
     from backend.main import app
 
-    xml = (
-        '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org'
-        '/wordprocessingml/2006/main"><w:body>'
-        + "<w:p><w:r><w:t>" + "A" * 200 + "</w:t></w:r></w:p>" * 200000
-        + "</w:body></w:document>"
-    )
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-        archive.writestr("word/document.xml", xml.encode())
+    monkeypatch.setattr(module, "_MAX_COMPRESSION_RATIO", 1)
+    client = TestClient(app, raise_server_exceptions=False)
+    with patch("backend.api.upload.require_project_access"):
+        response = client.post(
+            "/api/v1/projects/1/documents",
+            files={"file": ("보통.docx", _ordinary_docx(), "application/octet-stream")},
+        )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert isinstance(body["detail"], str)
+    assert body["code"] == ErrorCode.FILE_TOO_LARGE
+
+
+def test_query_attachment_replaces_rejected_docx_with_placeholder(monkeypatch):
+    """R001·R2B01: 질의 첨부에서 거절된 DOCX는 본문으로 쓰이지 않고 대체된다.
+
+    이전 테스트는 `status_code in (200, 404, 500)`이라 사실상 아무것도 보장하지
+    않았다(500까지 성공으로 간주). 프로젝트 존재와 run_qa를 정상 mock해서
+    거절된 첨부가 실제로 placeholder가 되는지 단언한다.
+    """
+    import base64
+    from unittest.mock import MagicMock, patch
+
+    from fastapi.testclient import TestClient
+
+    import backend.pipeline.converters.docx_converter as module
+    from backend.main import app
+
+    monkeypatch.setattr(module, "_MAX_COMPRESSION_RATIO", 1)
+
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value.fetchone.return_value = {"id": 1}
+    captured = {}
+
+    def fake_run_qa(**kwargs):
+        captured.update(kwargs)
+        return {"answer": "답", "sources": [], "debug": {}}
 
     client = TestClient(app, raise_server_exceptions=False)
     with patch("backend.api.query.require_project_access"), \
-         patch("backend.api.query.get_connection") as conn:
-        conn.return_value.cursor.return_value.__enter__.return_value.fetchone.return_value = None
+         patch("backend.api.query.get_connection", return_value=conn), \
+         patch("backend.api.query.run_qa", side_effect=fake_run_qa):
         response = client.post(
             "/api/v1/projects/1/query",
             json={
                 "question": "요약해줘",
                 "attachments": [{
-                    "filename": "폭탄.docx",
-                    "content_base64": base64.b64encode(buffer.getvalue()).decode(),
+                    "filename": "보통.docx",
+                    "content_base64": base64.b64encode(_ordinary_docx()).decode(),
                 }],
             },
         )
-    # 변환이 거절되어도 질의 자체는 진행된다(관대한 첨부 정책). 서버가 죽지 않는 것이 핵심.
-    assert response.status_code in (200, 404, 500)
+
+    assert response.status_code == 200, response.text
+    context = captured["attachment_context"]
+    assert "(텍스트를 추출할 수 없습니다.)" in context
+    assert "평범한 회의록 본문입니다." not in context
 
 
 def test_chunk_overlap_preserves_all_source_pages():
-    """R002: 오버랩이 두 페이지에 걸치면 다음 청크 범위가 둘 다 포함해야 한다."""
-    # 각 페이지를 한 청크에 다 못 담을 만큼 채워 오버랩이 페이지 경계를 넘게 만든다.
+    """R002: 오버랩이 두 페이지에 걸치면 다음 청크 범위가 둘 다 포함해야 한다.
+
+    R204: 2페이지 fixture는 수정 전 구현에서도 혼합 청크가 1~2 범위를 갖게 되어
+    단언이 만족됐다(False Green). 아래 fixture는 수정 전 구현에서 실제로 실패한다.
+
+    두 가지가 맞아야 이 테스트가 의미를 갖는다.
+    1. 3페이지 — 오버랩이 2페이지 내용을 3페이지 청크로 넘기는 상황이 만들어진다.
+    2. 마커가 줄 **끝**에 있어야 한다. 오버랩은 조각을 뒤에서 잘라 오므로,
+       줄 앞의 마커는 잘려나가 단언이 아무것도 못 잡는다.
+    """
     data = _make_pdf([
-        [f"Page one sentence number {i} with padding text here." for i in range(1, 12)],
-        [f"Page two sentence number {i} with padding text here." for i in range(1, 12)],
+        [f"padding words filler text line {i} ALPHA." for i in range(9)],
+        [f"padding words filler text line {i} BRAVO." for i in range(14)],
+        [f"padding words filler text line {i} DELTA." for i in range(14)],
     ])
     doc = convert("p.pdf", data)
     chunks = chunk_document(doc)
 
+    markers = {"ALPHA": 1, "BRAVO": 2, "DELTA": 3}
     for chunk in chunks:
-        # 청크 텍스트가 특정 페이지 문구를 포함하면 그 페이지가 범위 안에 있어야 한다.
-        for page_number, marker in ((1, "Page one"), (2, "Page two")):
+        for marker, page_number in markers.items():
             if marker in chunk.text:
                 assert chunk.page_start <= page_number <= chunk.page_end, (
-                    f"chunk{chunk.index}가 {marker}를 담았지만 페이지 범위는 "
-                    f"{chunk.page_start}~{chunk.page_end}"
+                    f"chunk{chunk.index}가 {marker}(p{page_number})를 담았지만 "
+                    f"페이지 범위는 {chunk.page_start}~{chunk.page_end}"
                 )
+
+    # 오버랩으로 앞 페이지 내용을 물려받은 청크가 실제로 존재해야 한다.
+    # (없으면 위 단언이 공허하게 통과한다)
+    inherited = [
+        c for c in chunks[1:]
+        if "BRAVO" in c.text and c.page_start <= 2
+    ]
+    assert inherited, "오버랩이 앞 페이지를 물려준 청크가 없어 검증이 공허하다"
 
 
 def test_chunk_overlap_preserves_block_range():
@@ -446,6 +543,57 @@ def test_docx_collapses_actually_merged_cells():
     row = next(b.text for b in doc.blocks if b.kind == "table_row")
     assert row.count("병합됨") == 1
     assert "병합됨 | 단독" in row
+
+
+def test_docx_preserves_nested_table_content():
+    """R202: 셀 안의 중첩 표 내용이 유실되지 않는다.
+
+    `cell.text`는 셀의 직계 문단만 이어 붙이므로, 중첩 표가 통째로 사라졌었다.
+    """
+    def build(document):
+        outer = document.add_table(rows=2, cols=2)
+        outer.cell(1, 0).text = "예산"
+        cell = outer.cell(1, 1)
+        cell.text = "내역:"
+        inner = cell.add_table(rows=2, cols=2)
+        inner.cell(0, 0).text = "인건비"
+        inner.cell(0, 1).text = "3000만원"
+        inner.cell(1, 0).text = "장비"
+        inner.cell(1, 1).text = "1200만원"
+
+    doc = convert("중첩표.docx", _make_docx(build))
+    text = doc.text
+
+    for value in ("예산", "내역:", "인건비", "3000만원", "장비", "1200만원"):
+        assert value in text, f"{value}가 유실됐다"
+    # 셀의 주변 문단과 중첩 표가 원래 순서대로 이어져야 한다.
+    assert text.index("내역:") < text.index("인건비")
+
+
+def test_docx_counts_alternate_content_as_single_object():
+    """R203: Choice(w:drawing) + Fallback(w:pict)는 객체 1개다."""
+    import docx
+    from docx.oxml.ns import qn
+
+    mc = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+    document = docx.Document()
+    run = document.add_paragraph("본문").add_run()
+    alternate = run._r.makeelement(f"{{{mc}}}AlternateContent", {})
+    choice = alternate.makeelement(f"{{{mc}}}Choice", {})
+    choice.append(choice.makeelement(qn("w:drawing"), {}))
+    alternate.append(choice)
+    fallback = alternate.makeelement(f"{{{mc}}}Fallback", {})
+    fallback.append(fallback.makeelement(qn("w:pict"), {}))
+    alternate.append(fallback)
+    run._r.append(alternate)
+    buffer = io.BytesIO()
+    document.save(buffer)
+
+    doc = convert("도형.docx", buffer.getvalue())
+    message = next(
+        w.message for w in doc.warnings if w.code == WarningCode.UNSUPPORTED_ELEMENT
+    )
+    assert "1개" in message, f"중복 집계됨: {message}"
 
 
 def test_docx_warns_about_floating_shapes():

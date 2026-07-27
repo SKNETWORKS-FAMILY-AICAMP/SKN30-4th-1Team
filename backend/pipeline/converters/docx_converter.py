@@ -35,6 +35,12 @@ _MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024   # 전체 전개 크기
 _MAX_ENTRY_BYTES = 100 * 1024 * 1024          # 엔트리 1개 전개 크기
 _MAX_COMPRESSION_RATIO = 120                  # 전체 압축비
 
+# Markup Compatibility 네임스페이스. 도형 하나를 DrawingML(Choice)과 VML(Fallback)로
+# 함께 담는 컨테이너라, 비텍스트 요소를 셀 때 논리 객체 1개로 취급해야 한다.
+_MC_ALTERNATE_CONTENT = (
+    "{http://schemas.openxmlformats.org/markup-compatibility/2006}AlternateContent"
+)
+
 # "Heading 1", "제목 1", "개요 1" 등 스타일 이름에서 레벨 숫자를 뽑는다.
 _HEADING_STYLE = re.compile(r"^(?:heading|title|제목|개요)\s*(\d+)?$", re.IGNORECASE)
 _LIST_STYLE = re.compile(r"(list|목록|bullet|번호)", re.IGNORECASE)
@@ -117,33 +123,91 @@ def _paragraph_kind(paragraph, style_names: dict[str, str]) -> tuple[str, int | 
     return "paragraph", None
 
 
-def _table_blocks(table, table_index: int) -> tuple[list[dict], ConversionWarning]:
+# 중첩 표 재귀 상한. 실제 문서에서 3단을 넘는 중첩은 사실상 없고, 악의적으로 깊게
+# 중첩한 문서가 스택을 소모하는 것을 막는다.
+_MAX_TABLE_DEPTH = 5
+# 중첩 표의 행 구분자. 바깥 셀 구분자(" | ")와 시각적으로 구분되어야 읽힌다.
+_NESTED_ROW_SEPARATOR = " ; "
+
+
+def _iter_cell_rows(row, qn, Table, Paragraph):
+    """행의 셀들을 병합 접기까지 적용해 돌려준다.
+
+    가로 병합된 셀은 python-docx가 같은 <w:tc> 엘리먼트를 반복해서 돌려준다.
+    텍스트가 같다고 접으면 우연히 값이 같은 독립 셀("승인 | 승인")까지 하나로
+    뭉개져 열 위치가 밀리므로, 반드시 엘리먼트 동일성으로 판정한다.
+    """
+    previous_tc = None
+    for cell in row.cells:
+        if cell._tc is previous_tc:
+            continue
+        previous_tc = cell._tc
+        yield cell
+
+
+def _cell_text(cell, qn, Table, Paragraph, depth: int, warnings: list) -> str:
+    """셀 내부를 XML 순서대로 읽어 문단과 중첩 표를 모두 텍스트로 만든다.
+
+    `cell.text`는 셀의 **직계 문단만** 이어 붙이므로 중첩 표가 통째로 사라진다.
+    자식 엘리먼트를 직접 순회해 w:p와 w:tbl을 원래 순서대로 처리한다.
+    """
+    parts: list[str] = []
+    for child in cell._tc.iterchildren():
+        if child.tag == qn("w:p"):
+            text = normalize_text(Paragraph(child, cell).text).replace("\n", " ").strip()
+            if text:
+                parts.append(text)
+        elif child.tag == qn("w:tbl"):
+            if depth >= _MAX_TABLE_DEPTH:
+                # 상한 때문에 버릴 때는 반드시 알린다. 조용히 버리면 이 결함을 되풀이한다.
+                warnings.append(ConversionWarning(
+                    WarningCode.UNSUPPORTED_ELEMENT,
+                    f"중첩 깊이 {_MAX_TABLE_DEPTH}단을 초과한 표의 내용은 "
+                    "변환되지 않았습니다.",
+                ))
+                continue
+            nested_rows = _flatten_table_rows(
+                Table(child, cell), qn, Table, Paragraph, depth + 1, warnings
+            )
+            if nested_rows:
+                parts.append(_NESTED_ROW_SEPARATOR.join(nested_rows))
+    return " ".join(parts).strip()
+
+
+def _flatten_table_rows(table, qn, Table, Paragraph, depth: int, warnings: list) -> list[str]:
+    """표를 행 문자열 목록으로 평탄화한다(중첩 표 포함)."""
+    rows: list[str] = []
+    for row in table.rows:
+        cells = [
+            _cell_text(cell, qn, Table, Paragraph, depth, warnings)
+            for cell in _iter_cell_rows(row, qn, Table, Paragraph)
+        ]
+        text = " | ".join(c for c in cells if c)
+        if text:
+            rows.append(text)
+    return rows
+
+
+def _table_blocks(
+    table, table_index: int, qn, Table, Paragraph,
+) -> tuple[list[dict], list[ConversionWarning]]:
     """표를 행 단위 Block으로 평탄화한다.
 
     표 구조(행/열)를 그대로 담을 자리가 Block 계약에 없으므로 셀을 " | "로 잇는다.
     열 의미가 유실될 수 있어 항상 경고를 남긴다.
     """
-    blocks: list[dict] = []
-    for row_index, row in enumerate(table.rows):
-        # 가로 병합된 셀은 python-docx가 같은 <w:tc> 엘리먼트를 반복해서 돌려준다.
-        # 텍스트가 같다고 접으면 우연히 값이 같은 독립 셀("승인 | 승인")까지 하나로
-        # 뭉개져 열 위치가 밀리므로, 반드시 엘리먼트 동일성으로 판정한다.
-        collapsed: list[str] = []
-        previous_tc = None
-        for cell in row.cells:
-            if cell._tc is previous_tc:
-                continue
-            previous_tc = cell._tc
-            collapsed.append(normalize_text(cell.text).replace("\n", " ").strip())
-        text = " | ".join(c for c in collapsed if c)
-        if text:
-            blocks.append({"kind": "table_row", "text": f"[표{table_index + 1}] {text}"})
-    warning = ConversionWarning(
+    warnings: list[ConversionWarning] = []
+    rows = _flatten_table_rows(table, qn, Table, Paragraph, depth=1, warnings=warnings)
+    blocks = [
+        {"kind": "table_row", "text": f"[표{table_index + 1}] {row}"}
+        for row in rows
+    ]
+    warnings.insert(0, ConversionWarning(
         WarningCode.TABLE_FLATTENED,
         "표를 행 단위 텍스트로 변환했습니다. 열 구조는 보존되지 않습니다.",
         location=f"table {table_index + 1}",
-    )
-    return blocks, warning
+    ))
+    return blocks, warnings
 
 
 def _guard_archive_size(data: bytes, filename: str) -> None:
@@ -155,20 +219,33 @@ def _guard_archive_size(data: bytes, filename: str) -> None:
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             entries = archive.infolist()
-    except zipfile.BadZipFile as exc:
+    except (
+        zipfile.BadZipFile,
+        zipfile.LargeZipFile,
+        # 중앙 디렉터리의 extraction version이 지원 상한을 넘으면 NotImplementedError,
+        # UTF-8 플래그와 맞지 않는 파일명이면 UnicodeError가 난다. 가드를 넣기 전에는
+        # docx.Document() 주변의 넓은 except가 흡수하던 입력이라, 여기서 정규화하지
+        # 않으면 400이어야 할 응답이 500으로 누출된다.
+        NotImplementedError,
+        UnicodeError,
+        ValueError,
+        OSError,
+    ) as exc:
         raise ConversionError(
             ErrorCode.CORRUPT_FILE,
             f"DOCX 파일을 열 수 없습니다: {exc}",
             source=filename,
         ) from exc
+    # MemoryError 등 자원 고갈 예외는 잡지 않는다 — 입력이 잘못된 게 아니라 서버가
+    # 한계에 부딪힌 상황이므로, 정상 입력 오류로 숨기면 장애를 못 보게 된다.
 
     total = 0
     for entry in entries:
         if entry.file_size > _MAX_ENTRY_BYTES:
             raise ConversionError(
-                ErrorCode.CORRUPT_FILE,
-                "DOCX 내부 항목의 크기가 허용 범위를 넘습니다. "
-                "손상되었거나 비정상적으로 압축된 파일입니다.",
+                ErrorCode.FILE_TOO_LARGE,
+                "DOCX 내부 항목의 크기가 안전한 처리 한도를 초과했습니다. "
+                "문서를 나누거나 내용을 줄여서 다시 올려주세요.",
                 source=filename,
             )
         total += entry.file_size
@@ -177,9 +254,9 @@ def _guard_archive_size(data: bytes, filename: str) -> None:
         data and total / len(data) > _MAX_COMPRESSION_RATIO
     ):
         raise ConversionError(
-            ErrorCode.CORRUPT_FILE,
-            "DOCX의 압축 해제 크기가 허용 범위를 넘습니다. "
-            "손상되었거나 비정상적으로 압축된 파일입니다.",
+            ErrorCode.FILE_TOO_LARGE,
+            "DOCX의 압축 해제 크기가 안전한 처리 한도를 초과했습니다. "
+            "문서를 나누거나 내용을 줄여서 다시 올려주세요.",
             source=filename,
         )
 
@@ -193,18 +270,47 @@ def _unsupported_element_count(document, qn) -> int:
     """
     # w:drawing(DrawingML)과 w:pict(구형 VML)는 객체 하나당 하나씩 나타나는 최상위
     # 컨테이너다. 내부의 wp:anchor·w:txbxContent까지 세면 같은 객체를 중복 집계한다.
+    #
+    # 다만 도형 하나가 mc:AlternateContent 안에 Choice(w:drawing) + Fallback(w:pict)로
+    # 함께 저장되는 경우가 있어, 단순 합산하면 1개 객체가 2개로 잡힌다.
+    # AlternateContent는 그 자체를 논리 객체 1개로 세고, 그 바깥의 drawing/pict만 더한다.
     total = 0
     try:
         body = document.element.body
+        # python-docx의 qn()은 mc 접두어를 모른다(KeyError). Clark 표기를 직접 쓴다.
+        alternates = body.findall(".//" + _MC_ALTERNATE_CONTENT)
+        total += len(alternates)
+        alternate_set = set(alternates)
+
         for tag in ("w:drawing", "w:pict"):
             try:
-                total += len(body.findall(".//" + qn(tag)))
+                found = body.findall(".//" + qn(tag))
             except (KeyError, ValueError):
                 continue
+            for element in found:
+                if not _has_ancestor(element, alternate_set):
+                    total += 1
     except Exception:
         logger.debug("DOCX 비텍스트 요소 집계 실패", exc_info=True)
         return 0
     return total
+
+
+def _has_ancestor(element, ancestors: set) -> bool:
+    """element가 주어진 조상 집합 안에 들어 있는지 판정한다.
+
+    lxml 프록시 객체는 수명이 짧아 id() 비교나 집합 연산을 신뢰하기 어렵다.
+    부모를 직접 거슬러 올라가며 확인한다.
+    """
+    if not ancestors:
+        return False
+    parent = element.getparent()
+    while parent is not None:
+        for candidate in ancestors:
+            if parent is candidate:
+                return True
+        parent = parent.getparent()
+    return False
 
 
 def convert(filename: str, data: bytes):
@@ -228,10 +334,12 @@ def convert(filename: str, data: bytes):
 
     for item in _iter_body(document, qn, Table, Paragraph):
         if isinstance(item, Table):
-            table_blocks, warning = _table_blocks(item, table_index)
+            table_blocks, table_warnings = _table_blocks(
+                item, table_index, qn, Table, Paragraph
+            )
             if table_blocks:
                 raw_blocks.extend(table_blocks)
-                warnings.append(warning)
+                warnings.extend(table_warnings)
             table_index += 1
             continue
 
