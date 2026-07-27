@@ -2591,11 +2591,24 @@ async function verifyZoomedProjectHomeLayout(send) {
       const home = document.querySelector('.project-home');
       const content = document.querySelector('.project-home-content');
       const main = document.querySelector('.project-home-main');
+      const mainContent = document.querySelector('.project-home-main-content');
+      const steps = document.querySelector('.project-home-steps');
       const slots = document.querySelector('.project-home-slots');
       const slotList = document.querySelector('.project-home-slot-list');
       const actions = document.querySelector('.project-home-actions');
       const buttons = Array.from(actions?.querySelectorAll('button') || []);
-      if (!shell || !sidebar || !home || !content || !main || !slots || !slotList || !actions) {
+      if (
+        !shell ||
+        !sidebar ||
+        !home ||
+        !content ||
+        !main ||
+        !mainContent ||
+        !steps ||
+        !slots ||
+        !slotList ||
+        !actions
+      ) {
         return null;
       }
 
@@ -2603,6 +2616,14 @@ async function verifyZoomedProjectHomeLayout(send) {
       const homeBox = home.getBoundingClientRect();
       const contentBox = content.getBoundingClientRect();
       const mainBox = main.getBoundingClientRect();
+      const mainContentBox = mainContent.getBoundingClientRect();
+      const mainContentStyles = getComputedStyle(mainContent);
+      const mainContentLeft =
+        mainContentBox.left + Number.parseFloat(mainContentStyles.paddingLeft);
+      const mainContentRight =
+        mainContentBox.right - Number.parseFloat(mainContentStyles.paddingRight);
+      const mainContentWidth = mainContentRight - mainContentLeft;
+      const stepsBox = steps.getBoundingClientRect();
       const slotsBox = slots.getBoundingClientRect();
       const actionBoxes = buttons.map((button) => {
         const box = button.getBoundingClientRect();
@@ -2633,16 +2654,23 @@ async function verifyZoomedProjectHomeLayout(send) {
         homeScrollWidth: home.scrollWidth,
         innerWidth,
         mainBottom: mainBox.bottom,
+        projectStage: home.getAttribute('data-stage') || '',
         railWidth: sidebar.getBoundingClientRect().width,
         sidebarCollapsed: shell.getAttribute('data-sidebar-collapsed') || '',
         sidebarPanelDisplay: sidebarPanel ? getComputedStyle(sidebarPanel).display : '',
         slotColumns: getComputedStyle(slotList).gridTemplateColumns,
         slotCount: slotList.querySelectorAll('.project-home-slot').length,
+        slotValues: Array.from(slotList.querySelectorAll('.project-home-slot strong'))
+          .map((slot) => slot.textContent.trim()),
         slotsBorderLeft: Number.parseFloat(slotsStyles.borderLeftWidth),
         slotsBorderTop: Number.parseFloat(slotsStyles.borderTopWidth),
         slotsLeft: slotsBox.left,
         slotsRight: slotsBox.right,
         slotsTop: slotsBox.top,
+        stepsCenterDelta: Math.abs(
+          stepsBox.left - mainContentLeft - (mainContentRight - stepsBox.right),
+        ),
+        stepsWidthRatio: stepsBox.width / mainContentWidth,
       };
     })()`,
   });
@@ -2670,10 +2698,18 @@ async function verifyZoomedProjectHomeLayout(send) {
       value.slotsTop < value.mainBottom - 0.5 ||
       value.slotsLeft < value.contentLeft - 0.5 ||
       value.slotsRight > value.contentRight + 0.5 ||
-      value.slotsBorderLeft !== 0 ||
+      value.slotsBorderLeft < 0.5 ||
       value.slotsBorderTop < 0.5 ||
-      value.slotCount !== 4) {
-    failures.push("200% project home should stack the memory slots below the main setup content");
+      value.slotCount !== 4 ||
+      value.slotValues.join("|") !== "1|1|1|1" ||
+      value.projectStage !== "context") {
+    failures.push("200% project home should stack the project-memory summary below the setup content");
+  }
+
+  if (!value ||
+      Math.abs(value.stepsWidthRatio - 0.6) > 0.02 ||
+      value.stepsCenterDelta > 1) {
+    failures.push("project setup steps should stay centered at 60% of the available content width");
   }
 
   if (!value ||
@@ -3104,6 +3140,7 @@ async function verifySidebarBrandTypography(send) {
     expression: `document.querySelector('.project-start-button')?.click()`,
   });
   await waitForSelector(send, ".project-home");
+  await sleep(180);
   const afterStartResult = await send("Runtime.evaluate", {
     returnByValue: true,
     expression: `(() => {
@@ -3119,6 +3156,20 @@ async function verifySidebarBrandTypography(send) {
       const projectNameStyle = projectName ? getComputedStyle(projectName) : null;
       const analysisButton = document.querySelector('.project-home-primary');
       const analysisButtonStyle = analysisButton ? getComputedStyle(analysisButton) : null;
+      const projectHomeMainContent = document.querySelector('.project-home-main-content');
+      const projectHomeSteps = document.querySelector('.project-home-steps');
+      const projectHomeMainContentBox = projectHomeMainContent?.getBoundingClientRect();
+      const projectHomeMainContentStyle = projectHomeMainContent
+        ? getComputedStyle(projectHomeMainContent)
+        : null;
+      const projectHomeStepsBox = projectHomeSteps?.getBoundingClientRect();
+      const projectHomeInnerLeft =
+        (projectHomeMainContentBox?.left ?? 0) +
+        Number.parseFloat(projectHomeMainContentStyle?.paddingLeft || '0');
+      const projectHomeInnerRight =
+        (projectHomeMainContentBox?.right ?? 0) -
+        Number.parseFloat(projectHomeMainContentStyle?.paddingRight || '0');
+      const projectHomeInnerWidth = projectHomeInnerRight - projectHomeInnerLeft;
       return {
         projectCount: savedState.projects?.length ?? 0,
         activeProjectName: document.querySelector('.project-item[data-active="true"]')?.getAttribute('data-project-name') || "",
@@ -3165,6 +3216,27 @@ async function verifySidebarBrandTypography(send) {
         projectHomePrimaryDescribedBy: document.querySelector(
           '.project-home-primary',
         )?.getAttribute('aria-describedby') || '',
+        projectHomeStage: document.querySelector('.project-home')?.getAttribute('data-stage') || '',
+        projectMemorySlotLabels: Array.from(
+          document.querySelectorAll('.project-home-slots .project-home-slot span'),
+        ).map((slot) => slot.textContent.trim()),
+        projectMemorySlotCounts: Array.from(
+          document.querySelectorAll('.project-home-slots .project-home-slot strong'),
+        ).map((slot) => slot.textContent.trim()),
+        projectMemorySummaryTitle: document.querySelector(
+          '.project-home-slots-title',
+        )?.textContent.trim() || '',
+        projectHomeStepsCenterDelta: projectHomeStepsBox
+          ? Math.abs(
+              projectHomeStepsBox.left -
+                projectHomeInnerLeft -
+                (projectHomeInnerRight - projectHomeStepsBox.right),
+            )
+          : null,
+        projectHomeStepsWidthRatio:
+          projectHomeStepsBox && projectHomeInnerWidth > 0
+            ? projectHomeStepsBox.width / projectHomeInnerWidth
+            : null,
       };
     })()`,
   });
@@ -3179,7 +3251,7 @@ async function verifySidebarBrandTypography(send) {
       value.afterStart.messageCount !== 0 ||
       value.afterStart.emptyTitle !== "" ||
       !value.afterStart.hasProjectHome ||
-      !value.afterStart.uploadText.includes("자료를 여기에 끌어다 놓으세요") ||
+      !value.afterStart.uploadText.includes("자료를 추가해 프로젝트 맥락을 만드세요") ||
       !value.afterStart.analysisDisabled ||
       value.afterStart.panelMenuTexts.some((text) => text.includes("메모리")) ||
       value.afterStart.hasProjectOverview ||
@@ -3191,16 +3263,27 @@ async function verifySidebarBrandTypography(send) {
       value.afterStart.sidebarCollapseButtonCount !== 1 ||
       value.afterStart.analysisCursor !== "not-allowed" ||
       value.afterStart.projectNameFontSize !== "13px" ||
-      value.afterStart.projectNameFontWeight !== "500") {
+      value.afterStart.projectNameFontWeight !== "500" ||
+      value.afterStart.projectHomeStage !== "context" ||
+      value.afterStart.projectMemorySummaryTitle !== "추출될 항목" ||
+      value.afterStart.projectMemorySlotLabels.join("|") !== "액션|결정|이슈|리스크" ||
+      value.afterStart.projectMemorySlotCounts.length !== 4) {
     failures.push("start project button should create the first project and enter project home");
   }
 
+  if (value.afterStart.projectHomeStepsWidthRatio === null ||
+      Math.abs(value.afterStart.projectHomeStepsWidthRatio - 0.6) > 0.02 ||
+      value.afterStart.projectHomeStepsCenterDelta === null ||
+      value.afterStart.projectHomeStepsCenterDelta > 1) {
+    failures.push("project setup steps should stay centered at 60% of the available content width");
+  }
+
   if (value.afterStart.projectHomeActionOrder.join('|') !== "분석 없이 채팅|분석 시작" ||
-      value.afterStart.projectHomeActionHeights.some((height) => height > 30) ||
+      value.afterStart.projectHomeActionHeights.some((height) => height < 36 || height > 42) ||
       value.afterStart.projectHomeActionSizes.some((size) => size !== "sm") ||
       value.afterStart.projectHomeActionVariants.join('|') !== "ghost|primary" ||
       value.afterStart.projectHomeActionFontWeights.some((weight) => Number(weight) > 600) ||
-      value.afterStart.projectHomeActionIconCount !== 0 ||
+      value.afterStart.projectHomeActionIconCount !== 1 ||
       !value.afterStart.projectHomeAnalysisNote.includes("설명이나 자료를 추가하면") ||
       value.afterStart.projectHomePrimaryDescribedBy !== "project-home-analysis-note") {
     failures.push("project home actions should keep a compact secondary-to-primary hierarchy");
@@ -3840,7 +3923,7 @@ async function verifyProjectCreationFlow(send) {
   if (value.messageCount !== 0 ||
       value.emptyTitle !== "" ||
       !value.hasProjectHome ||
-      !value.uploadText.includes("자료를 여기에 끌어다 놓으세요") ||
+      !value.uploadText.includes("자료를 추가해 프로젝트 맥락을 만드세요") ||
       !value.analysisDisabled) {
     failures.push("new project should show the project home upload step");
   }
@@ -4338,7 +4421,7 @@ async function verifyProjectHomeDroppedPdfCancellation(send) {
     if (value.settled.storedFileCount !== 0 ||
         value.settled.sourceRowCount !== 0 ||
         value.settled.canvasState !== "empty" ||
-        !value.settled.emptyText.includes("자료를 여기에 끌어다 놓으세요")) {
+        !value.settled.emptyText.includes("자료를 추가해 프로젝트 맥락을 만드세요")) {
       failures.push("the cancelled PDF should stay removed from project home and local storage");
     }
 
