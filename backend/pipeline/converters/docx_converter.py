@@ -145,7 +145,7 @@ def _iter_cell_rows(row, qn, Table, Paragraph):
         yield cell
 
 
-def _cell_text(cell, qn, Table, Paragraph, depth: int, warnings: list) -> str:
+def _cell_text(cell, qn, Table, Paragraph, depth: int, warnings: list, location: str) -> str:
     """셀 내부를 XML 순서대로 읽어 문단과 중첩 표를 모두 텍스트로 만든다.
 
     `cell.text`는 셀의 **직계 문단만** 이어 붙이므로 중첩 표가 통째로 사라진다.
@@ -160,26 +160,31 @@ def _cell_text(cell, qn, Table, Paragraph, depth: int, warnings: list) -> str:
         elif child.tag == qn("w:tbl"):
             if depth >= _MAX_TABLE_DEPTH:
                 # 상한 때문에 버릴 때는 반드시 알린다. 조용히 버리면 이 결함을 되풀이한다.
+                # location을 붙여 어느 표인지 짚어주고, 같은 표 안에서 여러 셀이
+                # 상한에 걸려도 동일 경고가 반복되지 않게 한다(assemble에서 중복 제거).
                 warnings.append(ConversionWarning(
                     WarningCode.UNSUPPORTED_ELEMENT,
                     f"중첩 깊이 {_MAX_TABLE_DEPTH}단을 초과한 표의 내용은 "
                     "변환되지 않았습니다.",
+                    location=location,
                 ))
                 continue
             nested_rows = _flatten_table_rows(
-                Table(child, cell), qn, Table, Paragraph, depth + 1, warnings
+                Table(child, cell), qn, Table, Paragraph, depth + 1, warnings, location
             )
             if nested_rows:
                 parts.append(_NESTED_ROW_SEPARATOR.join(nested_rows))
     return " ".join(parts).strip()
 
 
-def _flatten_table_rows(table, qn, Table, Paragraph, depth: int, warnings: list) -> list[str]:
+def _flatten_table_rows(
+    table, qn, Table, Paragraph, depth: int, warnings: list, location: str,
+) -> list[str]:
     """표를 행 문자열 목록으로 평탄화한다(중첩 표 포함)."""
     rows: list[str] = []
     for row in table.rows:
         cells = [
-            _cell_text(cell, qn, Table, Paragraph, depth, warnings)
+            _cell_text(cell, qn, Table, Paragraph, depth, warnings, location)
             for cell in _iter_cell_rows(row, qn, Table, Paragraph)
         ]
         text = " | ".join(c for c in cells if c)
@@ -190,24 +195,32 @@ def _flatten_table_rows(table, qn, Table, Paragraph, depth: int, warnings: list)
 
 def _table_blocks(
     table, table_index: int, qn, Table, Paragraph,
-) -> tuple[list[dict], list[ConversionWarning]]:
+) -> tuple[list[dict], ConversionWarning, list[ConversionWarning]]:
     """표를 행 단위 Block으로 평탄화한다.
 
     표 구조(행/열)를 그대로 담을 자리가 Block 계약에 없으므로 셀을 " | "로 잇는다.
-    열 의미가 유실될 수 있어 항상 경고를 남긴다.
+
+    반환값을 세 개로 나누는 이유는 두 경고의 성격이 다르기 때문이다.
+    - `table_flattened`(열 구조 유실 안내)는 출력 블록이 있을 때만 의미가 있다.
+    - **내용 유실 경고는 블록이 하나도 안 나와도 반드시 전달돼야 한다.** 두 경고를
+      한 목록에 섞어 두면 호출자가 "블록이 있을 때만" 통째로 추가하게 되고,
+      정작 내용이 전부 사라진 경우에 경고까지 사라진다(R301).
     """
-    warnings: list[ConversionWarning] = []
-    rows = _flatten_table_rows(table, qn, Table, Paragraph, depth=1, warnings=warnings)
+    location = f"table {table_index + 1}"
+    content_loss: list[ConversionWarning] = []
+    rows = _flatten_table_rows(
+        table, qn, Table, Paragraph, depth=1, warnings=content_loss, location=location,
+    )
     blocks = [
         {"kind": "table_row", "text": f"[표{table_index + 1}] {row}"}
         for row in rows
     ]
-    warnings.insert(0, ConversionWarning(
+    flatten_warning = ConversionWarning(
         WarningCode.TABLE_FLATTENED,
         "표를 행 단위 텍스트로 변환했습니다. 열 구조는 보존되지 않습니다.",
-        location=f"table {table_index + 1}",
-    ))
-    return blocks, warnings
+        location=location,
+    )
+    return blocks, flatten_warning, content_loss
 
 
 def _guard_archive_size(data: bytes, filename: str) -> None:
@@ -334,12 +347,16 @@ def convert(filename: str, data: bytes):
 
     for item in _iter_body(document, qn, Table, Paragraph):
         if isinstance(item, Table):
-            table_blocks, table_warnings = _table_blocks(
+            table_blocks, flatten_warning, content_loss = _table_blocks(
                 item, table_index, qn, Table, Paragraph
             )
             if table_blocks:
                 raw_blocks.extend(table_blocks)
-                warnings.extend(table_warnings)
+                warnings.append(flatten_warning)
+            # 내용 유실 경고는 블록 유무와 무관하게 전달한다 — 깊이 상한 때문에
+            # 표 전체가 비어 버린 경우가 정확히 "조용한 유실"이라 가장 알려야 한다.
+            # (완전히 빈 표는 애초에 유실 경고를 만들지 않으므로 여기서 걸러지지 않는다)
+            warnings.extend(content_loss)
             table_index += 1
             continue
 

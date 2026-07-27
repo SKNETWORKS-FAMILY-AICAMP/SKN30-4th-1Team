@@ -339,7 +339,10 @@ def test_docx_rejects_oversized_archive_before_parsing(monkeypatch):
 
     # 손상이 아니라 "한도 초과"로 분류돼야 한다 (R2B03).
     assert exc.value.code == ErrorCode.FILE_TOO_LARGE
-    assert "한도" in exc.value.message
+    # R3B01: 코드만이 아니라 **조치 안내 문구**를 고정한다. R2B03이 요구한 것은
+    # "손상으로 오해하지 않게 조치를 안내하라"였는데, 문구를 지워도 통과하면
+    # 그 요구가 지켜지는지 아무도 보장하지 못한다.
+    assert "나누거나" in exc.value.message and "줄여서" in exc.value.message
     assert real_document is None or not called
 
 
@@ -380,7 +383,76 @@ def test_malformed_zip_directory_does_not_leak_500():
 
     with pytest.raises(ConversionError) as exc:
         convert("변조.docx", bytes(data))
-    assert exc.value.code in (ErrorCode.CORRUPT_FILE, ErrorCode.FILE_TOO_LARGE)
+    # R3B02: CORRUPT_FILE로 한정한다. FILE_TOO_LARGE까지 허용하면 손상 파일이
+    # 크기 초과로 오분류돼 "파일을 줄이라"는 잘못된 안내를 하는 회귀를 놓친다.
+    assert exc.value.code == ErrorCode.CORRUPT_FILE
+
+
+def _corrupted_docx() -> bytes:
+    """중앙 디렉터리의 extraction version을 지원 상한 이상으로 변조한 소형 DOCX."""
+    data = bytearray(_ordinary_docx())
+    index = data.rfind(b"PK\x01\x02")
+    assert index != -1
+    data[index + 6] = 0xFF
+    return bytes(data)
+
+
+def test_upload_rejects_corrupted_archive_with_corrupt_file_code():
+    """R3B02: 손상 파일은 업로드 경로에서도 corrupt_file이어야 한다.
+
+    file_too_large로 분류되면 사용자에게 "파일을 줄이라"는 잘못된 조치를 안내한다.
+    """
+    from unittest.mock import patch
+
+    from fastapi.testclient import TestClient
+
+    from backend.main import app
+
+    client = TestClient(app, raise_server_exceptions=False)
+    with patch("backend.api.upload.require_project_access"):
+        response = client.post(
+            "/api/v1/projects/1/documents",
+            files={"file": ("변조.docx", _corrupted_docx(), "application/octet-stream")},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == ErrorCode.CORRUPT_FILE
+
+
+def test_query_attachment_handles_corrupted_docx_without_500():
+    """R3B02: 손상 첨부는 500 없이 실패 placeholder로 처리된다."""
+    import base64
+    from unittest.mock import MagicMock, patch
+
+    from fastapi.testclient import TestClient
+
+    from backend.main import app
+
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value.fetchone.return_value = {"id": 1}
+    captured = {}
+
+    def fake_run_qa(**kwargs):
+        captured.update(kwargs)
+        return {"answer": "답", "sources": [], "debug": {}}
+
+    client = TestClient(app, raise_server_exceptions=False)
+    with patch("backend.api.query.require_project_access"), \
+         patch("backend.api.query.get_connection", return_value=conn), \
+         patch("backend.api.query.run_qa", side_effect=fake_run_qa):
+        response = client.post(
+            "/api/v1/projects/1/query",
+            json={
+                "question": "요약해줘",
+                "attachments": [{
+                    "filename": "변조.docx",
+                    "content_base64": base64.b64encode(_corrupted_docx()).decode(),
+                }],
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    assert "(텍스트를 추출할 수 없습니다.)" in captured["attachment_context"]
 
 
 def test_upload_rejects_oversized_archive_with_400(monkeypatch):
@@ -404,6 +476,8 @@ def test_upload_rejects_oversized_archive_with_400(monkeypatch):
     body = response.json()
     assert isinstance(body["detail"], str)
     assert body["code"] == ErrorCode.FILE_TOO_LARGE
+    # R3B01: 사용자에게 실제로 닿는 detail에도 조치 안내가 있어야 한다.
+    assert "나누거나" in body["detail"] and "줄여서" in body["detail"]
 
 
 def test_query_attachment_replaces_rejected_docx_with_placeholder(monkeypatch):
@@ -568,6 +642,143 @@ def test_docx_preserves_nested_table_content():
         assert value in text, f"{value}가 유실됐다"
     # 셀의 주변 문단과 중첩 표가 원래 순서대로 이어져야 한다.
     assert text.index("내역:") < text.index("인건비")
+
+
+def test_docx_warns_when_depth_limit_discards_all_table_content():
+    """R301: 깊이 상한으로 표 내용이 전부 사라져도 경고는 반드시 남아야 한다.
+
+    블록과 경고를 같은 조건(`if table_blocks:`)에 묶어 두면, 평탄화 결과가 비었을 때
+    경고까지 함께 버려진다. 그 경우가 정확히 "조용한 유실"이라 가장 알려야 한다.
+    """
+    def build(document):
+        document.add_paragraph("보존 본문")
+        table = document.add_table(rows=1, cols=1)
+        cell = table.cell(0, 0)
+        for _ in range(5):  # 1~5단은 비우고 6단에만 내용을 둔다
+            cell = cell.add_table(rows=1, cols=1).cell(0, 0)
+        cell.text = "유일한깊은내용"
+
+    doc = convert("깊은중첩.docx", _make_docx(build))
+
+    # 주변 문단은 정상 보존되고 변환 자체는 성공한다.
+    assert "보존 본문" in doc.text
+    # 깊이 상한 때문에 내용은 빠지지만, 빠졌다는 사실이 경고로 전달돼야 한다.
+    assert "유일한깊은내용" not in doc.text
+    depth_warnings = [
+        w for w in doc.warnings if w.code == WarningCode.UNSUPPORTED_ELEMENT
+    ]
+    assert depth_warnings, "내용이 유실됐는데 경고가 없다"
+    assert any("중첩" in w.message for w in depth_warnings)
+
+
+def test_empty_document_error_explains_why_it_is_empty():
+    """깊이 상한으로 내용이 전부 사라진 문서는 오류 메시지에 사유가 실려야 한다.
+
+    표가 문서의 유일한 내용이면 블록이 0개가 되어 `empty_document`로 예외가 나는데,
+    이때 경고를 그냥 버리면 사용자는 "텍스트가 없습니다"만 보고 원인을 알 수 없다.
+    경고를 남기려던 조치(R301)가 정작 가장 필요한 상황에서 무의미해진다.
+    """
+    def build(document):
+        table = document.add_table(rows=1, cols=1)
+        cell = table.cell(0, 0)
+        for _ in range(6):
+            cell = cell.add_table(rows=1, cols=1).cell(0, 0)
+        cell.text = "묻혀버린내용"
+
+    with pytest.raises(ConversionError) as exc:
+        convert("표만.docx", _make_docx(build))
+
+    assert exc.value.code == ErrorCode.EMPTY_DOCUMENT
+    assert "중첩" in exc.value.message, (
+        f"빈 문서 사유가 전달되지 않았다: {exc.value.message}"
+    )
+
+
+def test_identical_warnings_are_deduplicated():
+    """같은 표의 여러 셀이 상한에 걸려도 동일 경고가 반복되지 않는다."""
+    def build(document):
+        document.add_paragraph("본문")
+        table = document.add_table(rows=1, cols=6)
+        for column in range(6):
+            cell = table.cell(0, column)
+            for _ in range(6):
+                cell = cell.add_table(rows=1, cols=1).cell(0, 0)
+            cell.text = f"깊은내용{column}"
+
+    doc = convert("여러셀.docx", _make_docx(build))
+    depth_warnings = [
+        w for w in doc.warnings if w.code == WarningCode.UNSUPPORTED_ELEMENT
+    ]
+    assert len(depth_warnings) == 1, (
+        f"셀 6개가 동일 경고를 {len(depth_warnings)}건 만들었다"
+    )
+
+
+def test_distinct_tables_keep_separate_warnings():
+    """서로 다른 표의 유실은 location으로 구분되어 각각 남는다."""
+    def build(document):
+        document.add_paragraph("본문")
+        for _ in range(2):
+            table = document.add_table(rows=1, cols=1)
+            cell = table.cell(0, 0)
+            for _ in range(6):
+                cell = cell.add_table(rows=1, cols=1).cell(0, 0)
+            cell.text = "깊은내용"
+
+    doc = convert("두표.docx", _make_docx(build))
+    locations = {
+        w.location for w in doc.warnings if w.code == WarningCode.UNSUPPORTED_ELEMENT
+    }
+    assert locations == {"table 1", "table 2"}, locations
+
+
+def test_duplicate_block_warning_is_aggregated_not_per_block():
+    """중복 문단 경고는 블록마다가 아니라 개수 요약 1건으로 나와야 한다.
+
+    반복 고지문이 있는 평범한 문서에서도 블록당 경고를 내면 수십~수백 건이 쌓여
+    업로드 201 응답이 부풀고 다른 경고가 묻힌다.
+    """
+    boilerplate = "본 문서는 대외비이며 무단 전재를 금합니다. 관련 문의는 담당 부서로 연락 바랍니다."
+    parts = []
+    for index in range(60):
+        parts.append(f"[P{index:02d}] 실제 문단 내용입니다." + " 채움" * 5)
+        parts.append(boilerplate)
+
+    doc = convert("고지문.md", "\n\n".join(parts).encode("utf-8"))
+    duplicate_warnings = [
+        w for w in doc.warnings if w.code == WarningCode.DUPLICATE_BLOCK_DROPPED
+    ]
+
+    assert len(duplicate_warnings) == 1, (
+        f"중복 경고가 {len(duplicate_warnings)}건 — 블록마다 만들어지고 있다"
+    )
+    assert "59" in duplicate_warnings[0].message, duplicate_warnings[0].message
+    # 실제 본문은 남고 반복 고지문만 접힌다.
+    assert "[P00]" in doc.text and "[P59]" in doc.text
+    assert doc.text.count(boilerplate) == 1
+
+
+def test_pdf_page_warnings_survive_deduplication():
+    """중복 제거가 위치가 다른 경고까지 뭉개면 안 된다."""
+    doc = convert("mixed.pdf", _make_pdf([["Real content here."], [], [], []]))
+    page_warnings = [w for w in doc.warnings if w.code == WarningCode.PAGE_NO_TEXT]
+    assert {w.location for w in page_warnings} == {"page 2", "page 3", "page 4"}
+
+
+def test_docx_empty_table_produces_no_warning():
+    """R301 수정이 기존 동작을 깨지 않는지 고정한다.
+
+    완전히 빈 표는 블록도 경고도 만들지 않고, 주변 문단 순서도 바꾸지 않는다.
+    """
+    def build(document):
+        document.add_paragraph("앞 문단")
+        document.add_table(rows=2, cols=2)
+        document.add_paragraph("뒤 문단")
+
+    doc = convert("빈표.docx", _make_docx(build))
+
+    assert [b.text for b in doc.blocks] == ["앞 문단", "뒤 문단"]
+    assert doc.warnings == []
 
 
 def test_docx_counts_alternate_content_as_single_object():

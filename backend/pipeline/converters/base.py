@@ -145,10 +145,22 @@ def assemble(
             heading_path=heading_path,
         ))
 
+    # 같은 코드·메시지·위치의 경고는 한 번만 남긴다. 셀마다·페이지마다 같은 손실이
+    # 반복되면 동일 경고가 수십 건 쌓여 응답이 부풀고 정작 다른 경고가 묻힌다.
+    # (위치가 다른 경고는 서로 다른 값을 가지므로 그대로 보존된다)
+    unique_warnings = list(dict.fromkeys(warnings or []))
+
     if not blocks:
+        # 경고가 있으면 그 사유를 오류 메시지에 실어 보낸다. 여기서 그냥 버리면
+        # "텍스트가 없습니다"만 남아, 깊이 상한처럼 이유가 분명한 유실조차
+        # 사용자에게는 원인 불명이 된다 — 경고를 남기려던 조치가 무의미해진다.
+        reasons = " ".join(dict.fromkeys(w.message for w in unique_warnings))
+        message = "문서에서 추출된 텍스트가 없습니다."
+        if reasons:
+            message = f"{message} {reasons}"
         raise ConversionError(
             ErrorCode.EMPTY_DOCUMENT,
-            "문서에서 추출된 텍스트가 없습니다.",
+            message,
             source=source,
         )
 
@@ -156,6 +168,6 @@ def assemble(
         source=source,
         format=fmt,
         blocks=blocks,
-        warnings=list(warnings or []),
+        warnings=unique_warnings,
         page_count=page_count,
     )

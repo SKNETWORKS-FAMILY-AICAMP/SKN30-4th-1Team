@@ -97,9 +97,9 @@ def drop_duplicate_blocks(
     제거 때문에 번호가 밀리면 안 된다.
     """
     kept: list[Block] = []
-    warnings: list[ConversionWarning] = []
     seen: set[str] = set()
     previous: Optional[str] = None
+    dropped = 0
 
     for block in blocks:
         key = re.sub(r"\s+", " ", block.text).strip().lower()
@@ -107,15 +107,22 @@ def drop_duplicate_blocks(
             len(key) >= _GLOBAL_DEDUPE_MIN_LEN and key in seen
         )
         if duplicate:
-            warnings.append(ConversionWarning(
-                WarningCode.DUPLICATE_BLOCK_DROPPED,
-                "중복된 문단을 제거했습니다.",
-                location=f"block {block.order}",
-            ))
+            dropped += 1
             continue
         seen.add(key)
         previous = key
         kept.append(block)
+
+    # 블록마다 경고를 만들면 반복 고지문이 있는 평범한 문서에서도 수십~수백 건이
+    # 쌓여 업로드 응답이 부풀고 정작 다른 경고가 묻힌다. "몇 번째 블록이 중복이었나"는
+    # 사용자가 취할 조치가 없는 정보이므로, 개수만 요약한 경고 1건으로 낸다
+    # (머리말·꼬리말 제거 경고와 동일한 형식).
+    warnings: list[ConversionWarning] = []
+    if dropped:
+        warnings.append(ConversionWarning(
+            WarningCode.DUPLICATE_BLOCK_DROPPED,
+            f"중복된 문단 {dropped}개를 제거했습니다.",
+        ))
 
     return kept, warnings
 
