@@ -4,9 +4,28 @@ from unittest.mock import patch, MagicMock
 from backend.startup import (
     ensure_runtime_schema,
     ensure_schema_v8,
+    ensure_schema_v9,
+    ensure_schema_v10,
     recover_stale_tasks,
     backfill_dev_user_membership,
 )
+
+
+def test_ensure_schema_v9_and_v10_are_distinct_functions():
+    """PR #7이 v9(quota)를 선점해 우리 마이그레이션은 v10으로 옮겼다.
+
+    두 함수가 같은 이름이면 나중 정의가 앞을 덮어써 main의 quota 백필이 조용히
+    죽는다. 리베이스 병합에서 실제로 충돌했던 지점이라 이름 분리를 고정한다.
+    """
+    assert ensure_schema_v9 is not ensure_schema_v10
+    conn, cursor = _make_conn()
+    with patch("backend.startup.get_connection", return_value=conn):
+        ensure_schema_v10()
+
+    sql_calls = [c.args[0] for c in cursor.execute.call_args_list]
+    assert any("SET kind = 'complete_action_doc'" in s for s in sql_calls)
+    # v10은 quota 스키마를 건드리지 않는다 — 두 마이그레이션의 책임 분리 확인
+    assert not any("documents" in s for s in sql_calls)
 
 
 def _make_conn():

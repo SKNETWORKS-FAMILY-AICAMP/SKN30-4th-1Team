@@ -648,25 +648,25 @@ def test_resolve_suggestion_allows_member():
     assert accept.json()["status"] == "accepted"
 
 
-# ─── migrate_v9.sql 재분류 로직 ──────────────────────────────────────────────
+# ─── migrate_v10.sql 재분류 로직 ──────────────────────────────────────────────
 # 이 프로젝트 테스트는 실제 DB 없이 mock cursor로 돈다(MySQL 전용 SQL이라 SQLite 대체
 # 불가, 기존 migrate_v5 테스트도 SQL 파일 텍스트만 검사). 여기서는 WHERE 절의 판정
 # 로직을 파이썬으로 재현해 "문서 근거만 재분류하고 PR 근거는 건드리지 않는지"를
 # 검증하고, 재현이 실제 SQL과 어긋나지 않도록 파일에 같은 조건 문자열이 있는지도 본다.
 
-def _migrate_v9_reclassifies(kind: str, evidence: dict) -> bool:
-    """migrate_v9.sql의 WHERE 절과 동일한 판정."""
+def _migrate_v10_reclassifies(kind: str, evidence: dict) -> bool:
+    """migrate_v10.sql의 WHERE 절과 동일한 판정."""
     return kind == "complete_action" and evidence.get("type") == "document"
 
 
-def test_migrate_v9_sql_contains_expected_predicate():
-    sql = pathlib.Path("backend/db/migrate_v9.sql").read_text(encoding="utf-8")
+def test_migrate_v10_sql_contains_expected_predicate():
+    sql = pathlib.Path("backend/db/migrate_v10.sql").read_text(encoding="utf-8")
     assert "SET kind = 'complete_action_doc'" in sql
     assert "WHERE kind = 'complete_action'" in sql
     assert "JSON_UNQUOTE(JSON_EXTRACT(evidence, '$.type')) = 'document'" in sql
 
 
-def test_migrate_v9_only_reclassifies_document_evidence_complete_action():
+def test_migrate_v10_only_reclassifies_document_evidence_complete_action():
     """문서 근거로 저장된 complete_action만 재분류 대상이고, PR 근거·다른 kind·이미
     재분류된 행은 대상에서 빠진다 — 잘못 짜면 멀쩡한 PR 완료 제안까지 재분류될 수 있다."""
     cases = [
@@ -677,12 +677,12 @@ def test_migrate_v9_only_reclassifies_document_evidence_complete_action():
         ("supersede", {"type": "supersede", "superseding_memory_id": 1}, False),
     ]
     for kind, evidence, expected in cases:
-        assert _migrate_v9_reclassifies(kind, evidence) is expected, (kind, evidence)
+        assert _migrate_v10_reclassifies(kind, evidence) is expected, (kind, evidence)
 
 
-def test_migrate_v9_is_idempotent():
+def test_migrate_v10_is_idempotent():
     """재실행하면 이미 재분류된 행은 다시 걸리지 않는다(kind가 이미 바뀌어 WHERE 미충족)."""
     kind, evidence = "complete_action", {"type": "document", "doc_id": 5}
-    assert _migrate_v9_reclassifies(kind, evidence) is True
+    assert _migrate_v10_reclassifies(kind, evidence) is True
     kind_after = "complete_action_doc"  # 마이그레이션 적용 후 상태
-    assert _migrate_v9_reclassifies(kind_after, evidence) is False
+    assert _migrate_v10_reclassifies(kind_after, evidence) is False

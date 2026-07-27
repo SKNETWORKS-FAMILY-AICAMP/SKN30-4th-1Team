@@ -249,8 +249,12 @@ def test_multipart_post_finalize_cancellation_compensates_document(cancel_stage)
         "backend.api.upload.extract"
     ) as extract, patch("backend.api.upload.ingest") as ingest, patch(
         "backend.api.upload.compensate_cancelled_document"
-    ) as compensate, patch("backend.api.upload.cleanup_failed_reservation") as reservation_cleanup:
-        extract.return_value = []
+    ) as compensate, patch("backend.api.upload.cleanup_failed_reservation") as reservation_cleanup, patch(
+        "backend.api.upload._fetch_open_actions", return_value=[]
+    ):
+        # 문서 업로드 경로의 extract()는 (items, completions) 튜플을 반환한다
+        # (문서 기반 완료 판정). git-log 경로(query.py)는 단일 반환 그대로다.
+        extract.return_value = ([], [])
         if cancel_stage == "extract":
             extract.side_effect = asyncio.CancelledError()
         else:

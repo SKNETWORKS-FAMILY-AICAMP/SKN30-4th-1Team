@@ -50,7 +50,7 @@
 
 1. 문서 기반 전체 완료를 `complete_action` → **`complete_action_doc`**로 분리
 2. `?kind=all`을 **레거시 kind로 동결** — `complete_action`, `supersede`만 반환
-3. 이미 저장된 행은 마이그레이션(`backend/db/migrate_v9.sql`)으로 재분류
+3. 이미 저장된 행은 마이그레이션(`backend/db/migrate_v10.sql`)으로 재분류
 
 **⚠️ `kind=all`의 의미가 바뀌었습니다.** "필터 없음" → "레거시 kind 2종".
 현재 데스크톱 코드 기준으로는 **받는 결과가 지금과 동일**하므로(아는 kind가 그 둘뿐)
