@@ -1,10 +1,12 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const DIST_INDEX = resolve("dist/index.html");
+const DIST_ASSETS = resolve("dist/assets");
+const DIST_LICENSES = resolve("dist/licenses");
 const MACOS_TAURI_CONFIG = resolve("src-tauri/tauri.macos.conf.json");
 const PROJECT_STORAGE_KEY = `paim.projects.v8.server.${encodeURIComponent("http://127.0.0.1:7272")}`;
 const PROJECT_PANEL_COLLAPSED_STORAGE_KEY = "paim.projectPanelCollapsed.v2";
@@ -341,6 +343,44 @@ function assertRelativeAssets() {
   }
 }
 
+// 릴리즈 번들에 SUIT/SUITE 원본과 각 OFL 고지 파일이 실제로 포함되는지 확인한다.
+function assertBundledVariableFonts() {
+  if (!existsSync(DIST_ASSETS)) {
+    throw new Error("dist/assets does not exist. Run npm run build first.");
+  }
+
+  const assetNames = readdirSync(DIST_ASSETS);
+  const css = assetNames
+    .filter((name) => name.endsWith(".css"))
+    .map((name) => readFileSync(resolve(DIST_ASSETS, name), "utf8"))
+    .join("\n");
+  const fontContracts = [
+    {
+      family: "SUIT Variable",
+      assetPattern: /^SUIT-Variable-.*\.woff2$/,
+      license: resolve(DIST_LICENSES, "SUIT-OFL.txt"),
+    },
+    {
+      family: "SUITE Variable",
+      assetPattern: /^SUITE-Variable-.*\.woff2$/,
+      license: resolve(DIST_LICENSES, "SUITE-OFL.txt"),
+    },
+  ];
+
+  for (const contract of fontContracts) {
+    const assetName = assetNames.find((name) => contract.assetPattern.test(name));
+    if (!assetName ||
+        statSync(resolve(DIST_ASSETS, assetName)).size === 0 ||
+        !css.includes(contract.family) ||
+        !css.includes(assetName)) {
+      throw new Error(`${contract.family} should be emitted as a local WOFF2 asset`);
+    }
+    if (!existsSync(contract.license) || statSync(contract.license).size === 0) {
+      throw new Error(`${contract.family} OFL notice should be included in the release bundle`);
+    }
+  }
+}
+
 // 로그인·빈 시작·작업공간이 공유하는 단일 macOS 창은 항상 네이티브 신호등을 유지한다.
 function assertMacNativeWindowChrome() {
   const macosConfig = JSON.parse(readFileSync(MACOS_TAURI_CONFIG, "utf8"));
@@ -364,6 +404,7 @@ if (!existsSync(DIST_INDEX)) {
 }
 
 assertRelativeAssets();
+assertBundledVariableFonts();
 assertMacNativeWindowChrome();
 let browser = null;
 let ws = null;
@@ -407,6 +448,20 @@ try {
   });
   await navigateAndWaitForSelector(send, fileUrl, ".project-start", 8000);
 
+  const fontLoadResult = await send("Runtime.evaluate", {
+    awaitPromise: true,
+    returnByValue: true,
+    expression: `(async () => {
+      await Promise.all([
+        document.fonts.load('400 16px "SUIT Variable"', '가나다'),
+        document.fonts.load('700 16px "SUITE Variable"', '가나다'),
+      ]);
+      return {
+        suitLoaded: document.fonts.check('400 16px "SUIT Variable"', '가나다'),
+        suiteLoaded: document.fonts.check('700 16px "SUITE Variable"', '가나다'),
+      };
+    })()`,
+  });
   const result = await send("Runtime.evaluate", {
     returnByValue: true,
     expression: `(() => ({
@@ -435,15 +490,33 @@ try {
       hasLegacySidebarSettingsButton: Boolean(document.querySelector('.sidebar-settings-button')),
       sidebarAccountHasPopup: document.querySelector('.sidebar-account-button')?.getAttribute('aria-haspopup') || '',
       sidebarAccountLabel: document.querySelector('.sidebar-account-button')?.getAttribute('aria-label') || '',
+      rootFont: getComputedStyle(document.documentElement).fontFamily,
+      headingFont: getComputedStyle(document.querySelector('.project-start-copy h1')).fontFamily,
       scrollWidth: document.documentElement.scrollWidth,
       networkAttempts: window.__paimOfflineNetworkAttempts || [],
     }))()`,
   });
-  const value = result.result.value;
+  const value = {
+    ...result.result.value,
+    fontLoad: fontLoadResult.result.value,
+  };
   const failures = [];
 
   if (value.protocol !== "file:") {
     failures.push(`offline smoke should load file://, got ${value.protocol}`);
+  }
+
+  if (!value.fontLoad.suitLoaded ||
+      !value.fontLoad.suiteLoaded ||
+      !/^\s*(?:"SUIT Variable"|SUIT Variable)(?:,|$)/.test(value.rootFont) ||
+      !/^\s*(?:"SUITE Variable"|SUITE Variable)(?:,|$)/.test(value.headingFont)) {
+    failures.push(
+      `offline bundle should load local SUIT/SUITE typography: ${JSON.stringify({
+        fontLoad: value.fontLoad,
+        rootFont: value.rootFont,
+        headingFont: value.headingFont,
+      })}`,
+    );
   }
 
   if (!value.hasAstryxShell || !value.hasAstryxMain || !value.hasShell || !value.hasSidebar) {

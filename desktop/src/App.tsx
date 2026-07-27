@@ -525,9 +525,9 @@ const MAX_PROJECT_PANEL_WIDTH = 520;
 const MIN_MAIN_CONTENT_WIDTH = 580;
 const PANEL_RAIL_WIDTH = 44;
 const DEFAULT_ZOOM_SCALE = 1;
-const MIN_ZOOM_SCALE = 1;
+const MIN_ZOOM_SCALE = 0.5;
 const MAX_ZOOM_SCALE = 2;
-const ZOOM_STEP = 0.1;
+const ZOOM_STEP = 0.05;
 const LEGACY_WELCOME_CONTENT = "안녕하세요! 😊";
 const FOCUSABLE_ELEMENT_SELECTOR = [
   "a[href]",
@@ -996,11 +996,22 @@ function loadProjectPanelWidth() {
 }
 
 function clampZoomScale(scale: number) {
-  return Math.min(MAX_ZOOM_SCALE, Math.max(MIN_ZOOM_SCALE, scale));
+  const clampedScale = Math.min(MAX_ZOOM_SCALE, Math.max(MIN_ZOOM_SCALE, scale));
+  const steppedScale =
+    MIN_ZOOM_SCALE +
+    Math.round((clampedScale - MIN_ZOOM_SCALE) / ZOOM_STEP) * ZOOM_STEP;
+
+  return Math.round(steppedScale * 100) / 100;
 }
 
 function loadZoomScale() {
-  const savedScale = Number(window.localStorage.getItem(ZOOM_STORAGE_KEY));
+  const savedValue = window.localStorage.getItem(ZOOM_STORAGE_KEY);
+
+  if (savedValue === null || savedValue.trim() === "") {
+    return DEFAULT_ZOOM_SCALE;
+  }
+
+  const savedScale = Number(savedValue);
 
   if (!Number.isFinite(savedScale)) {
     return DEFAULT_ZOOM_SCALE;
@@ -1815,6 +1826,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   const [prompt, setPrompt] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isSending, setIsSending] = useState(false);
+  const [expandedProjectSourcesId, setExpandedProjectSourcesId] = useState<string | null>(null);
   const [pendingProjectId, setPendingProjectId] = useState<string | null>(null);
   const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
   const [thinkingStartedAt, setThinkingStartedAt] = useState<number | null>(null);
@@ -2075,9 +2087,14 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   );
   const selectedProjectHasDocumentInProgress =
     selectedProjectDocumentStatusSummary.inProgressCount > 0;
+  const areSelectedProjectSourcesExpanded =
+    selectedProject !== null && expandedProjectSourcesId === selectedProject.id;
   const selectedProjectSetupVisibleSources = useMemo(
-    () => sortedSelectedProjectAttachments.slice(0, 5),
-    [sortedSelectedProjectAttachments],
+    () =>
+      areSelectedProjectSourcesExpanded
+        ? sortedSelectedProjectAttachments
+        : sortedSelectedProjectAttachments.slice(0, 5),
+    [areSelectedProjectSourcesExpanded, sortedSelectedProjectAttachments],
   );
   const selectedProjectSetupHiddenSourceCount = Math.max(
     0,
@@ -2702,7 +2719,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   }
 
   function applyZoomScale(scale: number) {
-    const nextScale = Math.round(clampZoomScale(scale) * 100) / 100;
+    const nextScale = clampZoomScale(scale);
     zoomScaleRef.current = nextScale;
     setZoomScaleState(nextScale);
     window.localStorage.setItem(ZOOM_STORAGE_KEY, String(nextScale));
@@ -7339,7 +7356,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
               tooltip={t("돌아가기")}
               variant="ghost"
             />
-            <div>
+            <div className="settings-header-copy">
               <h1 ref={mainViewHeadingRef} tabIndex={-1}>{t("멤버 관리")}</h1>
               {selectedProject ? <p>{selectedProject.name}</p> : null}
             </div>
@@ -7380,7 +7397,9 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
               tooltip={t("돌아가기")}
               variant="ghost"
             />
-            <h1 ref={mainViewHeadingRef} tabIndex={-1}>{t("프로필")}</h1>
+            <div className="settings-header-copy">
+              <h1 ref={mainViewHeadingRef} tabIndex={-1}>{t("프로필")}</h1>
+            </div>
           </header>
 
           <section className="profile-identity-card" aria-label={t("계정 정보")}>
@@ -7447,7 +7466,9 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
               tooltip={t("돌아가기")}
               variant="ghost"
             />
-            <h1 ref={mainViewHeadingRef} tabIndex={-1}>{t("설정")}</h1>
+            <div className="settings-header-copy">
+              <h1 ref={mainViewHeadingRef} tabIndex={-1}>{t("설정")}</h1>
+            </div>
           </header>
 
           <section className="settings-group" aria-label={t("테마")}>
@@ -7471,7 +7492,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
           <section className="settings-group" aria-label={t("화면 확대")}>
             <div className="settings-copy">
               <h2>{t("화면 확대")}</h2>
-              <p>{t("텍스트와 인터페이스를 100%에서 200%까지 확대합니다.")}</p>
+              <p>{t("텍스트와 인터페이스를 50%에서 200%까지 5% 단위로 조절합니다.")}</p>
             </div>
             <div className="settings-range">
               <Suspense fallback={<div className="settings-control-skeleton" aria-hidden="true" />}>
@@ -8353,7 +8374,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                       </span>
                       <div className="message-content">
                         {message.role === "assistant" ? (
-                          <div className="assistant">
+                          <div className="paim-assistant-content">
                             {selectedSession.title === "Project Briefing" && messageIndex === 0 ? (
                               <span className="message-briefing-label">{t("프로젝트 브리핑")}</span>
                             ) : null}
@@ -8373,7 +8394,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                               }
                             >
                               <LazyMarkdown
-                                className="md"
+                                className="paim-message-markdown"
                                 density="compact"
                                 headingLevelStart={3}
                               >
@@ -8382,7 +8403,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                             </Suspense>
                             {message.sources && message.sources.length > 0 ? (
                               <div className="sources" aria-label={t("출처")}>
-                                <span className="label">{t("출처")}</span>
+                                <span className="paim-sources-label">{t("출처")}</span>
                                 {message.sources.map((source, sourceIndex) => (
                                   <Badge
                                     className="source-chip"
@@ -8431,7 +8452,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                       <div className="thinking">
                         <Spinner aria-label={t("응답 생성 중")} shade="subtle" size="sm" />
                         <span aria-hidden="true">
-                          <span className="dots">{t("생각 중")}</span> · {t("{seconds}초", {
+                          <span className="paim-thinking-dots">{t("생각 중")}</span> · {t("{seconds}초", {
                             seconds: thinkingElapsedSeconds,
                           })}
                         </span>
@@ -8622,6 +8643,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                       <div
                         aria-label={t("프로젝트 자료")}
                         className="project-home-canvas-filled"
+                        data-expanded={areSelectedProjectSourcesExpanded ? "true" : "false"}
                         role="group"
                       >
                         <div className="project-home-upload-summary">
@@ -8645,55 +8667,63 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                             variant="ghost"
                           />
                         </div>
-                        {selectedProjectSetupVisibleSources.map((source) => {
-                          const sourceMeta =
-                            source.kind === "directory"
-                              ? { Icon: FolderOpen, color: "var(--muted)" }
-                              : getProjectFileVisualMeta(source.name);
-                          const SourceIcon = sourceMeta.Icon;
-                          const sourceStatus =
-                            source.documentStatus ?? (source.kind === "directory" ? "folder" : "local");
+                        <div className="project-home-source-list">
+                          {selectedProjectSetupVisibleSources.map((source) => {
+                            const sourceMeta =
+                              source.kind === "directory"
+                                ? { Icon: FolderOpen, color: "var(--muted)" }
+                                : getProjectFileVisualMeta(source.name);
+                            const SourceIcon = sourceMeta.Icon;
+                            const sourceStatus =
+                              source.documentStatus ??
+                              (source.kind === "directory" ? "folder" : "local");
 
-                          return (
-                            <div
-                              className="project-home-source-row"
-                              data-delete={
-                                pendingSetupDeleteProjectFileId === source.id ? "confirm" : undefined
-                              }
-                              data-status={sourceStatus}
-                              key={source.id}
-                            >
-                              <span className="project-home-source-icon" style={{ color: sourceMeta.color }}>
-                                <SourceIcon size={15} />
-                              </span>
-                              <span className="project-home-source-name">{source.name}</span>
-                              <span className="project-home-source-status">
-                                {t(getProjectSetupSourceStatusLabel(source))}
-                              </span>
-                              <IconButton
-                                className="project-home-source-delete"
-                                icon={<X size={12} />}
-                                isDisabled={!canMutateSelectedProject}
-                                label={
+                            return (
+                              <div
+                                className="project-home-source-row"
+                                data-delete={
                                   pendingSetupDeleteProjectFileId === source.id
-                                    ? t("자료 삭제 확인")
-                                    : t("자료 삭제")
+                                    ? "confirm"
+                                    : undefined
                                 }
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  handleRequestDeleteProjectSetupSource(selectedProject.id, source);
-                                }}
-                                size="sm"
-                                tooltip={
-                                  pendingSetupDeleteProjectFileId === source.id
-                                    ? t("한 번 더 누르면 삭제")
-                                    : t("자료 삭제")
-                                }
-                                variant="ghost"
-                              />
-                            </div>
-                          );
-                        })}
+                                data-status={sourceStatus}
+                                key={source.id}
+                              >
+                                <span
+                                  className="project-home-source-icon"
+                                  style={{ color: sourceMeta.color }}
+                                >
+                                  <SourceIcon size={15} />
+                                </span>
+                                <span className="project-home-source-name">{source.name}</span>
+                                <span className="project-home-source-status">
+                                  {t(getProjectSetupSourceStatusLabel(source))}
+                                </span>
+                                <IconButton
+                                  className="project-home-source-delete"
+                                  icon={<X size={12} />}
+                                  isDisabled={!canMutateSelectedProject}
+                                  label={
+                                    pendingSetupDeleteProjectFileId === source.id
+                                      ? t("자료 삭제 확인")
+                                      : t("자료 삭제")
+                                  }
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    handleRequestDeleteProjectSetupSource(selectedProject.id, source);
+                                  }}
+                                  size="sm"
+                                  tooltip={
+                                    pendingSetupDeleteProjectFileId === source.id
+                                      ? t("한 번 더 누르면 삭제")
+                                      : t("자료 삭제")
+                                  }
+                                  variant="ghost"
+                                />
+                              </div>
+                            );
+                          })}
+                        </div>
                         {selectedProjectSetupHiddenSourceCount > 0 ? (
                           <Button
                             className="project-home-source-more"
@@ -8701,8 +8731,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                               count: selectedProjectSetupHiddenSourceCount,
                             })}
                             onClick={() => {
-                              openProjectPanel();
-                              openProjectPanelTool("files");
+                              setExpandedProjectSourcesId(selectedProject.id);
                             }}
                             size="sm"
                             variant="ghost"

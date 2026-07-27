@@ -125,8 +125,8 @@ const en: Record<string, string> = {
   "시스템 설정을 따르거나 PaiM 화면만 고정합니다.": "Follow the system setting or pin PaiM to one theme.",
   "테마 선택": "Theme",
   "화면 확대": "Interface zoom",
-  "텍스트와 인터페이스를 100%에서 200%까지 확대합니다.":
-    "Scale text and interface from 100% to 200%.",
+  "텍스트와 인터페이스를 50%에서 200%까지 5% 단위로 조절합니다.":
+    "Adjust text and interface from 50% to 200% in 5% increments.",
   "시스템": "System",
   "다크": "Dark",
   "라이트": "Light",
