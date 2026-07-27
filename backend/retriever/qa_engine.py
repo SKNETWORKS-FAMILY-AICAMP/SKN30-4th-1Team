@@ -22,14 +22,26 @@ from pydantic import BaseModel, Field
 from rank_bm25 import BM25Okapi
 
 from . import history_intent, mysql_search
-from .memory_vector import memory_vector_id
+from .memory_vector import format_memory_document, memory_vector_id
 from ..db.chroma import get_collection
 from ..llm.chat_model_factory import get_chat_model
 
 MAX_HISTORY = 10    # 대화 히스토리 최대 유지 턴 수 (컨텍스트 길이 제한)
 CHROMA_K = 8        # 리트리버별(BM25/dense) 후보 청크 수 — 넉넉히 뽑고 융합으로 거른다
 CHROMA_TOP_N = 5    # RRF 융합 후 컨텍스트에 넣을 최종 원문 청크 수
-MYSQL_TOP_N = 12    # 구조화 기록 상한 (category 미매칭 시) — 초과 시 BM25 유관 상위 선별
+# ponytail: 구조화 기록 최종 선정 개수. 12 → 4로 축소. 뒤쪽 행들은 순위가 낮은 만큼
+# 관련도도 낮아 컨텍스트 노이즈만 늘리고 있었다. 26문항 x 2코퍼스 재수집 재측정
+# (rendered 기준, RAGAS/gpt-4.1-mini) 실측:
+#   context_precision  Modu 0.557→0.649, CS-Bot 0.491→0.521
+#   context_recall     Modu 0.981 유지,  CS-Bot 1.000 유지  (예산을 줄여도 안 깎임)
+#   faithfulness       Modu 0.941→0.972, CS-Bot 0.918→0.934
+#   SQL 컨텍스트 수     중앙값 12→5 / 9→5
+# recall이 안 깎이는 이유: 정답 근거는 원문 청크(vector 축)가 이미 커버하고 있어서,
+# SQL 축 뒤쪽 행들은 recall에 기여하지 못한 채 정밀도만 떨어뜨리고 있었다.
+MYSQL_TOP_N = 4
+# 아래 후보 풀과 반드시 분리해서 쓸 것: 최종 선정 개수를 그대로 memory 벡터 조회
+# n_results로 넘기면 이웃을 4개만 받아 융합할 재료 자체가 사라져 랭킹이 나빠진다.
+MYSQL_CANDIDATE_POOL = 12  # memory 벡터 검색이 쿼리당 받아올 이웃 후보 수
 QA_MYSQL_ROWS_LIMIT = max(1, int(os.getenv("QA_MYSQL_ROWS_LIMIT", "60")))
 MYSQL_SUPPLEMENT = 5  # category 매칭 시 타 카테고리에서 BM25 유관 상위 보충 개수
 BM25_WEIGHT = 0.5   # 구조화 기록(MySQL) 융합 가중치 (BM25 : memory vector = 0.5 : 0.5)
@@ -43,6 +55,13 @@ BM25_RELEVANCE_RATIO = 0.5
 # 베이스라인 재현 사례)으로 잡은 값 — 코퍼스가 작아 관련/무관 거리 구간이 겹쳐
 # 완벽한 컷은 어려움. 26문항 재측정 결과 보고 조정할 것.
 VECTOR_DISTANCE_MARGIN = 0.15
+# ponytail: 멀티쿼리(원 질문 + 재표현 최대 3개) fan-out 문제 — 쿼리 하나에서만 약하게
+# 걸린 행도 RRF 융합 후엔 fused score>0이 돼 통과했었다(예: "SDK 연동 담당자" 질문에서
+# "QA 시나리오 작성"처럼 같은 화제이지만 무관한 행이 다른 쿼리 변형 하나에서만 걸려
+# 같이 들어옴). 최고 fused 점수 대비 이 비율 미만인 행은 제외 — 진짜 관련 행은 여러
+# 쿼리 변형·양쪽 축(BM25+벡터)에서 반복 상위권에 들어 fused 점수가 훨씬 높다는 전제.
+# C1 실측(qid, 담당자 질문)으로 잡은 값 — 재측정 결과 보고 조정할 것.
+FUSED_RELEVANCE_RATIO = 0.3
 _RRF_K = 60         # RRF 표준 상수 (score = w / (k + rank))
 # 원문 청크 융합 가중치 (로드맵 권고 0.4/0.4/0.2). 축별로 정규화해
 # 멀티쿼리 개수와 무관하게 축 총 가중치가 고정된다.
@@ -276,7 +295,7 @@ def _memory_vector_rank_lists(project_id: int, queries: List[str], rows: List[Di
     try:
         result = get_collection().query(
             query_texts=queries,
-            n_results=min(max(MYSQL_TOP_N, 1), len(rows)),
+            n_results=min(max(MYSQL_CANDIDATE_POOL, 1), len(rows)),
             where={"$and": [{"project_id": project_id}, {"item_type": "memory"}]},
         )
     except Exception:
@@ -316,15 +335,22 @@ def _rank_mysql_rows(project_id: int, rows: List[Dict], queries: List[str], limi
 
     관련도 threshold: BM25 랭크는 쿼리별 최고점 대비 BM25_RELEVANCE_RATIO 미만인 행을 제외
     (무관한 행이 약한 토큰 중복만으로 순위를 차지해 RRF 점수를 받아가는 것을 방지), 최종
-    선정도 fused score>0인 행으로만 제한한다 — 이전엔 진짜 관련 행이 부족해도 limit개를
-    억지로 채워 무관한 행이 컨텍스트에 섞였다(context_precision 저하 원인).
+    선정도 fused score가 최고 fused 점수 대비 FUSED_RELEVANCE_RATIO 미만이면 제외한다 —
+    이전엔 진짜 관련 행이 부족해도 limit개를 억지로 채웠고(context_precision 저하 원인),
+    그 fix 이후에도 멀티쿼리(재표현 여러 개) 중 단 하나에서만 약하게 걸린 행이 fused
+    score>0이라는 이유만으로 통과하는 fan-out 문제가 남아있었다.
+
+    BM25 입력은 content만이 아니라 memory vector와 동일한 직렬화(format_memory_document:
+    분류·내용·주제·근거·담당·마감·완료상태)를 사용한다 — PM 분석 보고서(SQL_CONTEXT_
+    RETRIEVAL_PRECISION_REPORT, "SQL 랭킹 입력 보강") 지적대로, content만 보면 "담당자
+    누구", "마감일 언제" 같은 질문이 owner/due_date 필드와 매칭될 방법이 BM25엔 없었다.
     """
     if not rows:
         return [], []
 
     rank_lists: List[List[int]] = []
     weights: List[float] = []
-    texts = [row.get("content") or "" for row in rows]
+    texts = [format_memory_document(row) for row in rows]
     for query in queries:
         scores = _bm25_scores(query, texts)
         top_score = max(scores, default=0.0)
@@ -342,7 +368,9 @@ def _rank_mysql_rows(project_id: int, rows: List[Dict], queries: List[str], limi
         return rows[:limit], vector_hits
 
     fused = _rrf_fuse(rank_lists, weights, len(rows))
-    relevant = [i for i in range(len(rows)) if fused[i] > 0]
+    top_fused = max(fused, default=0.0)
+    floor = top_fused * FUSED_RELEVANCE_RATIO
+    relevant = [i for i in range(len(rows)) if fused[i] >= floor and fused[i] > 0]
     top = sorted(relevant, key=lambda i: -fused[i])[:limit]
     return [rows[i] for i in top], vector_hits
 
@@ -677,7 +705,7 @@ def _build_context(
     # 1) 구조화 기록 — MySQL memory 테이블.
     #    category는 하드 필터가 아니라 소프트 우선순위로 쓴다: 추출기의 decision/action 분류
     #    경계가 모호해("~하기로 결정"은 양쪽 다 가능) 하드 컷은 recall을 깎는다.
-    #    - category 매칭: 그 카테고리 전체 + 타 카테고리에서 BM25 유관 상위 보충
+    #    - category 매칭: 그 카테고리 상위 MYSQL_TOP_N + 타 카테고리에서 BM25 유관 상위 보충
     #    - category 미매칭: 전체에서 BM25 유관 상위 MYSQL_TOP_N
     category = _extract_category(question)
     debug["filters"] = {"category": category}
@@ -690,8 +718,11 @@ def _build_context(
         if others:
             supplement, hits = _rank_mysql_rows(project_id, others, multi_queries, MYSQL_SUPPLEMENT)
             memory_vector_hits.extend(hits)
-        matched_limit = max(1, QA_MYSQL_ROWS_LIMIT - len(supplement))
-        matched, hits = _rank_mysql_rows(project_id, matched, multi_queries, matched_limit)
+        # 매칭 카테고리도 미매칭 분기와 같은 상한을 쓴다 — 이전엔 QA_MYSQL_ROWS_LIMIT(60)
+        # 에서 보충분만 뺀 55개까지 열려 있어, category가 잡히기만 하면 그 카테고리 행이
+        # 사실상 전부 컨텍스트에 실렸다(실측 최대 42~57개). 보충분은 category 감지가
+        # 소프트 판정이라 오분류 시 recall을 받쳐주는 안전망이므로 그대로 둔다.
+        matched, hits = _rank_mysql_rows(project_id, matched, multi_queries, MYSQL_TOP_N)
         memory_vector_hits.extend(hits)
         rows = matched + supplement
     elif len(rows) > MYSQL_TOP_N:
