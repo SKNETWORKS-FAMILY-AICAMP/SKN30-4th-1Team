@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import math
 import re
 from collections import Counter
 from typing import Iterable, Optional
@@ -78,7 +79,9 @@ def find_repeated_edge_lines(pages: list[list[str]]) -> set[str]:
         }
         counter.update(candidates)
 
-    threshold = max(_REPEAT_MIN_PAGES, int(len(pages) * _REPEAT_RATIO))
+    # ceil을 쓴다. int()로 내리면 6페이지 중 3페이지(50%)처럼 _REPEAT_RATIO에
+    # 못 미치는 문구까지 머리말로 판정해 정상 본문을 지운다.
+    threshold = max(_REPEAT_MIN_PAGES, math.ceil(len(pages) * _REPEAT_RATIO))
     return {line for line, count in counter.items() if count >= threshold}
 
 

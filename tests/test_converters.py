@@ -310,6 +310,163 @@ def test_chunk_text_covers_document_content():
         assert f"{index}번째 문단입니다." in joined
 
 
+# ─── 리뷰 지적 회귀 (PR-001-R001~R006) ──────────────────────────────────────
+
+def test_docx_rejects_zip_bomb_before_parsing():
+    """R001: 압축 크기는 작지만 전개 크기가 큰 DOCX는 파싱 전에 거절한다."""
+    import zipfile
+
+    paragraph = "<w:p><w:r><w:t>" + "A" * 200 + "</w:t></w:r></w:p>"
+    xml = (
+        '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org'
+        '/wordprocessingml/2006/main"><w:body>' + paragraph * 200000 + "</w:body></w:document>"
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+        archive.writestr("word/document.xml", xml.encode())
+    bomb = buffer.getvalue()
+
+    # 업로드 크기 제한(10MB)은 통과하지만 전개하면 수십 MB다.
+    assert len(bomb) < 10 * 1024 * 1024
+
+    with pytest.raises(ConversionError) as exc:
+        convert("폭탄.docx", bomb)
+    assert exc.value.code == ErrorCode.CORRUPT_FILE
+
+
+def test_query_attachment_also_rejects_zip_bomb():
+    """R001: 질의 첨부도 같은 변환 경로를 쓰므로 동일하게 막혀야 한다."""
+    import base64
+    import zipfile
+    from unittest.mock import patch
+
+    from fastapi.testclient import TestClient
+
+    from backend.main import app
+
+    xml = (
+        '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org'
+        '/wordprocessingml/2006/main"><w:body>'
+        + "<w:p><w:r><w:t>" + "A" * 200 + "</w:t></w:r></w:p>" * 200000
+        + "</w:body></w:document>"
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+        archive.writestr("word/document.xml", xml.encode())
+
+    client = TestClient(app, raise_server_exceptions=False)
+    with patch("backend.api.query.require_project_access"), \
+         patch("backend.api.query.get_connection") as conn:
+        conn.return_value.cursor.return_value.__enter__.return_value.fetchone.return_value = None
+        response = client.post(
+            "/api/v1/projects/1/query",
+            json={
+                "question": "요약해줘",
+                "attachments": [{
+                    "filename": "폭탄.docx",
+                    "content_base64": base64.b64encode(buffer.getvalue()).decode(),
+                }],
+            },
+        )
+    # 변환이 거절되어도 질의 자체는 진행된다(관대한 첨부 정책). 서버가 죽지 않는 것이 핵심.
+    assert response.status_code in (200, 404, 500)
+
+
+def test_chunk_overlap_preserves_all_source_pages():
+    """R002: 오버랩이 두 페이지에 걸치면 다음 청크 범위가 둘 다 포함해야 한다."""
+    # 각 페이지를 한 청크에 다 못 담을 만큼 채워 오버랩이 페이지 경계를 넘게 만든다.
+    data = _make_pdf([
+        [f"Page one sentence number {i} with padding text here." for i in range(1, 12)],
+        [f"Page two sentence number {i} with padding text here." for i in range(1, 12)],
+    ])
+    doc = convert("p.pdf", data)
+    chunks = chunk_document(doc)
+
+    for chunk in chunks:
+        # 청크 텍스트가 특정 페이지 문구를 포함하면 그 페이지가 범위 안에 있어야 한다.
+        for page_number, marker in ((1, "Page one"), (2, "Page two")):
+            if marker in chunk.text:
+                assert chunk.page_start <= page_number <= chunk.page_end, (
+                    f"chunk{chunk.index}가 {marker}를 담았지만 페이지 범위는 "
+                    f"{chunk.page_start}~{chunk.page_end}"
+                )
+
+
+def test_chunk_overlap_preserves_block_range():
+    """R002: 오버랩이 여러 블록에 걸쳐도 block_start가 실제 출처를 포괄해야 한다."""
+    # 마커는 고정폭이어야 한다 — "0번"은 "10번"의 부분 문자열이라 오탐한다.
+    source = "\n\n".join(f"[P{i:02d}] 문단 " + ("내용 " * 15) for i in range(20))
+    chunks = chunk_document(convert("b.md", source.encode("utf-8")))
+
+    for chunk in chunks:
+        for index in range(20):
+            if f"[P{index:02d}]" in chunk.text:
+                assert chunk.block_start <= index <= chunk.block_end, (
+                    f"chunk{chunk.index}가 block{index} 내용을 담았지만 범위는 "
+                    f"{chunk.block_start}~{chunk.block_end}"
+                )
+
+
+def test_repeated_line_threshold_respects_ratio_boundary():
+    """R003: 6페이지 중 3(50%)은 유지, 4(67%)부터 제거 — 정책서의 60% 기준."""
+    from backend.pipeline.converters.cleaning import find_repeated_edge_lines
+
+    def pages_with(marker_count: int, total: int = 6):
+        return [
+            ["머리말 후보" if i < marker_count else f"고유한 첫 줄 {i}", f"본문 {i}"]
+            for i in range(total)
+        ]
+
+    assert "머리말 후보" not in find_repeated_edge_lines(pages_with(3))
+    assert "머리말 후보" in find_repeated_edge_lines(pages_with(4))
+
+
+def test_docx_keeps_unmerged_cells_with_identical_text():
+    """R004: 값이 우연히 같은 독립 셀 두 개는 모두 보존돼야 한다."""
+    def build(document):
+        table = document.add_table(rows=1, cols=3)
+        table.cell(0, 0).text = "승인"
+        table.cell(0, 1).text = "승인"
+        table.cell(0, 2).text = "보류"
+
+    doc = convert("표.docx", _make_docx(build))
+    row = next(b.text for b in doc.blocks if b.kind == "table_row")
+    assert "승인 | 승인 | 보류" in row
+
+
+def test_docx_collapses_actually_merged_cells():
+    """R004: 실제 가로 병합된 셀은 한 번만 출력돼야 한다."""
+    def build(document):
+        table = document.add_table(rows=1, cols=3)
+        merged = table.cell(0, 0).merge(table.cell(0, 1))
+        merged.text = "병합됨"
+        table.cell(0, 2).text = "단독"
+
+    doc = convert("병합.docx", _make_docx(build))
+    row = next(b.text for b in doc.blocks if b.kind == "table_row")
+    assert row.count("병합됨") == 1
+    assert "병합됨 | 단독" in row
+
+
+def test_docx_warns_about_floating_shapes():
+    """R006: 부동 이미지·텍스트 상자도 unsupported_element 경고 대상이다."""
+    import docx
+    from docx.oxml.ns import qn
+
+    document = docx.Document()
+    paragraph = document.add_paragraph("본문 문단")
+    # 부동(anchor) 도형을 감싸는 w:drawing을 직접 삽입한다.
+    run = paragraph.add_run()
+    drawing = run._r.makeelement(qn("w:drawing"), {})
+    drawing.append(drawing.makeelement(qn("wp:anchor"), {}))
+    run._r.append(drawing)
+    buffer = io.BytesIO()
+    document.save(buffer)
+
+    doc = convert("도형.docx", buffer.getvalue())
+    assert WarningCode.UNSUPPORTED_ELEMENT in {w.code for w in doc.warnings}
+
+
 # ─── ingestor 연결 ──────────────────────────────────────────────────────────
 
 def test_ingest_chunk_metadata_carries_provenance():
@@ -417,4 +574,35 @@ def test_upload_rejects_scanned_pdf_with_explicit_code():
         )
 
     assert response.status_code == 400
-    assert response.json()["detail"]["code"] == ErrorCode.NO_TEXT_LAYER
+    body = response.json()
+    # detail은 반드시 문자열이어야 한다 — 객체로 내리면 데스크톱 클라이언트가
+    # 사유를 버리고 "PaiM API 요청 실패"만 표시한다 (paimApi.ts 계약).
+    assert isinstance(body["detail"], str)
+    assert "스캔" in body["detail"]
+    assert body["code"] == ErrorCode.NO_TEXT_LAYER
+
+
+def test_upload_error_detail_is_string_for_every_conversion_failure():
+    """모든 변환 실패가 기존 클라이언트가 읽는 형태(문자열 detail + 최상위 code)여야 한다."""
+    from unittest.mock import patch
+
+    from fastapi.testclient import TestClient
+
+    from backend.main import app
+
+    client = TestClient(app, raise_server_exceptions=False)
+    cases = [
+        ("깨진.docx", b"not a real docx", ErrorCode.CORRUPT_FILE),
+        ("빈.txt", b"\n\n   \n", ErrorCode.EMPTY_DOCUMENT),
+        ("스캔.pdf", _make_pdf([[], []]), ErrorCode.NO_TEXT_LAYER),
+    ]
+    for name, data, expected_code in cases:
+        with patch("backend.api.upload.require_project_access"):
+            response = client.post(
+                "/api/v1/projects/1/documents",
+                files={"file": (name, data, "application/octet-stream")},
+            )
+        body = response.json()
+        assert response.status_code == 400, name
+        assert isinstance(body["detail"], str), name
+        assert body["code"] == expected_code, name

@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import logging
 import re
+import zipfile
 
 from .base import (
     ConversionError,
@@ -25,6 +26,14 @@ from .cleaning import drop_duplicate_blocks, is_noise_line, normalize_text
 logger = logging.getLogger(__name__)
 
 SUFFIXES = (".docx",)
+
+# 압축 폭탄 방어 한도. DOCX는 ZIP이라 업로드 크기 제한(10MB)이 압축된 바이트에만
+# 걸린다. 반복 텍스트만으로도 압축비 250:1이 나와 10MB가 2.5GB로 전개될 수 있고,
+# python-docx는 XML 전체를 메모리에 올리므로 워커가 그대로 고갈된다.
+# 정상 DOCX의 압축비는 보통 10:1 미만이라 아래 한도는 실사용을 방해하지 않는다.
+_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024   # 전체 전개 크기
+_MAX_ENTRY_BYTES = 100 * 1024 * 1024          # 엔트리 1개 전개 크기
+_MAX_COMPRESSION_RATIO = 120                  # 전체 압축비
 
 # "Heading 1", "제목 1", "개요 1" 등 스타일 이름에서 레벨 숫자를 뽑는다.
 _HEADING_STYLE = re.compile(r"^(?:heading|title|제목|개요)\s*(\d+)?$", re.IGNORECASE)
@@ -116,12 +125,16 @@ def _table_blocks(table, table_index: int) -> tuple[list[dict], ConversionWarnin
     """
     blocks: list[dict] = []
     for row_index, row in enumerate(table.rows):
-        cells = [normalize_text(cell.text).replace("\n", " ").strip() for cell in row.cells]
-        # 병합 셀은 python-docx가 같은 텍스트를 반복 반환하므로 연속 중복을 접는다.
+        # 가로 병합된 셀은 python-docx가 같은 <w:tc> 엘리먼트를 반복해서 돌려준다.
+        # 텍스트가 같다고 접으면 우연히 값이 같은 독립 셀("승인 | 승인")까지 하나로
+        # 뭉개져 열 위치가 밀리므로, 반드시 엘리먼트 동일성으로 판정한다.
         collapsed: list[str] = []
-        for cell in cells:
-            if not collapsed or collapsed[-1] != cell:
-                collapsed.append(cell)
+        previous_tc = None
+        for cell in row.cells:
+            if cell._tc is previous_tc:
+                continue
+            previous_tc = cell._tc
+            collapsed.append(normalize_text(cell.text).replace("\n", " ").strip())
         text = " | ".join(c for c in collapsed if c)
         if text:
             blocks.append({"kind": "table_row", "text": f"[표{table_index + 1}] {text}"})
@@ -133,9 +146,71 @@ def _table_blocks(table, table_index: int) -> tuple[list[dict], ConversionWarnin
     return blocks, warning
 
 
+def _guard_archive_size(data: bytes, filename: str) -> None:
+    """DOCX(ZIP)를 열기 전에 전개 크기와 압축비를 검사한다.
+
+    python-docx에 넘기고 나면 이미 늦다 — 파싱이 시작되는 순간 메모리가 잡힌다.
+    ZIP 중앙 디렉터리의 크기 정보만 읽어 그 전에 거절한다.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            entries = archive.infolist()
+    except zipfile.BadZipFile as exc:
+        raise ConversionError(
+            ErrorCode.CORRUPT_FILE,
+            f"DOCX 파일을 열 수 없습니다: {exc}",
+            source=filename,
+        ) from exc
+
+    total = 0
+    for entry in entries:
+        if entry.file_size > _MAX_ENTRY_BYTES:
+            raise ConversionError(
+                ErrorCode.CORRUPT_FILE,
+                "DOCX 내부 항목의 크기가 허용 범위를 넘습니다. "
+                "손상되었거나 비정상적으로 압축된 파일입니다.",
+                source=filename,
+            )
+        total += entry.file_size
+
+    if total > _MAX_UNCOMPRESSED_BYTES or (
+        data and total / len(data) > _MAX_COMPRESSION_RATIO
+    ):
+        raise ConversionError(
+            ErrorCode.CORRUPT_FILE,
+            "DOCX의 압축 해제 크기가 허용 범위를 넘습니다. "
+            "손상되었거나 비정상적으로 압축된 파일입니다.",
+            source=filename,
+        )
+
+
+def _unsupported_element_count(document, qn) -> int:
+    """텍스트로 변환되지 않는 요소 개수를 센다.
+
+    `document.inline_shapes`는 본문 흐름에 박힌 인라인 그림만 센다. 회의록·정책문서에
+    흔한 부동 이미지(`wp:anchor`)와 텍스트 상자(`w:txbxContent`)는 거기 잡히지 않아,
+    내용이 사라져도 경고가 나가지 않았다. body XML을 직접 세어 누락을 막는다.
+    """
+    # w:drawing(DrawingML)과 w:pict(구형 VML)는 객체 하나당 하나씩 나타나는 최상위
+    # 컨테이너다. 내부의 wp:anchor·w:txbxContent까지 세면 같은 객체를 중복 집계한다.
+    total = 0
+    try:
+        body = document.element.body
+        for tag in ("w:drawing", "w:pict"):
+            try:
+                total += len(body.findall(".//" + qn(tag)))
+            except (KeyError, ValueError):
+                continue
+    except Exception:
+        logger.debug("DOCX 비텍스트 요소 집계 실패", exc_info=True)
+        return 0
+    return total
+
+
 def convert(filename: str, data: bytes):
     """DOCX 바이트를 ConvertedDocument로 변환한다."""
     docx, qn, Table, Paragraph = _require_python_docx()
+    _guard_archive_size(data, filename)
 
     try:
         document = docx.Document(io.BytesIO(data))
@@ -167,14 +242,11 @@ def convert(filename: str, data: bytes):
         raw_blocks.append({"kind": kind, "text": text, "level": level})
 
     # 이미지·차트·도형은 텍스트가 없어 그대로 유실된다. 조용히 버리지 않고 알린다.
-    try:
-        shape_count = len(document.inline_shapes)
-    except Exception:
-        shape_count = 0
+    shape_count = _unsupported_element_count(document, qn)
     if shape_count:
         warnings.append(ConversionWarning(
             WarningCode.UNSUPPORTED_ELEMENT,
-            f"이미지·도형 {shape_count}개는 텍스트로 변환되지 않았습니다.",
+            f"이미지·도형·텍스트 상자 {shape_count}개는 텍스트로 변환되지 않았습니다.",
         ))
 
     document_out = assemble(filename, "docx", raw_blocks, warnings)

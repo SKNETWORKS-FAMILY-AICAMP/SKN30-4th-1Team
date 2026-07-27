@@ -78,13 +78,38 @@ def _split_oversized(text: str, chunk_size: int) -> list[str]:
     return pieces
 
 
-def _overlap_tail(text: str, overlap: int) -> str:
-    """직전 청크 꼬리를 다음 청크 앞에 붙일 형태로 잘라낸다(단어 중간 절단 방지)."""
-    if overlap <= 0 or len(text) <= overlap:
-        return text if overlap > 0 else ""
-    tail = text[-overlap:]
-    space = tail.find(" ")
-    return tail[space + 1:] if space != -1 else tail
+def _overlap_seed(
+    buffer: list[tuple[str, Block]],
+    overlap: int,
+) -> list[tuple[str, Block]]:
+    """직전 청크 꼬리를 다음 청크의 시작 조각으로 잘라낸다.
+
+    텍스트로 평탄화한 뒤 마지막 Block 하나에 몰아 귀속하면, 오버랩이 여러 블록이나
+    페이지에 걸쳤을 때 다음 청크의 page_start/block_start가 실제보다 뒤를 가리킨다.
+    조각별 출처를 유지한 채 뒤에서부터 필요한 만큼만 잘라 그 오류를 막는다.
+    """
+    if overlap <= 0 or not buffer:
+        return []
+
+    seed: list[tuple[str, Block]] = []
+    taken = 0
+    for piece, block in reversed(buffer):
+        if taken >= overlap:
+            break
+        remaining = overlap - taken
+        if len(piece) <= remaining:
+            seed.append((piece, block))
+            taken += len(piece) + 1  # 조각 사이 공백 1칸도 길이에 포함된다
+        else:
+            # 조각 중간에서 잘릴 때만 단어 경계로 다듬는다.
+            cut = piece[-remaining:]
+            space = cut.find(" ")
+            cut = cut[space + 1:] if space != -1 else cut
+            if cut:
+                seed.append((cut, block))
+            taken = overlap
+    seed.reverse()
+    return seed
 
 
 def chunk_document(
@@ -122,13 +147,11 @@ def chunk_document(
             page_end=max(pages) if pages else None,
             heading=heading,
         ))
-        tail = _overlap_tail(text, overlap)
-        if tail:
-            # 오버랩 텍스트의 출처는 직전 청크의 마지막 블록이다.
-            buffer = [(tail, blocks[-1])]
-            buffer_len = len(tail)
-        else:
-            buffer, buffer_len = [], 0
+        # 오버랩은 조각별 출처를 유지한 채 넘긴다 — 여러 블록·페이지에 걸쳐도
+        # 다음 청크의 page/block 범위가 실제 출처를 모두 포괄하도록.
+        seed = _overlap_seed(buffer, overlap)
+        buffer = seed
+        buffer_len = sum(len(piece) for piece, _ in seed) + max(len(seed) - 1, 0)
 
     for block in document.blocks:
         pieces = (

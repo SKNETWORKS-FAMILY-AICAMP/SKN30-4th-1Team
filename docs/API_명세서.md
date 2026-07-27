@@ -328,13 +328,20 @@ prefix). CORS `OPTIONS` 프리플라이트도 통과.
 { "detail": "지원하지 않는 파일 형식입니다. (.docx / .markdown / .md / .pdf / .txt)" }
 ```
 
-**응답 `400`** — 변환 실패 (`detail`이 객체)
+**응답 `400`** — 변환 실패
 ```json
-{ "detail": { "code": "no_text_layer",
-              "message": "PDF에서 텍스트를 추출하지 못했습니다. 스캔 이미지 PDF는 지원하지 않습니다." } }
+{
+  "detail": "PDF에서 텍스트를 추출하지 못했습니다. 스캔 이미지 PDF는 지원하지 않습니다.",
+  "code": "no_text_layer"
+}
 ```
 
+`detail`은 **문자열**(사람이 읽는 사유), `code`는 응답 **최상위**의 기계 판독용 식별자입니다.
 `code`는 `unsupported_format` / `missing_dependency` / `corrupt_file` / `empty_document` / `no_text_layer` 중 하나입니다.
+
+> **`detail`을 객체로 바꾸지 마세요.** 데스크톱 클라이언트(`desktop/src/paimApi.ts`)는
+> `detail`이 문자열이 아니면 사유를 버리고 `"PaiM API 요청 실패"`만 표시합니다.
+> 구조화 정보가 필요하면 최상위 필드로 추가하세요.
 
 **응답 `404`**
 ```json

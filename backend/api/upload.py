@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, UploadFile, File, Form
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from ..db.mysql import get_connection
 from ..pipeline.converters import (
@@ -41,20 +42,30 @@ def _infer_doc_type(filename: str) -> str:
 
 # ── 파일 변환 ─────────────────────────────────────────────────────
 
+def _conversion_error_response(exc: ConversionError) -> JSONResponse:
+    """변환 실패를 기존 클라이언트가 읽을 수 있는 400 응답으로 만든다.
+
+    `detail`은 반드시 **문자열**이어야 한다. 객체로 내리면 데스크톱 클라이언트가
+    문자열이 아니라는 이유로 사유를 버리고 "PaiM API 요청 실패"만 표시한다
+    (desktop/src/paimApi.ts). 그러면 "실패 파일은 명시적 오류 반환"이 API 안에서만
+    참이고 정작 사용자에게는 닿지 않는다.
+
+    구조화 코드는 최상위 `code`에 싣는다 — 클라이언트가 이미 그 자리를 읽고 있어,
+    프론트를 고치지 않고도 사람이 읽는 사유와 기계가 읽는 코드를 함께 전달할 수 있다.
+    """
+    return JSONResponse(
+        status_code=400,
+        content={"detail": exc.message, "code": exc.code},
+    )
+
+
 def _convert_upload(filename: str, data: bytes) -> ConvertedDocument:
-    """업로드 파일을 변환한다. 실패는 사유를 담은 400으로 되돌린다.
+    """업로드 파일을 변환한다. 변환 실패는 ConversionError로 그대로 올린다.
 
     변환은 백그라운드가 아니라 요청 경로에서 수행한다 — 실패 사유를 즉시
     사용자에게 알려야 하고, 변환된 문서를 폴링 없이 확인할 수 있어야 한다.
     """
-    try:
-        return convert(filename, data)
-    except ConversionError as exc:
-        logger.info("문서 변환 실패 filename=%s code=%s", filename, exc.code)
-        raise HTTPException(
-            status_code=400,
-            detail={"code": exc.code, "message": exc.message},
-        ) from exc
+    return convert(filename, data)
 
 
 # ── 내부 헬퍼 ─────────────────────────────────────────────────────
@@ -259,7 +270,11 @@ async def upload_document(
     data = await file.read()
     if len(data) > _MAX_FILE_BYTES:
         raise HTTPException(status_code=413, detail="파일 크기는 10 MB를 초과할 수 없습니다.")
-    document = _convert_upload(filename, data)
+    try:
+        document = _convert_upload(filename, data)
+    except ConversionError as exc:
+        logger.info("문서 변환 실패 filename=%s code=%s", filename, exc.code)
+        return _conversion_error_response(exc)
 
     conn = get_connection()
     try:
