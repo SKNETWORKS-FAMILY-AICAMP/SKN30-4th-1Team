@@ -61,18 +61,38 @@ class _ContextRecorder:
 
     두 종류의 컨텍스트 목록을 따로 모은다:
     - contexts: 메타(담당·날짜·마감·완료상태·이유)·출처 마커를 뺀 순수 원문.
-      context_precision/recall 채점용(골든 정답 텍스트와 매칭할 때 메타·마커가
-      섞이면 노이즈가 된다, run_eval.py의 기존 관례와 동일).
+      run_eval.py의 기존 관례와 맞춘 참고용 — 아래 이유로 정본이 아니다.
     - rendered_contexts: 실제 LLM이 답변을 생성할 때 읽은 것과 같은 완성 라인
-      (메타·이유·출처 포함). faithfulness/response_relevancy 채점용 — 실측으로
-      확인: 순수 content만 주면 LLM이 메타데이터(예: "날짜: 2026-04-20")를 근거로
-      정당하게 답한 문장도 판정기가 "컨텍스트에 없는 주장"으로 오판해 faithfulness가
-      실제보다 낮게 나온다(qid C6/A10 사례).
+      (메타·이유·출처 포함). **네 지표 모두 이쪽이 정본이다.**
+
+    처음에는 contexts를 precision/recall 정본으로 썼으나 실측으로 뒤집혔다. 검색이
+    실제로 꺼내오는 단위는 렌더링된 라인이지 content 문자열이 아닌데, content만 주면
+    판정기가 볼 수 없는 필드가 정답인 질문에서 정답 행조차 무관 판정을 받는다:
+      - "Flutter를 선택한 이유는?" → content는 "앱 개발 프레임워크를 Flutter로
+        확정한다."뿐이고 정답인 reason 필드("iOS/Android 동시 개발로 일정 단축…")는
+        rendered에만 있다(modu A2/A3/A4/A6).
+      - "SDK 연동은 누가 담당했는가?" → 정답인 owner 필드가 rendered에만 있다(C1).
+    같은 이유로 faithfulness도 실제보다 낮게 나왔었다(qid C6/A10 사례).
+    26문항 실측: SQL 축 precision이 content 기준 0.47/0.43 → rendered 기준
+    0.68/0.60(modu/CS-Bot)으로, 검색을 바꾸지 않아도 이만큼 차이가 났다.
+
+    contexts를 출처별로도 나눠 sql_contexts(MySQL 구조화 기록 — SQL 행, 프로젝트
+    조망 요약·집계, 프로젝트 메모리 요약)/vector_contexts(Chroma 원문 청크)에 같이
+    담는다 — PM 분석 보고서(SQL_CONTEXT_RETRIEVAL_PRECISION_REPORT, P0 측정 분리
+    권고)가 지적한 대로, 통합 context_precision만으로는 SQL 축과 vector 축 중
+    어느 쪽이 노이즈의 원인인지 구분할 수 없기 때문이다.
     """
 
     def __init__(self):
         self.contexts: list[str] = []
         self.rendered_contexts: list[str] = []
+        self.sql_contexts: list[str] = []
+        self.vector_contexts: list[str] = []
+        # 축별 목록도 rendered 기준으로 함께 모은다 — 순수 content 기준으로만 나누면
+        # 담당·이유·날짜가 답인 질문("누가 담당?", "왜 그렇게 정했나?")에서 정답 행조차
+        # 무관 판정을 받아 SQL 축 점수가 실제보다 낮게 나온다(아래 클래스 주석 참고).
+        self.sql_rendered_contexts: list[str] = []
+        self.vector_rendered_contexts: list[str] = []
 
     def __enter__(self):
         from backend.retriever import qa_engine, qa_tools
@@ -88,14 +108,18 @@ class _ContextRecorder:
             if memory:
                 self.contexts.append(memory)
                 self.rendered_contexts.append(memory)
+                self.sql_contexts.append(memory)  # project_memory 테이블 기반 요약 — MySQL 출처
+                self.sql_rendered_contexts.append(memory)
             return memory
 
         def row_line_body(r):
             content = r.get("content")
             if content:
                 self.contexts.append(content)
+                self.sql_contexts.append(content)
             rendered = self._orig_row_line_body(r)
             self.rendered_contexts.append(rendered)
+            self.sql_rendered_contexts.append(rendered)
             return rendered
 
         def build_context(*args, **kwargs):
@@ -103,6 +127,8 @@ class _ContextRecorder:
             chunk_texts = [c["text_full"] for c in debug.get("chroma_chunks", []) if c.get("text_full")]
             self.contexts.extend(chunk_texts)
             self.rendered_contexts.extend(chunk_texts)  # 문서 청크는 메타 개념이 없어 원문 그대로 공유
+            self.vector_contexts.extend(chunk_texts)
+            self.vector_rendered_contexts.extend(chunk_texts)
             return context, sources, debug
 
         def fetch_overview_context(*args, **kwargs):
@@ -111,6 +137,8 @@ class _ContextRecorder:
             if overview.get("overview_summary"):
                 self.contexts.append(overview["overview_summary"])
                 self.rendered_contexts.append(overview["overview_summary"])
+                self.sql_contexts.append(overview["overview_summary"])
+                self.sql_rendered_contexts.append(overview["overview_summary"])
             action_plan = overview.get("action_plan") or {}
             # get_project_overview는 category_stats/action_plan.total/status_counts까지
             # 통째로 JSON에 넣어 LLM에 준다(qa_tools.get_project_overview 참고) — 시스템
@@ -123,13 +151,18 @@ class _ContextRecorder:
             }, ensure_ascii=False, default=str)
             self.contexts.append(stats_blob)
             self.rendered_contexts.append(stats_blob)
+            self.sql_contexts.append(stats_blob)
+            self.sql_rendered_contexts.append(stats_blob)
             for row in action_plan.get("items") or []:
                 content = row.get("content")
                 if content:
                     self.contexts.append(content)
+                    self.sql_contexts.append(content)
                     # overview 도구는 LLM에게 행 dict를 JSON 그대로 넘긴다(get_project_overview
                     # 참고) — owner/date/completion_status가 실제로 거기 다 들어있다.
-                    self.rendered_contexts.append(_json.dumps(row, ensure_ascii=False, default=str))
+                    rendered_row = _json.dumps(row, ensure_ascii=False, default=str)
+                    self.rendered_contexts.append(rendered_row)
+                    self.sql_rendered_contexts.append(rendered_row)
             return overview
 
         qa_engine._row_line_body = row_line_body
@@ -162,6 +195,18 @@ class _ContextRecorder:
     def collected_rendered(self) -> list[str]:
         return self._dedupe(self.rendered_contexts)
 
+    def collected_sql(self) -> list[str]:
+        return self._dedupe(self.sql_contexts)
+
+    def collected_vector(self) -> list[str]:
+        return self._dedupe(self.vector_contexts)
+
+    def collected_sql_rendered(self) -> list[str]:
+        return self._dedupe(self.sql_rendered_contexts)
+
+    def collected_vector_rendered(self) -> list[str]:
+        return self._dedupe(self.vector_rendered_contexts)
+
 
 def _default_jsonl_path(corpus: str) -> Path:
     # .eval_state는 gitignore 대상(run_eval.py의 로컬 전용 산출물과 동일 관례) —
@@ -185,14 +230,23 @@ def cmd_collect(args) -> None:
         for i, q in enumerate(questions, 1):
             with _ContextRecorder() as recorder:
                 result = run_agentic_qa(project_id, q["question"])
+            sql_ctx = recorder.collected_sql()
+            vector_ctx = recorder.collected_vector()
             row = {
                 "qid": q["qid"], "tag": q["tag"], "question": q["question"],
                 "reference": q["reference"], "response": result["answer"],
                 "contexts": recorder.collected(),
                 "rendered_contexts": recorder.collected_rendered(),
+                "sql_contexts": sql_ctx,
+                "vector_contexts": vector_ctx,
+                "sql_rendered_contexts": recorder.collected_sql_rendered(),
+                "vector_rendered_contexts": recorder.collected_vector_rendered(),
+                "n_sql_contexts": len(sql_ctx),
+                "n_vector_contexts": len(vector_ctx),
             }
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
-            print(f"[{i}/{len(questions)}] {q['qid']} 컨텍스트 {len(row['contexts'])}개 수집")
+            print(f"[{i}/{len(questions)}] {q['qid']} 컨텍스트 {len(row['contexts'])}개 수집 "
+                  f"(SQL {len(sql_ctx)} / vector {len(vector_ctx)})")
     print(f"[완료] collect {args.corpus}: {len(questions)}문항 -> {out_path}")
 
 
@@ -207,12 +261,19 @@ def _load_rows(path: Path) -> list[dict]:
 
 
 def cmd_score(args) -> None:
-    """context_precision/recall은 순수 content 컨텍스트로, faithfulness/response_relevancy는
-    추가로 rendered_contexts(메타 포함, 실제 LLM이 본 것과 동일)로 한 번 더 채점해 나란히
-    비교한다 — 순수 content만으로는 답변이 메타데이터(담당·날짜·완료상태)를 근거로 한 문장을
-    판정기가 "컨텍스트에 없는 주장"으로 오판해 faithfulness가 실제보다 낮게 나오기 때문
-    (qid C6/A10 실측). ragas_score는 run_eval.py의 공용 함수라 여기서 두 번 호출해 필요한
-    지표만 골라 쓰고, 그 함수 자체는 손대지 않는다."""
+    """네 지표 모두 rendered_contexts(메타 포함, 실제 LLM이 본 것과 동일) 기준이 정본이고,
+    순수 content 기준 점수는 비교용으로 나란히 남긴다 — 검색이 실제로 꺼내오는 단위는
+    렌더링된 라인이라, content만으로 채점하면 담당·이유·날짜가 정답인 질문에서 정답 행조차
+    무관 판정을 받는다(_ContextRecorder 주석의 A2/C1 사례). faithfulness도 같은 이유로
+    낮게 나왔었다(qid C6/A10 실측).
+
+    SQL_CONTEXT_RETRIEVAL_PRECISION_REPORT(PM 분석, P0 측정 분리 권고)에 따라
+    sql_contexts/vector_contexts로도 각각 precision/recall을 채점한다 — 통합
+    context_precision만으로는 SQL 축(구조화 기록)과 vector 축(원문 청크) 중
+    어느 쪽이 노이즈의 원인인지 구분할 수 없기 때문이다.
+
+    ragas_score는 run_eval.py의 공용 함수라 여기서 여러 번 호출해 필요한 지표만
+    골라 쓰고, 그 함수 자체는 손대지 않는다."""
     require_openai_key()
     in_path = Path(args.input)
     rows = _load_rows(in_path)
@@ -220,8 +281,7 @@ def cmd_score(args) -> None:
         row.setdefault("tag", "qa")
 
     scores = ragas_score(rows, args.judge, True, args.workers)
-    print(f"[완료] score(순수 content 기준 — context_precision/recall은 이 값이 정본) "
-          f"{in_path.name}: {scores}")
+    print(f"[완료] score(순수 content 기준 — 비교용, 정본 아님) {in_path.name}: {scores}")
 
     has_rendered = all(row.get("rendered_contexts") for row in rows)
     if has_rendered:
@@ -230,18 +290,50 @@ def cmd_score(args) -> None:
         for row, rendered_row in zip(rows, rendered_rows):
             row["faithfulness_rendered"] = rendered_row.get("faithfulness")
             row["response_relevancy_rendered"] = rendered_row.get("response_relevancy")
-        print(f"[완료] score(메타 포함 rendered_contexts 기준 — faithfulness/relevancy는 "
-              f"이 값이 정본): faithfulness={rendered_scores.get('faithfulness')} "
-              f"response_relevancy={rendered_scores.get('response_relevancy')}")
+            row["context_precision_rendered"] = rendered_row.get("context_precision")
+            row["context_recall_rendered"] = rendered_row.get("context_recall")
+        print(f"[완료] score(메타 포함 rendered_contexts 기준 — 네 지표 모두 이 값이 정본): "
+              f"{rendered_scores}")
     else:
         print("[안내] rendered_contexts 없음(구버전 jsonl) — faithfulness 비교 재채점 생략")
+
+    has_split = all(row.get("sql_contexts") is not None for row in rows)
+    if has_split:
+        # 축별 채점도 rendered 기준을 우선 쓴다 — 순수 content 기준으로 나누면 담당·이유가
+        # 답인 질문에서 정답 행조차 무관 판정을 받아 SQL 축만 부당하게 낮게 나온다.
+        # 구버전 jsonl에는 rendered 축별 목록이 없으므로 그때만 content 기준으로 내려간다.
+        sql_field = ("sql_rendered_contexts"
+                     if all(row.get("sql_rendered_contexts") is not None for row in rows)
+                     else "sql_contexts")
+        vector_field = ("vector_rendered_contexts"
+                        if all(row.get("vector_rendered_contexts") is not None for row in rows)
+                        else "vector_contexts")
+        print(f"[안내] 축별 채점 기준: SQL={sql_field}, vector={vector_field}")
+        sql_rows = [dict(row, contexts=row[sql_field]) for row in rows]
+        sql_scores = ragas_score(sql_rows, args.judge, False, args.workers)
+        vector_rows = [dict(row, contexts=row[vector_field]) for row in rows]
+        vector_scores = ragas_score(vector_rows, args.judge, False, args.workers)
+        for row, sql_row, vector_row in zip(rows, sql_rows, vector_rows):
+            row["sql_context_precision"] = sql_row.get("context_precision")
+            row["sql_context_recall"] = sql_row.get("context_recall")
+            row["vector_context_precision"] = vector_row.get("context_precision")
+            row["vector_context_recall"] = vector_row.get("context_recall")
+        print(f"[완료] score(SQL-only): {sql_scores}")
+        print(f"[완료] score(vector-only): {vector_scores}")
+    else:
+        print("[안내] sql_contexts/vector_contexts 없음(구버전 jsonl) — SQL/vector 분리 채점 생략")
 
     detail_path = in_path.with_suffix(".scored.csv")
     import csv
     cols = ["qid", "question", "context_precision", "context_recall",
             "faithfulness", "response_relevancy"]
     if has_rendered:
-        cols += ["faithfulness_rendered", "response_relevancy_rendered"]
+        cols += ["faithfulness_rendered", "response_relevancy_rendered",
+                 "context_precision_rendered", "context_recall_rendered"]
+    if has_split:
+        cols += ["n_sql_contexts", "n_vector_contexts",
+                  "sql_context_precision", "sql_context_recall",
+                  "vector_context_precision", "vector_context_recall"]
     with open(detail_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         writer.writeheader()
