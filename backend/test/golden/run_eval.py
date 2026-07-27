@@ -1525,11 +1525,12 @@ def ragas_score(rows_out: list[dict], judge: str, with_generation: bool,
     metrics = [LLMContextPrecisionWithReference(llm=ragas_llm),
                LLMContextRecall(llm=ragas_llm)]
     if with_generation:
-        from ragas.metrics import Faithfulness, ResponseRelevancy
+        from ragas.metrics import AnswerCorrectness, Faithfulness, ResponseRelevancy
         from ragas.embeddings import embedding_factory
         emb = embedding_factory(model="text-embedding-3-small")
         metrics += [Faithfulness(llm=ragas_llm),
-                    ResponseRelevancy(llm=ragas_llm, embeddings=emb)]
+                    ResponseRelevancy(llm=ragas_llm, embeddings=emb),
+                    AnswerCorrectness(llm=ragas_llm, embeddings=emb)]
     # timeout 상향(실측 확인): 기본 180s는 TPM 포화 시 Retry-After 백오프 대기
     # 중인 정상 job을 TimeoutError로 죽여 NaN을 만든다(modu dev E0에서 발생).
     result = evaluate(dataset=EvaluationDataset.from_list(samples),
@@ -1539,7 +1540,8 @@ def ragas_score(rows_out: list[dict], judge: str, with_generation: bool,
     col_map = {"llm_context_precision_with_reference": "context_precision",
                "context_recall": "context_recall",
                "faithfulness": "faithfulness",
-               "answer_relevancy": "response_relevancy"}
+               "answer_relevancy": "response_relevancy",
+               "answer_correctness": "answer_correctness"}
     reject_partial_ragas(df, col_map)
     scores = {}
     for col in df.columns:

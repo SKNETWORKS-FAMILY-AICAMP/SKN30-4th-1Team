@@ -292,6 +292,7 @@ def cmd_score(args) -> None:
             row["response_relevancy_rendered"] = rendered_row.get("response_relevancy")
             row["context_precision_rendered"] = rendered_row.get("context_precision")
             row["context_recall_rendered"] = rendered_row.get("context_recall")
+            row["answer_correctness_rendered"] = rendered_row.get("answer_correctness")
         print(f"[완료] score(메타 포함 rendered_contexts 기준 — 네 지표 모두 이 값이 정본): "
               f"{rendered_scores}")
     else:
@@ -326,10 +327,11 @@ def cmd_score(args) -> None:
     detail_path = in_path.with_suffix(".scored.csv")
     import csv
     cols = ["qid", "question", "context_precision", "context_recall",
-            "faithfulness", "response_relevancy"]
+            "faithfulness", "response_relevancy", "answer_correctness"]
     if has_rendered:
         cols += ["faithfulness_rendered", "response_relevancy_rendered",
-                 "context_precision_rendered", "context_recall_rendered"]
+                 "context_precision_rendered", "context_recall_rendered",
+                 "answer_correctness_rendered"]
     if has_split:
         cols += ["n_sql_contexts", "n_vector_contexts",
                   "sql_context_precision", "sql_context_recall",
