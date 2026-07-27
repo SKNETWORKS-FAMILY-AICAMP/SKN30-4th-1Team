@@ -6,6 +6,11 @@ type PaimApiErrorPayload = {
   code?: unknown;
 };
 
+type PaimApiErrorDetail = {
+  code?: unknown;
+  message?: unknown;
+};
+
 const PAIM_SESSION_UNAUTHORIZED_DETAILS = new Set([
   "로그인이 필요합니다.",
   "유효하지 않은 토큰입니다.",
@@ -37,8 +42,22 @@ async function readPaimResponse<T>(
 ): Promise<T> {
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as PaimApiErrorPayload | null;
-    const detail = typeof payload?.detail === "string" ? payload.detail : "PaiM API 요청 실패";
-    const code = typeof payload?.code === "string" ? payload.code : undefined;
+    const nestedDetail =
+      payload?.detail && typeof payload.detail === "object"
+        ? (payload.detail as PaimApiErrorDetail)
+        : null;
+    const detail =
+      typeof payload?.detail === "string"
+        ? payload.detail
+        : typeof nestedDetail?.message === "string"
+          ? nestedDetail.message
+          : "PaiM API 요청 실패";
+    const code =
+      typeof nestedDetail?.code === "string"
+        ? nestedDetail.code
+        : typeof payload?.code === "string"
+          ? payload.code
+          : undefined;
 
     // GitHub 전용 요청도 PaiM JWT 자체가 무효한 경우에는 반드시 전역 로그아웃한다.
     // 그 외 401은 GitHub upstream/App 인증 오류이므로 GitHub 패널에서 재인증한다.
