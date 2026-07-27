@@ -23,6 +23,8 @@ def test_defaults_to_loopback_and_8000():
     kwargs = _captured_run({})
     assert kwargs["host"] == "127.0.0.1"
     assert kwargs["port"] == 8000
+    assert kwargs["log_config"] is None
+    assert kwargs["access_log"] is False
 
 
 def test_environment_can_override_binding():

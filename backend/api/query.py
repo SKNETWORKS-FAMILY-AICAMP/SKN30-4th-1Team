@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import binascii
 import logging
@@ -20,9 +21,18 @@ from ..retriever.query_intent import (
     answer_overview,
     classify_question,
 )
-from .upload import _ALLOWED_SUFFIXES, _MAX_FILE_BYTES, _delete_document
+from .upload import _ALLOWED_SUFFIXES, _MAX_FILE_BYTES
 from .auth import require_project_access
 from ..rate_limit import RATE_LIMIT_QUERY, authenticated_user_key, limiter
+from ..quota import (
+    cleanup_failed_reservation,
+    compensate_cancelled_document,
+    delete_document as quota_delete_document,
+    fail_document,
+    finalize_document,
+    require_upload_user,
+    reserve_document,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -136,9 +146,8 @@ def query(request: Request, project_id: int, body: QueryRequest):
                 # model. Keep the endpoint useful and ground the fallback in the
                 # existing hybrid semantic retriever rather than the brittle router.
                 logger.warning(
-                    "agentic Q&A 실패, semantic RAG로 폴백: project_id=%s",
-                    project_id,
-                    exc_info=True,
+                    "agentic_qa_fallback",
+                    extra={"project_id": project_id, "code": "AGENTIC_QA_FALLBACK"},
                 )
                 result = run_qa(
                     project_id=project_id,
@@ -177,8 +186,8 @@ def query(request: Request, project_id: int, body: QueryRequest):
         debug["router_model_tier"] = "fast" if decision.router_stage == "llm" else None
         result["debug"] = debug
         return result
-    except Exception as e:
-        logger.error("Q&A 처리 오류: %s", e, exc_info=True)
+    except Exception:
+        logger.error("qa_request_failed", extra={"project_id": project_id, "code": "QA_FAILED"})
         raise HTTPException(status_code=503, detail="Q&A 처리 중 오류가 발생했습니다. 서버 로그를 확인하세요.")
 
 
@@ -191,24 +200,20 @@ class GitLogUpload(BaseModel):
 @router.post("/projects/{project_id}/git", status_code=201)
 def upload_git_log(project_id: int, body: GitLogUpload):
     # 동기 처리 — documents.status 추적 없음. 향후 /documents 엔드포인트로 통합 예정
-    require_project_access(project_id, min_role="member")
     if not body.content.strip():
         raise HTTPException(status_code=400, detail="content must not be empty")
 
-    conn = get_connection()
+    user_id = require_upload_user()
+    require_project_access(project_id, min_role="member")
+    reservation = reserve_document(
+        project_id, user_id, len(body.content.encode("utf-8")), "virtual"
+    )
     try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT id FROM projects WHERE id = %s", (project_id,))
-            if not cursor.fetchone():
-                raise HTTPException(status_code=404, detail="Project not found")
-            cursor.execute(
-                "INSERT INTO documents (project_id, filename, doc_type) VALUES (%s, %s, %s)",
-                (project_id, "git_log.txt", "git"),
-            )
-            doc_id = cursor.lastrowid
-        conn.commit()
-    finally:
-        conn.close()
+        finalized = finalize_document(reservation["reservation_id"], "git_log.txt", "git")
+    except BaseException:
+        cleanup_failed_reservation(reservation["reservation_id"])
+        raise
+    doc_id = finalized["doc_id"]
 
     try:
         items = extract(body.content, default_source=body.source)
@@ -220,10 +225,18 @@ def upload_git_log(project_id: int, body: GitLogUpload):
             source=body.source,
             date=body.date,
             doc_type="git",
+            processing_token=finalized["processing_token"],
         )
-    except Exception:
-        _delete_document(doc_id)
+    except asyncio.CancelledError:
+        compensate_cancelled_document(doc_id)
         raise
+    except Exception:
+        logger.error("git_ingest_failed", extra={"project_id": project_id, "code": "GIT_INGEST_FAILED"})
+        fail_document(doc_id, "GIT_INGEST_FAILED")
+        raise HTTPException(status_code=503, detail="Git 로그 처리 중 오류가 발생했습니다.")
+
+    for old_doc_id in finalized["old_doc_ids"]:
+        quota_delete_document(old_doc_id)
 
     # 프로젝트 메모리 갱신 (best-effort — 요약 실패해도 업로드는 성공 처리)
     try:
@@ -231,7 +244,8 @@ def upload_git_log(project_id: int, body: GitLogUpload):
     except Exception:
         import logging
         logging.getLogger(__name__).warning(
-            "프로젝트 메모리 갱신 실패 (git 업로드는 성공): project_id=%s", project_id, exc_info=True
+            "git_project_memory_update_failed",
+            extra={"project_id": project_id, "code": "PROJECT_MEMORY_UPDATE_FAILED"},
         )
 
     counts = {"decision": 0, "action": 0, "issue": 0, "risk": 0}

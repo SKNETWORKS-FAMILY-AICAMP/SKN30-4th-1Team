@@ -22,6 +22,7 @@ def _valid_env() -> dict[str, str]:
         "RATE_LIMIT_QUERY": "30/minute",
         "RATE_LIMIT_CHAT": "30/minute",
         "FORWARDED_ALLOW_IPS": "172.30.12.10/32",
+        "CORS_ORIGINS": "https://paim.example.org",
     }
 
 

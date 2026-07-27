@@ -104,14 +104,34 @@ def _project_conn():
     return conn
 
 
+def _reservation():
+    return {
+        "reservation_id": "reservation-1",
+        "temp_path": "/tmp/document-fixture.tmp",
+        "target_path": "/tmp/document-fixture",
+    }
+
+
+def _finalized():
+    return {
+        "doc_id": 7,
+        "old_doc_ids": [],
+        "file_path": "/tmp/document-fixture",
+        "processing_token": "token-1",
+    }
+
+
 @pytest.mark.parametrize(("filename", "data", "valid", "expected"), DOCUMENT_CASES)
 def test_upload_applies_shared_fixture_before_db_and_storage(filename, data, valid, expected):
-    conn = _project_conn()
     with patch("backend.api.upload.require_project_access"), patch(
-        "backend.api.upload.get_connection", return_value=conn
-    ) as get_connection, patch(
-        "backend.api.upload.save_file", return_value="/tmp/document-fixture"
-    ) as save_file, patch("backend.api.upload._process_upload") as process:
+        "backend.api.upload.require_upload_user", return_value=1
+    ), patch(
+        "backend.api.upload.reserve_document", return_value=_reservation()
+    ) as reserve, patch(
+        "backend.api.upload.write_reserved_file"
+    ) as write_file, patch(
+        "backend.api.upload.finalize_document", return_value=_finalized()
+    ), patch("backend.api.upload._process_upload") as process:
         response = _client.post(
             "/api/v1/projects/1/documents",
             files={"file": (filename, data, "application/octet-stream")},
@@ -120,19 +140,19 @@ def test_upload_applies_shared_fixture_before_db_and_storage(filename, data, val
     if not valid:
         assert response.status_code == 415
         assert response.json()["detail"]["code"] == INVALID_DOCUMENT_CODE
-        get_connection.assert_not_called()
-        save_file.assert_not_called()
+        reserve.assert_not_called()
+        write_file.assert_not_called()
         process.assert_not_called()
     elif expected == "":
         # upload의 기존 empty semantics는 400이며 DB/storage보다 먼저 끝난다.
         assert response.status_code == 400
-        get_connection.assert_not_called()
-        save_file.assert_not_called()
+        reserve.assert_not_called()
+        write_file.assert_not_called()
         process.assert_not_called()
     else:
         assert response.status_code == 201
-        assert get_connection.called
-        save_file.assert_called_once()
+        reserve.assert_called_once()
+        write_file.assert_called_once()
         process.assert_called_once()
 
 
@@ -173,10 +193,11 @@ def test_sensitive_pdf_parser_warning_is_absent_from_shared_and_endpoint_logs(ca
     caplog.clear()
     assert extract_document_text("sensitive.pdf", data) == "A"
 
-    upload_conn = _project_conn()
     with patch("backend.api.upload.require_project_access"), patch(
-        "backend.api.upload.get_connection", return_value=upload_conn
-    ), patch("backend.api.upload.save_file", return_value="/tmp/sensitive.pdf"), patch(
+        "backend.api.upload.require_upload_user", return_value=1
+    ), patch("backend.api.upload.reserve_document", return_value=_reservation()), patch(
+        "backend.api.upload.write_reserved_file"
+    ), patch("backend.api.upload.finalize_document", return_value=_finalized()), patch(
         "backend.api.upload._process_upload"
     ):
         upload_response = _client.post(

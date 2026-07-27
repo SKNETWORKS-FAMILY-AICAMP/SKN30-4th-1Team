@@ -55,8 +55,7 @@ def test_sync_bg_network_exception_sets_failed():
 
         _sync_bg(project_id=1, repo_id=10, full_name="owner/repo", branch="main", token=None)
 
-        mock_status.assert_called_once_with(10, "failed", last_error=ANY)
-        assert "timeout" in mock_status.call_args.kwargs["last_error"]
+        mock_status.assert_called_once_with(10, "failed", last_error="REPOSITORY_SYNC_FAILED")
 
 
 def test_sync_bg_partial_failure_sets_warning():

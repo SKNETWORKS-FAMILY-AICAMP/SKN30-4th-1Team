@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import threading
 from pathlib import Path
@@ -15,7 +16,18 @@ from ..document_content import (
 from ..pipeline.extractor import extract
 from ..pipeline.ingestor import ingest
 from ..retriever.memory_vector import delete_memory_vector, upsert_memory_vector
-from ..storage import save_file, delete_file, safe_upload_name
+from ..storage import delete_file, safe_upload_name, write_reserved_file
+from ..quota import (
+    cleanup_failed_reservation,
+    cleanup_pending,
+    compensate_cancelled_document,
+    delete_document as quota_delete_document,
+    fail_document,
+    finalize_document,
+    processing_owned,
+    require_upload_user,
+    reserve_document,
+)
 from ..graph import refresh_project_memory_after_delete, update_project_memory
 from ..rate_limit import RATE_LIMIT_UPLOAD, authenticated_user_key, limiter
 from .auth import get_current_user_id, require_project_access
@@ -55,31 +67,12 @@ def _delete_chroma_vectors(doc_id: int):
         from ..db.chroma import get_collection
         get_collection().delete(where={"doc_id": doc_id})
     except Exception:
-        logger.warning("ChromaDB vector cleanup failed for doc_id=%s", doc_id, exc_info=True)
+        logger.warning("ChromaDB vector cleanup failed for doc_id=%s", doc_id)
 
 
 def _delete_document(doc_id: int, refresh_project_memory: bool = True):
-    """MySQL memory/documents 행 삭제 + ChromaDB 벡터 삭제 + 원본 파일 삭제."""
-    conn = get_connection()
-    file_path = None
-    project_id = None
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT project_id, file_path FROM documents WHERE id = %s", (doc_id,))
-            row = cursor.fetchone()
-            if row:
-                project_id = row.get("project_id")
-                file_path = row.get("file_path")
-            cursor.execute("DELETE FROM memory WHERE doc_id = %s", (doc_id,))
-            cursor.execute("DELETE FROM documents WHERE id = %s", (doc_id,))
-        conn.commit()
-    except Exception:
-        logger.warning("MySQL delete failed for doc_id=%s", doc_id, exc_info=True)
-    finally:
-        conn.close()
-    _delete_chroma_vectors(doc_id)
-    if file_path:
-        delete_file(file_path)
+    """Transfer document accounting to durable cleanup, then retry cleanup."""
+    project_id = quota_delete_document(doc_id)
     if refresh_project_memory and project_id is not None:
         refresh_project_memory_after_delete(project_id)
 
@@ -92,7 +85,7 @@ def _delete_doc_memory(doc_id: int):
             cursor.execute("DELETE FROM memory WHERE doc_id = %s", (doc_id,))
         conn.commit()
     except Exception:
-        logger.warning("memory cleanup failed doc_id=%s", doc_id, exc_info=True)
+        logger.warning("memory cleanup failed doc_id=%s", doc_id)
     finally:
         conn.close()
 
@@ -102,7 +95,7 @@ def _upsert_memory_vector_best_effort(row: dict):
     try:
         upsert_memory_vector(row)
     except Exception:
-        logger.warning("memory vector upsert failed memory_id=%s", row.get("id"), exc_info=True)
+        logger.warning("memory vector upsert failed memory_id=%s", row.get("id"))
 
 
 def _delete_memory_vector_best_effort(memory_id: int):
@@ -110,7 +103,7 @@ def _delete_memory_vector_best_effort(memory_id: int):
     try:
         delete_memory_vector(memory_id)
     except Exception:
-        logger.warning("memory vector delete failed memory_id=%s", memory_id, exc_info=True)
+        logger.warning("memory vector delete failed memory_id=%s", memory_id)
 
 
 def _set_doc_status(doc_id: int, status: str, last_error: Optional[str] = None):
@@ -125,22 +118,30 @@ def _set_doc_status(doc_id: int, status: str, last_error: Optional[str] = None):
             )
         conn.commit()
     except Exception:
-        logger.warning("documents status update failed doc_id=%s", doc_id, exc_info=True)
+        logger.warning("documents status update failed doc_id=%s", doc_id)
     finally:
         conn.close()
 
 
-def _set_doc_progress(doc_id: int, done: int, total: int):
+def _set_doc_progress(doc_id: int, done: int, total: int, processing_token: str | None = None):
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            cursor.execute(
-                "UPDATE documents SET progress_done=%s, progress_total=%s WHERE id=%s",
-                (done, total, doc_id),
-            )
+            if processing_token is None:
+                cursor.execute(
+                    "UPDATE documents SET progress_done=%s, progress_total=%s WHERE id=%s",
+                    (done, total, doc_id),
+                )
+            else:
+                cursor.execute(
+                    "UPDATE documents SET progress_done=%s,progress_total=%s,"
+                    "lease_expires_at=NOW()+INTERVAL 30 MINUTE"
+                    " WHERE id=%s AND status='processing' AND processing_token=%s",
+                    (done, total, doc_id, processing_token),
+                )
         conn.commit()
     except Exception:
-        logger.warning("documents progress update failed doc_id=%s", doc_id, exc_info=True)
+        logger.warning("documents progress update failed doc_id=%s", doc_id)
     finally:
         conn.close()
 
@@ -156,11 +157,20 @@ def _process_upload(
     date: str,
     doc_type: str,
     file_path: str,
+    processing_token: str | None = None,
 ):
     """LLM extract → ingest → status 갱신 → 이전 문서 정리."""
     # ponytail: global lock; per-project queues if folder ingest throughput matters.
-    with _UPLOAD_PROCESS_LOCK:
-        _process_upload_locked(project_id, doc_id, old_doc_ids, content, filename, date, doc_type, file_path)
+    while not _UPLOAD_PROCESS_LOCK.acquire(timeout=1):
+        if processing_token is not None and not processing_owned(doc_id, processing_token, renew=True):
+            return
+    try:
+        _process_upload_locked(
+            project_id, doc_id, old_doc_ids, content, filename, date, doc_type,
+            file_path, processing_token,
+        )
+    finally:
+        _UPLOAD_PROCESS_LOCK.release()
 
 
 def _process_upload_locked(
@@ -172,18 +182,25 @@ def _process_upload_locked(
     date: str,
     doc_type: str,
     file_path: str,
+    processing_token: str | None = None,
 ):
     """실제 업로드 처리 본문. 호출자는 동시 실행을 제한한다."""
     try:
+        if processing_token is not None and not processing_owned(doc_id, processing_token, renew=True):
+            return
         items = extract(
             content,
             default_source=filename,
-            on_progress=lambda done, total: _set_doc_progress(doc_id, done, total),
+            on_progress=lambda done, total: _set_doc_progress(doc_id, done, total, processing_token),
         )
-    except Exception as exc:
-        logger.error("extract 실패 doc_id=%s", doc_id, exc_info=True)
-        delete_file(file_path)
-        _set_doc_status(doc_id, "failed", last_error=str(exc))
+        if processing_token is not None and not processing_owned(doc_id, processing_token, renew=True):
+            return
+    except asyncio.CancelledError:
+        compensate_cancelled_document(doc_id)
+        raise
+    except Exception:
+        logger.error("upload_extract_failed", extra={"project_id": project_id, "code": "UPLOAD_EXTRACT_FAILED"})
+        fail_document(doc_id, "UPLOAD_EXTRACT_FAILED")
         return
 
     try:
@@ -200,22 +217,24 @@ def _process_upload_locked(
                 "source_type": doc_type,
                 "source_path": filename,
             },
+            processing_token=processing_token,
         )
-    except Exception as exc:
-        logger.error("ingest 실패 doc_id=%s", doc_id, exc_info=True)
-        _delete_doc_memory(doc_id)
-        _delete_chroma_vectors(doc_id)
-        delete_file(file_path)
-        _set_doc_status(doc_id, "failed", last_error=str(exc))
+    except asyncio.CancelledError:
+        compensate_cancelled_document(doc_id)
+        raise
+    except Exception:
+        logger.error("upload_ingest_failed", extra={"project_id": project_id, "code": "UPLOAD_INGEST_FAILED"})
+        fail_document(doc_id, "UPLOAD_INGEST_FAILED")
         return
 
-    _set_doc_status(doc_id, "indexed")
+    if processing_token is None:
+        _set_doc_status(doc_id, "indexed")
 
     # 6단계: 프로젝트 메모리 갱신 (best-effort — 요약 실패해도 업로드는 성공 처리)
     try:
         update_project_memory(project_id, items)
     except Exception:
-        logger.warning("프로젝트 메모리 갱신 실패 (업로드는 성공): project_id=%s", project_id, exc_info=True)
+        logger.warning("프로젝트 메모리 갱신 실패 (업로드는 성공): project_id=%s", project_id)
 
     for old_id in old_doc_ids:
         _delete_document(old_id, refresh_project_memory=False)
@@ -234,7 +253,6 @@ async def upload_document(
     file: UploadFile = File(...),
     date: str = Form(""),
 ):
-    require_project_access(project_id, min_role="member")
     try:
         filename = safe_upload_name(file.filename or "")
     except ValueError:
@@ -246,6 +264,8 @@ async def upload_document(
     data = await file.read()
     if len(data) > _MAX_FILE_BYTES:
         raise HTTPException(status_code=413, detail="파일 크기는 10 MB를 초과할 수 없습니다.")
+    user_id = require_upload_user()
+    require_project_access(project_id, min_role="member")
     try:
         content = extract_document_text(filename, data)
     except DocumentContentError as exc:
@@ -255,46 +275,22 @@ async def upload_document(
         ) from exc
     if not content.strip():
         raise HTTPException(status_code=400, detail="content must not be empty")
-
-    conn = get_connection()
+    reservation = reserve_document(
+        project_id, user_id, len(data), "physical", filename=filename
+    )
     try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT id FROM projects WHERE id = %s", (project_id,))
-            if not cursor.fetchone():
-                raise HTTPException(status_code=404, detail="Project not found")
-            cursor.execute(
-                "SELECT id FROM documents WHERE project_id = %s AND filename = %s",
-                (project_id, filename),
-            )
-            old_doc_ids = [row["id"] for row in cursor.fetchall()]
-    finally:
-        conn.close()
-
-    file_path = save_file(project_id, filename, data)
-
-    conn = get_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                "INSERT INTO documents (project_id, filename, doc_type, status, file_path)"
-                " VALUES (%s, %s, %s, 'processing', %s)",
-                (project_id, filename, doc_type, file_path),
-            )
-            doc_id = cursor.lastrowid
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        delete_file(file_path)
+        write_reserved_file(reservation["temp_path"], reservation["target_path"], data)
+        finalized = finalize_document(reservation["reservation_id"], filename, doc_type)
+    except BaseException:
+        cleanup_failed_reservation(reservation["reservation_id"])
         raise
-    finally:
-        conn.close()
 
     background_tasks.add_task(
-        _process_upload, project_id, doc_id, old_doc_ids,
-        content, filename, date, doc_type, file_path,
+        _process_upload, project_id, finalized["doc_id"], finalized["old_doc_ids"],
+        content, filename, date, doc_type, finalized["file_path"], finalized["processing_token"],
     )
 
-    return {"doc_id": doc_id, "status": "processing"}
+    return {"doc_id": finalized["doc_id"], "status": "processing"}
 
 
 @router.get("/projects/{project_id}/documents")

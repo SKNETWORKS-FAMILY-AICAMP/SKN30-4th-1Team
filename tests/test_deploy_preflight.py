@@ -33,6 +33,7 @@ _ALWAYS_REQUIRED = {
     "PAIM_CADDY_PROXY_IP": "172.30.12.10",
     "PAIM_BACKEND_PROXY_IP": "172.30.12.20",
     "FORWARDED_ALLOW_IPS": "172.30.12.10/32",
+    "CORS_ORIGINS": "https://paim.example.org",
 }
 
 
@@ -58,6 +59,40 @@ def _run(env_file: Path, mode: str = "local") -> subprocess.CompletedProcess:
 
 def test_minimal_config_passes(tmp_path: Path):
     assert _run(_write_env(tmp_path)).returncode == 0
+
+
+def test_production_desktop_cors_origins_pass(tmp_path: Path):
+    env = _write_env(
+        tmp_path,
+        CORS_ORIGINS="tauri://localhost,http://tauri.localhost",
+    )
+    assert _run(env).returncode == 0
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "tauri://LOCALHOST",
+        "tauri://localhost:1420",
+        "tauri://other-host",
+        "http://example.test\\path",
+        "http://example.test?",
+        "http://example.test#",
+        "http://example.test:",
+        "http://exam ple.test",
+    ],
+)
+def test_cors_preflight_rejects_noncanonical_or_forbidden_origins(tmp_path: Path, origin: str):
+    result = _run(_write_env(tmp_path, CORS_ORIGINS=origin))
+    assert result.returncode == 1
+    assert "CORS_ORIGINS" in result.stderr
+
+
+def test_deploy_template_uses_actual_production_desktop_origins():
+    template = (_ROOT / "deploy" / ".env.deploy.example").read_text(encoding="utf-8")
+    assert "CORS_ORIGINS=tauri://localhost,http://tauri.localhost" in template
+    assert "127.0.0.1:1420" not in template
+    assert "localhost:1420" not in template
 
 
 @pytest.mark.parametrize("missing", sorted(_ALWAYS_REQUIRED))

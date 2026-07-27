@@ -5,6 +5,10 @@ import binascii
 import ipaddress
 import os
 import re
+from typing import Annotated
+from urllib.parse import urlsplit
+
+from pydantic import AnyUrl, TypeAdapter, UrlConstraints, ValidationError
 
 
 class RuntimeConfigError(RuntimeError):
@@ -40,6 +44,115 @@ _TRUSTED_PROXY_IPS = {
     "172.30.13.10/32",
     "172.30.14.10/32",
 }
+LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+PROJECT_STORAGE_QUOTA_BYTES = 209_715_200
+USER_STORAGE_QUOTA_BYTES = 524_288_000
+PROJECT_FILE_COUNT_QUOTA = 500
+_HTTP_ORIGIN_ADAPTER = TypeAdapter(
+    Annotated[
+        AnyUrl,
+        UrlConstraints(
+            allowed_schemes=["http", "https"],
+            host_required=True,
+            preserve_empty_path=True,
+        ),
+    ]
+)
+
+
+def positive_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    if not re.fullmatch(r"[1-9][0-9]*", raw):
+        _fail([name], "양의 정수여야 합니다")
+    return int(raw)
+
+
+def log_level() -> str:
+    value = os.getenv("LOG_LEVEL", "INFO").strip().upper()
+    if value not in LOG_LEVELS:
+        _fail(["LOG_LEVEL"], "DEBUG|INFO|WARNING|ERROR|CRITICAL 중 하나여야 합니다")
+    return value
+
+
+def quota_limits() -> tuple[int, int, int]:
+    return (
+        positive_int_env("PROJECT_STORAGE_QUOTA_BYTES", PROJECT_STORAGE_QUOTA_BYTES),
+        positive_int_env("USER_STORAGE_QUOTA_BYTES", USER_STORAGE_QUOTA_BYTES),
+        positive_int_env("PROJECT_FILE_COUNT_QUOTA", PROJECT_FILE_COUNT_QUOTA),
+    )
+
+
+def _canonical_http_origin(origin: str) -> str:
+    try:
+        parsed = _HTTP_ORIGIN_ADAPTER.validate_python(origin)
+    except ValidationError:
+        _fail(["CORS_ORIGINS"], "유효한 HTTP 또는 HTTPS origin이어야 합니다")
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.host
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path is not None
+        or parsed.query is not None
+        or parsed.fragment is not None
+    ):
+        _fail(["CORS_ORIGINS"], "scheme/host/port만 있는 origin이어야 합니다")
+    return str(parsed)
+
+
+def _has_forbidden_raw_origin_syntax(origin: str) -> bool:
+    return bool(re.search(r"[\x00-\x20\x7f]", origin)) or any(
+        marker in origin for marker in ("\\", "?", "#")
+    )
+
+
+def cors_origins() -> list[str]:
+    mode = os.getenv("PAIM_AUTH_MODE", "jwt").strip().lower()
+    raw = os.getenv("CORS_ORIGINS")
+    if raw is None and mode == "dev":
+        return ["http://127.0.0.1:7420"]
+    if raw is None or not raw.strip():
+        _fail(["CORS_ORIGINS"], "non-dev에서는 비어 있을 수 없습니다")
+    parts = raw.split(",")
+    if any(not item.strip() for item in parts):
+        _fail(["CORS_ORIGINS"], "빈 origin 항목은 허용되지 않습니다")
+    result: list[str] = []
+    for item in parts:
+        origin = item.strip()
+        if "*" in origin:
+            _fail(["CORS_ORIGINS"], "wildcard는 허용되지 않습니다")
+        if _has_forbidden_raw_origin_syntax(origin) or origin.endswith(":"):
+            _fail(["CORS_ORIGINS"], "origin 원문에 금지된 문법이 있습니다")
+        try:
+            parsed = urlsplit(origin)
+            port = parsed.port
+        except ValueError:
+            _fail(["CORS_ORIGINS"], "port가 유효해야 합니다")
+        if not parsed.hostname or (
+            parsed.scheme not in {"http", "https", "tauri"}
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {""}
+            or parsed.query
+            or parsed.fragment
+        ):
+            _fail(["CORS_ORIGINS"], "path/query/fragment/credential 없는 absolute origin이어야 합니다")
+        if parsed.scheme == "tauri":
+            if origin != "tauri://localhost":
+                _fail(["CORS_ORIGINS"], "Tauri origin은 tauri://localhost만 허용됩니다")
+            canonical = origin
+        else:
+            canonical = _canonical_http_origin(origin)
+        if canonical in result:
+            _fail(["CORS_ORIGINS"], "중복 origin은 허용되지 않습니다")
+        result.append(canonical)
+    return result
+
+
+def validate_phase_b_config() -> None:
+    log_level()
+    quota_limits()
+    cors_origins()
 
 
 def _is_placeholder(value: str) -> bool:
@@ -53,10 +166,11 @@ def _is_placeholder(value: str) -> bool:
 
 def _fail(keys: list[str], reason: str) -> None:
     joined = ", ".join(sorted(keys))
-    raise RuntimeConfigError(f"런타임 설정 오류: {joined} — {reason}")
+    raise RuntimeConfigError(f"런타임 설정 오류: {joined} — {reason}") from None
 
 
 def validate_runtime_config() -> None:
+    validate_phase_b_config()
     values = {key: os.getenv(key, "").strip() for key in _REQUIRED}
     missing = [key for key, value in values.items() if not value]
     if missing:

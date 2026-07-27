@@ -296,8 +296,8 @@ def handle_session_query(
     try:
         llm_response = get_chat_model().invoke(_to_langchain_messages(final_prompt_messages))
         llm_response_text = llm_response.content
-    except Exception as e:
-        logger.error("세션 질의 LLM 호출 오류: %s", e, exc_info=True)
+    except Exception:
+        logger.error("session_llm_failed", extra={"code": "SESSION_LLM_FAILED"})
         raise HTTPException(status_code=503, detail="LLM 응답 생성 중 오류가 발생했습니다. 서버 로그를 확인하세요.")
 
     # 2. 생성된 AI 응답을 세션 스토어 및 DB에 기록

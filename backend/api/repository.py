@@ -467,7 +467,10 @@ def _sync_bg(project_id: int, repo_id: int, full_name: str, branch: str, token: 
                     source_kind=_extract_source_kind(src_metadata.get("source_type")),
                 )
             except Exception:
-                logger.warning("extract 실패 — source=%s repo_id=%s", source_name, repo_id, exc_info=True)
+                logger.warning(
+                    "repository_extract_failed",
+                    extra={"project_id": project_id, "code": "REPOSITORY_EXTRACT_FAILED"},
+                )
                 items = []
             try:
                 ingest(
@@ -483,7 +486,10 @@ def _sync_bg(project_id: int, repo_id: int, full_name: str, branch: str, token: 
                 )
                 indexed += 1
             except Exception:
-                logger.warning("ingest 실패 — source=%s repo_id=%s", source_name, repo_id, exc_info=True)
+                logger.warning(
+                    "repository_ingest_failed",
+                    extra={"project_id": project_id, "code": "REPOSITORY_INGEST_FAILED"},
+                )
 
         from ..graph import refresh_project_memory_after_delete
         refresh_project_memory_after_delete(project_id)
@@ -491,7 +497,10 @@ def _sync_bg(project_id: int, repo_id: int, full_name: str, branch: str, token: 
         import json as _json
         sync_warning = _json.dumps(warnings, ensure_ascii=False) if warnings else None
         if warnings:
-            logger.warning("repo sync partial failure repo_id=%s warnings=%s", repo_id, warnings)
+            logger.warning(
+                "repository_sync_partial",
+                extra={"project_id": project_id, "code": "REPOSITORY_SYNC_PARTIAL"},
+            )
 
         _set_repo_status(
             repo_id, "indexed",
@@ -502,18 +511,18 @@ def _sync_bg(project_id: int, repo_id: int, full_name: str, branch: str, token: 
         )
 
         try:
-            result = reconcile_repository_prs(project_id, repo_id, merged_prs)
-            logger.info("reconciler 완료 repo_id=%s result=%s", repo_id, result)
+            reconcile_repository_prs(project_id, repo_id, merged_prs)
+            logger.info("repository_reconciler_completed")
         except Exception:
-            logger.warning("reconciler 실패 (sync는 성공 유지) repo_id=%s", repo_id, exc_info=True)
+            logger.warning("repository_reconciler_failed")
 
     except GitHubAPIError as exc:
         code = _sync_failure_code(exc, exc.source)
         logger.error("sync_bg GitHub 실패 repo_id=%s code=%s", repo_id, code)
         _set_repo_status(repo_id, "failed", last_error=code)
-    except Exception as exc:
-        logger.error("sync_bg 실패 repo_id=%s", repo_id, exc_info=True)
-        _set_repo_status(repo_id, "failed", last_error=str(exc))
+    except Exception:
+        logger.error("repository_sync_failed", extra={"code": "REPOSITORY_SYNC_FAILED"})
+        _set_repo_status(repo_id, "failed", last_error="REPOSITORY_SYNC_FAILED")
 
 
 # ── Endpoints ────────────────────────────────────────────────────

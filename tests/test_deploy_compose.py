@@ -172,6 +172,20 @@ def test_backend_pins_single_worker(prod: dict):
     assert str(prod["services"]["backend"]["environment"]["WEB_CONCURRENCY"]) == "1"
 
 
+def test_backend_healthcheck_uses_readiness_with_safe_timeout(prod: dict):
+    health = prod["services"]["backend"]["healthcheck"]
+    command = " ".join(health["test"])
+    assert "/health/ready" in command
+    assert 'b.get("status")=="ready"' in command
+    assert str(health["timeout"]).rstrip("s") and int(str(health["timeout"]).rstrip("s")) >= 7
+
+
+def test_mysql_init_mounts_v9_migration(prod: dict, dev: dict):
+    for stack in (prod, dev):
+        mounts = stack["services"]["db"]["volumes"]
+        assert any("migrate_v9.sql" in mount for mount in mounts)
+
+
 def test_dockerfile_pins_single_worker():
     dockerfile = (_ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert '"--workers", "1"' in dockerfile

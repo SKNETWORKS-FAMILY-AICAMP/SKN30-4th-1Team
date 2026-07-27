@@ -130,10 +130,10 @@ def _invoke_supersede_once(
 
     try:
         raw = llm.with_structured_output(SupersedeResult).invoke(messages)
-        logger.info("supersede structured raw output=%s", raw)
+        logger.info("supersede_structured_output_received")
         return _coerce_result(raw)
     except Exception:
-        logger.warning("with_structured_output 실패, PydanticOutputParser로 폴백", exc_info=True)
+        logger.warning("supersede_structured_output_fallback")
 
     parser = PydanticOutputParser(pydantic_object=SupersedeResult)
     fallback_prompt = ChatPromptTemplate.from_messages(
@@ -157,7 +157,7 @@ def _invoke_supersede_once(
                 error=error_text or "(없음)",
             )
         ).content
-        logger.info("supersede parser raw output=%s", text)
+        logger.info("supersede_parser_output_received")
         try:
             return _coerce_result(parser.parse(text))
         except Exception as exc:
@@ -259,7 +259,7 @@ def _insert_supersede_suggestions(
                     or match.superseding_memory_id not in new_ids
                     or match.memory_id == match.superseding_memory_id
                 ):
-                    logger.warning("supersede invalid match skipped: %s", match.model_dump())
+                    logger.warning("supersede_invalid_match_skipped")
                     continue
                 new_date = new_dates.get(match.superseding_memory_id)
                 old_date = candidate_dates.get(match.memory_id)

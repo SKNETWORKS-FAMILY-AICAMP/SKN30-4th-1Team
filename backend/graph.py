@@ -10,6 +10,7 @@
 #  1) 입력(적재): 문서 → [저장] → [메모리] → END
 #  2) 출력(질의): 질문 → [섹션(stub)] → [Q&A] → [검증] → (부족: 재검색 루프)
 #                        → [계획] → [검증] → (부족: 재기획 루프) → [응답] → END
+import asyncio
 from typing import TypedDict, Optional, List, Dict
 import logging
 
@@ -21,6 +22,14 @@ from .pipeline.extractor import extract
 from .pipeline.ingestor import ingest
 from .retriever import history_intent, qa_engine
 from .llm.chat_model_factory import get_chat_model
+from .quota import (
+    cleanup_failed_reservation,
+    compensate_cancelled_document,
+    delete_document as quota_delete_document,
+    fail_document,
+    finalize_document,
+    reserve_document,
+)
 
 MAX_RETRY = 1  # 재검색/재기획 최대 반복 (무한 루프 방지)
 logger = logging.getLogger(__name__)
@@ -159,6 +168,7 @@ class IngestState(TypedDict, total=False):
     content: str
     doc_type: str
     date: str
+    uploaded_by: int
     # 노드가 채우는 값
     doc_id: int
     items: list
@@ -169,24 +179,38 @@ def store_node(state: IngestState) -> dict:
     """저장 에이전트: document 행 생성 → LLM 추출 → MySQL+Chroma 적재.
     로직은 기존 extract()/ingest() 재사용."""
     doc_type = state.get("doc_type", "meeting")
-    conn = get_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO documents (project_id, filename, doc_type) VALUES (%s, %s, %s)",
-                (state["project_id"], state["filename"], doc_type),
-            )
-            doc_id = cur.lastrowid
-        conn.commit()
-    finally:
-        conn.close()
-
-    items = extract(state["content"], default_source=state["filename"])
-    ingest(
-        project_id=state["project_id"], doc_id=doc_id, items=items,
-        raw_text=state["content"], source=state["filename"],
-        date=state.get("date", ""), doc_type=doc_type,
+    uploaded_by = state.get("uploaded_by")
+    if not isinstance(uploaded_by, int) or uploaded_by <= 0:
+        raise RuntimeError("UPLOAD_USER_REQUIRED")
+    reservation = reserve_document(
+        state["project_id"], uploaded_by, len(state["content"].encode("utf-8")), "virtual"
     )
+    try:
+        finalized = finalize_document(reservation["reservation_id"], state["filename"], doc_type)
+    except BaseException:
+        cleanup_failed_reservation(reservation["reservation_id"])
+        raise
+    doc_id = finalized["doc_id"]
+    try:
+        items = extract(state["content"], default_source=state["filename"])
+        ingest(
+            project_id=state["project_id"], doc_id=doc_id, items=items,
+            raw_text=state["content"], source=state["filename"],
+            date=state.get("date", ""), doc_type=doc_type,
+            processing_token=finalized["processing_token"],
+        )
+    except asyncio.CancelledError:
+        compensate_cancelled_document(doc_id)
+        raise
+    except Exception:
+        logger.error(
+            "graph_ingest_failed",
+            extra={"project_id": state["project_id"], "code": "GRAPH_INGEST_FAILED"},
+        )
+        fail_document(doc_id, "GRAPH_INGEST_FAILED")
+        raise
+    for old_doc_id in finalized["old_doc_ids"]:
+        quota_delete_document(old_doc_id)
     return {"doc_id": doc_id, "items": items}
 
 
@@ -489,7 +513,7 @@ def run_qa(
     return out["result"]
 
 
-def run_ingest(project_id: int, filename: str, content: str,
+def run_ingest(project_id: int, filename: str, content: str, uploaded_by: int,
                doc_type: str = "meeting", date: str = "") -> dict:
     """입력 그래프 실행 → {doc_id, items, project_summary}."""
     global _ingest_app
@@ -497,5 +521,5 @@ def run_ingest(project_id: int, filename: str, content: str,
         _ingest_app = build_ingest_graph()
     return _ingest_app.invoke({
         "project_id": project_id, "filename": filename, "content": content,
-        "doc_type": doc_type, "date": date,
+        "doc_type": doc_type, "date": date, "uploaded_by": uploaded_by,
     })

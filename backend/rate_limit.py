@@ -8,6 +8,7 @@ from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 
 from .api.auth import get_current_user_id
+from .api.errors import error_response
 
 
 RATE_LIMIT_SIGNUP = os.getenv("RATE_LIMIT_SIGNUP", "5/minute")
@@ -33,8 +34,8 @@ limiter = Limiter(key_func=client_ip_key)
 async def rate_limit_exceeded_handler(
     request: Request, exc: RateLimitExceeded
 ) -> JSONResponse:
-    response = JSONResponse(
-        status_code=429,
-        content={"detail": "요청 한도를 초과했습니다.", "code": "RATE_LIMIT_EXCEEDED"},
+    return error_response(
+        429,
+        "요청 한도를 초과했습니다.",
+        code="RATE_LIMIT_EXCEEDED",
     )
-    return response

@@ -48,10 +48,10 @@ def test_desktop_origin_is_allowed_by_cors():
     response = client.options(
         "/github/app/sessions",
         headers={
-            "Origin": "http://127.0.0.1:1420",
+            "Origin": "http://127.0.0.1:7420",
             "Access-Control-Request-Method": "POST",
         },
     )
 
     assert response.status_code == 200
-    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:1420"
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:7420"

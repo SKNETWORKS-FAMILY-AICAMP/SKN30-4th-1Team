@@ -57,6 +57,7 @@ services:
       - ./backend/db/migrate_v6.sql:/docker-entrypoint-initdb.d/06_migrate_v6.sql:ro
       - ./backend/db/migrate_v7.sql:/docker-entrypoint-initdb.d/07_migrate_v7.sql:ro
       - ./backend/db/migrate_v8.sql:/docker-entrypoint-initdb.d/08_migrate_v8.sql:ro
+      - ./backend/db/migrate_v9.sql:/docker-entrypoint-initdb.d/09_migrate_v9.sql:ro
     healthcheck:
       # `$$`로 이스케이프해 Compose 보간이 아니라 **컨테이너 안에서** 확장시킨다.
       # `-p${DB_PASSWORD}`로 쓰면 비밀번호가 `docker compose config` 출력과
@@ -108,6 +109,15 @@ services:
     volumes:
       - chroma_data:/app/.chroma
       - upload_data:/app/data/uploads
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c 'import json,urllib.request; r=urllib.request.urlopen("http://127.0.0.1:8000/health/ready",timeout=6); b=json.load(r); raise SystemExit(0 if r.status==200 and b.get("status")=="ready" else 1)'
+      interval: 15s
+      timeout: 7s
+      retries: 5
+      start_period: 30s
     logging: *logging
     networks:
       data_internal:

@@ -235,6 +235,42 @@ require PAIM_PROXY_SUBNET  "프로필 proxy subnet"
 require PAIM_CADDY_PROXY_IP "프로필 Caddy static IP"
 require PAIM_BACKEND_PROXY_IP "프로필 backend static IP"
 require FORWARDED_ALLOW_IPS "신뢰할 Caddy /32"
+require CORS_ORIGINS        "backend CORS allowlist (non-dev 필수)"
+
+CORS_VALUE="$(env_get CORS_ORIGINS)"
+if [[ -n "$CORS_VALUE" ]]; then
+  IFS=',' read -r -a CORS_ITEMS <<< "$CORS_VALUE"
+  declare -A CORS_SEEN=()
+  for origin in "${CORS_ITEMS[@]}"; do
+    if [[ -z "$origin" || "$origin" == *'*'* || "$origin" == *'@'* ||
+          "$origin" == *\\* || "$origin" =~ [[:space:][:cntrl:]] ||
+          "$origin" == *: ||
+          ! "$origin" =~ ^(http|https|tauri)://[^/?#]+$ ]]; then
+      ERRORS+=("CORS_ORIGINS가 유효한 absolute origin allowlist가 아니다")
+      break
+    fi
+    if [[ "$origin" == tauri://* && "$origin" != "tauri://localhost" ]]; then
+      ERRORS+=("CORS_ORIGINS의 Tauri origin은 tauri://localhost만 허용된다")
+      break
+    fi
+    if [[ -n "${CORS_SEEN[$origin]:-}" ]]; then
+      ERRORS+=("CORS_ORIGINS에 중복 origin이 있다")
+      break
+    fi
+    CORS_SEEN[$origin]=1
+  done
+fi
+
+LOG_LEVEL_VALUE="$(env_get LOG_LEVEL)"
+if [[ -n "$LOG_LEVEL_VALUE" && ! "$LOG_LEVEL_VALUE" =~ ^(DEBUG|INFO|WARNING|ERROR|CRITICAL)$ ]]; then
+  ERRORS+=("LOG_LEVEL은 DEBUG|INFO|WARNING|ERROR|CRITICAL 중 하나여야 한다")
+fi
+for quota_key in PROJECT_STORAGE_QUOTA_BYTES USER_STORAGE_QUOTA_BYTES PROJECT_FILE_COUNT_QUOTA; do
+  quota_value="$(env_get "$quota_key")"
+  if [[ -n "$quota_value" && ! "$quota_value" =~ ^[1-9][0-9]*$ ]]; then
+    ERRORS+=("$quota_key 는 양의 정수여야 한다")
+  fi
+done
 
 # ── LLM provider 조건부 ──────────────────────────────────────────────────────
 #
