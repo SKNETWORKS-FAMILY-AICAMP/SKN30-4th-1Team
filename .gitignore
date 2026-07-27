@@ -198,13 +198,11 @@ desktop/dist-ssr/
 desktop/src-tauri/target/
 
 # my agent files
-# 개인 작업물은 저장소 루트의 것만 무시한다. 앞의 `/`가 없으면 git이 어느 깊이에서든
-# 같은 이름을 잡아, desktop/scripts/ 같은 정식 소스까지 무시 대상이 된다.
 AGENT_LOG.md
 claude.md
 codex.md
-/ignore
-/scripts
+ignore
+scripts
 CLAUDE.md
 README.ko.md
 .agent-workflow
