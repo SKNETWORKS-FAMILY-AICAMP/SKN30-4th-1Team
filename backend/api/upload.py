@@ -1,4 +1,3 @@
-import io
 import logging
 import threading
 from pathlib import Path
@@ -12,13 +11,18 @@ from ..pipeline.ingestor import ingest
 from ..retriever.memory_vector import delete_memory_vector, upsert_memory_vector
 from ..storage import save_file, delete_file, safe_upload_name
 from ..graph import refresh_project_memory_after_delete, update_project_memory
+from ..document_formats import (
+    DocumentParseError,
+    PROJECT_DOCUMENT_MAX_FILE_BYTES,
+    parse_document,
+    supported_formats_label,
+    supported_suffixes,
+)
 from .auth import get_current_user_id, require_project_access
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-_ALLOWED_SUFFIXES = {".md", ".txt", ".pdf"}
-_MAX_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
 _UPLOAD_PROCESS_LOCK = threading.Lock()
 
 _DOC_TYPE_KEYWORDS = {
@@ -32,24 +36,6 @@ def _infer_doc_type(filename: str) -> str:
         if any(kw in name for kw in keywords):
             return doc_type
     return "document"
-
-
-# ── 파일 텍스트 추출 ──────────────────────────────────────────────
-
-def _read_pdf(data: bytes) -> str:
-    try:
-        from pypdf import PdfReader
-        reader = PdfReader(io.BytesIO(data))
-        return "\n".join(page.extract_text() or "" for page in reader.pages)
-    except Exception:
-        return ""
-
-
-def _extract_text(filename: str, data: bytes) -> str:
-    suffix = Path(filename).suffix.lower()
-    if suffix == ".pdf":
-        return _read_pdf(data)
-    return data.decode("utf-8", errors="replace")
 
 
 # ── 내부 헬퍼 ─────────────────────────────────────────────────────
@@ -241,14 +227,20 @@ async def upload_document(
         filename = safe_upload_name(file.filename or "")
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid filename")
-    if Path(filename).suffix.lower() not in _ALLOWED_SUFFIXES:
-        raise HTTPException(status_code=400, detail="지원하지 않는 파일 형식입니다. (.md / .txt / .pdf)")
+    if Path(filename).suffix.lower() not in supported_suffixes():
+        raise HTTPException(
+            status_code=400,
+            detail=f"지원하지 않는 파일 형식입니다. ({supported_formats_label()})",
+        )
     doc_type = _infer_doc_type(filename)
 
     data = await file.read()
-    if len(data) > _MAX_FILE_BYTES:
-        raise HTTPException(status_code=413, detail="파일 크기는 10 MB를 초과할 수 없습니다.")
-    content = _extract_text(filename, data)
+    if len(data) > PROJECT_DOCUMENT_MAX_FILE_BYTES:
+        raise HTTPException(status_code=413, detail="파일 크기가 허용 한도를 초과했습니다.")
+    try:
+        content = parse_document(filename, data)
+    except DocumentParseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not content.strip():
         raise HTTPException(status_code=400, detail="content must not be empty")
 

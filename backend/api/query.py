@@ -19,7 +19,15 @@ from ..retriever.query_intent import (
     answer_overview,
     classify_question,
 )
-from .upload import _ALLOWED_SUFFIXES, _MAX_FILE_BYTES, _delete_document, _extract_text
+from ..document_formats import (
+    DocumentParseError,
+    QUERY_ATTACHMENT_MAX_FILE_BYTES,
+    QUERY_ATTACHMENT_MAX_TOTAL_BYTES,
+    parse_document,
+    supported_formats_label,
+    supported_suffixes,
+)
+from .upload import _delete_document
 from .auth import require_project_access
 
 router = APIRouter()
@@ -54,25 +62,40 @@ def _prepare_attachment_context(attachments: List[QueryAttachment]) -> tuple[str
     sections = []
     sources: List[str] = []
     used_chars = 0
+    used_bytes = 0
 
     for attachment in attachments:
         filename = Path(attachment.filename).name
-        if Path(filename).suffix.lower() not in _ALLOWED_SUFFIXES:
-            raise HTTPException(status_code=400, detail="지원하지 않는 첨부 파일 형식입니다. (.md / .txt / .pdf)")
+        if Path(filename).suffix.lower() not in supported_suffixes():
+            raise HTTPException(
+                status_code=400,
+                detail=f"지원하지 않는 첨부 파일 형식입니다. ({supported_formats_label()})",
+            )
 
         try:
             data = base64.b64decode(attachment.content_base64, validate=True)
         except (binascii.Error, ValueError):
             raise HTTPException(status_code=400, detail="첨부 파일을 읽을 수 없습니다.")
 
-        if len(data) > _MAX_FILE_BYTES:
-            raise HTTPException(status_code=413, detail="첨부 파일 크기는 10 MB를 초과할 수 없습니다.")
+        if len(data) > QUERY_ATTACHMENT_MAX_FILE_BYTES:
+            raise HTTPException(status_code=413, detail="첨부 파일 크기가 허용 한도를 초과했습니다.")
+        used_bytes += len(data)
+        if used_bytes > QUERY_ATTACHMENT_MAX_TOTAL_BYTES:
+            raise HTTPException(status_code=413, detail="전체 첨부 파일 크기가 허용 한도를 초과했습니다.")
 
         remaining = _ATTACHMENT_MAX_CHARS_TOTAL - used_chars
         if remaining <= 0:
-            break
+            # Text context may already be full, but every remaining attachment
+            # must still be decoded and counted so total-byte validation cannot
+            # be bypassed by placing it after a long earlier attachment.
+            continue
 
-        text = _extract_text(filename, data).strip() or "(텍스트를 추출할 수 없습니다.)"
+        try:
+            text = parse_document(filename, data).strip()
+        except DocumentParseError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not text:
+            text = "(텍스트를 추출할 수 없습니다.)"
         text = _clip_attachment_text(text, _ATTACHMENT_MAX_CHARS_PER_FILE, "첨부 내용 잘림")
         text = _clip_attachment_text(text, remaining, "전체 첨부 한도 초과로 잘림")
         # 표준 출처 마커를 붙여 SYSTEM_QA의 인용 규칙이 첨부에도 적용되도록 한다

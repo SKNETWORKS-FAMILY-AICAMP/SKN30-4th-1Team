@@ -11,6 +11,10 @@ google-generativeai
 pymysql
 chromadb
 
+# 문서 파싱
+pypdf
+python-docx
+
 # 유틸
 pydantic
 python-dotenv
