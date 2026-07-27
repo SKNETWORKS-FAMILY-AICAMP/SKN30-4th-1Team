@@ -69,6 +69,44 @@ def _require_list(payload, source: str) -> list:
     return payload
 
 
+# 소스별 실패를 사용자에게 그대로 보여줄 문구 — GithubPanel이 reason을 렌더링한다.
+_SOURCE_WARNING_REASON = {
+    "auth": "GitHub 인증에 실패했습니다",
+    "permission": "이 소스에 접근할 권한이 없습니다",
+    "not_found": "이 소스를 찾을 수 없습니다",
+    "unavailable": "GitHub API 응답 오류 (네트워크 문제일 수 있음)",
+}
+
+
+def _collect_optional_list(
+    path: str,
+    source: str,
+    warnings: list[dict],
+    token: str | None,
+    *,
+    fail_on_not_found: bool = False,
+) -> list:
+    """목록 API 1건을 수집한다. 실패하면 warnings에 남기고 빈 목록으로 계속 진행한다.
+
+    한 소스의 실패(issues가 꺼진 저장소의 410, 일시적 5xx 등)로 나머지 소스까지
+    버리고 저장소 전체를 failed로 만들지 않기 위함이다. 모든 소스가 실패하면
+    호출부의 `if not sources` 검사가 여전히 동기화를 실패 처리한다.
+
+    fail_on_not_found는 commits 전용 — 브랜치가 없다는 뜻이라 그대로 진행하면
+    엉뚱한 기본 브랜치 내용을 색인해 놓고 성공으로 보고하게 된다.
+    """
+    try:
+        return _require_list(_gh_get(path, token=token, source=source), source)
+    except GitHubAPIError as exc:
+        if fail_on_not_found and exc.kind == "not_found":
+            raise
+        warnings.append({
+            "source_type": source,
+            "reason": _SOURCE_WARNING_REASON.get(exc.kind, _SOURCE_WARNING_REASON["unavailable"]),
+        })
+        return []
+
+
 def _sync_failure_code(exc: GitHubAPIError, source: str) -> str:
     if exc.kind == "auth":
         return f"GITHUB_AUTH_FAILED:{source}"
@@ -140,13 +178,12 @@ def _collect_repo_sources(
     warnings: list[dict] = []
 
     # Commits (sha를 먼저 확보해 README metadata에 활용)
-    commits = _require_list(
-        _gh_get(
-            f"/repos/{full_name}/commits?sha={parse.quote(branch)}&per_page=20",
-            token=token,
-            source="commits",
-        ),
+    commits = _collect_optional_list(
+        f"/repos/{full_name}/commits?sha={parse.quote(branch)}&per_page=20",
         "commits",
+        warnings,
+        token,
+        fail_on_not_found=True,  # 브랜치 없음은 설정 오류이므로 동기화를 실패시킨다
     )
     if commits:
         latest_sha = commits[0].get("sha")
@@ -172,8 +209,15 @@ def _collect_repo_sources(
     try:
         readme = _gh_get(f"/repos/{full_name}/readme", token=token, source="readme")
     except GitHubAPIError as exc:
+        # not_found는 README 없는 저장소로 정상 — warning도 남기지 않는다.
+        # 그 외 실패는 다른 소스와 동일하게 warning만 남기고 계속한다.
         if exc.kind != "not_found":
-            raise
+            warnings.append({
+                "source_type": "readme",
+                "reason": _SOURCE_WARNING_REASON.get(
+                    exc.kind, _SOURCE_WARNING_REASON["unavailable"]
+                ),
+            })
         readme = {}
     if isinstance(readme, dict) and readme.get("content"):
         try:
@@ -195,13 +239,11 @@ def _collect_repo_sources(
             pass
 
     # Issues (PR 제외)
-    issues = _require_list(
-        _gh_get(
-            f"/repos/{full_name}/issues?state=open&per_page=20",
-            token=token,
-            source="issues",
-        ),
+    issues = _collect_optional_list(
+        f"/repos/{full_name}/issues?state=open&per_page=20",
         "issues",
+        warnings,
+        token,
     )
     issue_texts = [
         f"Issue #{i.get('number')} ({i.get('state', 'open')}): {i.get('title', '')}\n{i.get('body') or ''}"
@@ -219,13 +261,11 @@ def _collect_repo_sources(
         }
 
     # Pull Requests
-    pulls = _require_list(
-        _gh_get(
-            f"/repos/{full_name}/pulls?state=open&per_page=20",
-            token=token,
-            source="pulls",
-        ),
+    pulls = _collect_optional_list(
+        f"/repos/{full_name}/pulls?state=open&per_page=20",
         "pulls",
+        warnings,
+        token,
     )
     pr_texts = [
         f"PR #{p.get('number')} ({p.get('state', 'open')}): {p.get('title', '')}\n{p.get('body') or ''}"

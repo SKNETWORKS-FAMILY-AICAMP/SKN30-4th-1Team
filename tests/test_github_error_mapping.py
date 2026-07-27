@@ -150,3 +150,41 @@ def test_installation_token_failure_is_sanitized_before_response_db_and_log(
         get_connection.assert_not_called()
     finally:
         github_app._sessions.clear()
+
+
+def test_one_failing_source_does_not_discard_the_others():
+    """소스 1건 실패로 저장소 동기화 전체를 버리지 않는다.
+
+    issues가 꺼진 저장소(410)나 일시적 5xx 하나에 commits·README·pulls까지 전부
+    폐기되고 repo가 failed가 됐다. 부분 실패는 warnings로 남기고 나머지를 색인한다."""
+    commits = [{"sha": "abc1234", "commit": {"message": "첫 커밋", "author": {"date": "2026-04-13T00:00:00Z"}}}]
+    with patch(
+        "backend.api.repository._gh_get",
+        side_effect=[
+            commits,                                    # commits 성공
+            GitHubAPIError("not_found", "readme"),      # README 없음 — 정상
+            GitHubAPIError("unavailable", "issues"),    # issues 실패 — warning
+            [{"number": 3, "title": "PR 제목", "body": "본문"}],  # pulls 성공
+        ],
+    ):
+        sources, sha, warnings = _collect_repo_sources("o/r", "main")
+
+    assert sha == "abc1234"
+    assert "commits.txt" in sources and "pulls.txt" in sources  # 나머지는 살아남는다
+    assert [w["source_type"] for w in warnings] == ["issues"]
+    assert warnings[0]["reason"]  # 사용자에게 보여줄 문구가 채워져 있다
+
+
+def test_missing_branch_still_fails_the_whole_sync():
+    """commits의 not_found(=브랜치 없음)는 warning으로 넘기지 않는다.
+
+    그대로 진행하면 엉뚱한 기본 브랜치의 README·issues·pulls를 색인해 놓고
+    동기화를 성공으로 보고하게 된다."""
+    with patch(
+        "backend.api.repository._gh_get",
+        side_effect=GitHubAPIError("not_found", "commits"),
+    ):
+        with pytest.raises(GitHubAPIError) as exc_info:
+            _collect_repo_sources("o/r", "없는브랜치")
+    assert exc_info.value.kind == "not_found"
+    assert exc_info.value.source == "commits"
