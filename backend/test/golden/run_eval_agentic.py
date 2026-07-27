@@ -283,7 +283,11 @@ def cmd_score(args) -> None:
     scores = ragas_score(rows, args.judge, True, args.workers)
     print(f"[완료] score(순수 content 기준 — 비교용, 정본 아님) {in_path.name}: {scores}")
 
-    has_rendered = all(row.get("rendered_contexts") for row in rows)
+    # 키 존재 여부로 판별한다(아래 sql_contexts 분기와 같은 규칙). truthiness로 보면
+    # 검색 근거가 없는 문항 하나만 rendered_contexts=[]여도 파일 전체가 구버전으로
+    # 간주돼 rendered 기준 재채점이 통째로, 그것도 조용히 생략된다. 빈 목록은 신버전의
+    # 유효한 값이다.
+    has_rendered = all(row.get("rendered_contexts") is not None for row in rows)
     if has_rendered:
         rendered_rows = [dict(row, contexts=row["rendered_contexts"]) for row in rows]
         rendered_scores = ragas_score(rendered_rows, args.judge, True, args.workers)

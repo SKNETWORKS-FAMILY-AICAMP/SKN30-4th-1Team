@@ -51,6 +51,47 @@ def test_memory_vector_pool_is_independent_of_final_row_limit():
     assert qa_engine.MYSQL_CANDIDATE_POOL > qa_engine.MYSQL_TOP_N
 
 
+def test_distance_threshold_ignores_rows_outside_the_candidate_set():
+    """F-007: 임계값 기준선은 허용 후보 안에서 잡아야 한다.
+
+    Chroma where절은 project/item_type만 거르므로 category 분기가 rows에 일부만 넘겨도
+    프로젝트 전체가 돌아온다. 전체 distances로 min을 잡으면 제외 대상이 기준선을 만들어
+    (제외 0.10 → cutoff 0.25) 후보 최적 행(0.40)까지 잘려 벡터 축이 통째로 사라진다.
+    """
+    rows = [_row(1, "허용 후보"), _row(2, "허용 후보 2")]
+    excluded_id = qa_engine.memory_vector_id(999)  # rows에 없는 = 다른 카테고리 행
+    fake_collection = MagicMock()
+    fake_collection.query.return_value = {
+        "ids": [[excluded_id, qa_engine.memory_vector_id(1), qa_engine.memory_vector_id(2)]],
+        "distances": [[0.10, 0.40, 0.45]],
+    }
+
+    with patch.object(qa_engine, "get_collection", return_value=fake_collection):
+        rank_lists, hits = qa_engine._memory_vector_rank_lists(
+            project_id=1, queries=["질문"], rows=rows,
+        )
+
+    # 기준선이 0.40이므로 MARGIN(0.15) 안의 0.45도 살아남는다
+    assert [h["memory_id"] for h in hits] == [1, 2]
+    assert rank_lists and rank_lists[0] == [0, 1]
+
+
+def test_history_row_renders_reason_exactly_once():
+    """F-010: 이력 행에서 reason이 두 번 붙지 않는다.
+
+    _row_line_body()에 reason 렌더링을 추가하면서 _format_history_row()의 기존 append를
+    제거하지 않아 "이유: X 이유: X"가 LLM 입력과 RAGAS rendered 컨텍스트에 들어갔다.
+    """
+    row = {
+        "id": 7, "category": "decision", "content": "배포는 주 1회로 한다.",
+        "reason": "롤백 비용이 크기 때문", "topic": None, "owner": None,
+        "date": None, "due_date": None, "completed_at": None,
+        "source": "minutes.md", "superseded_by": None,
+    }
+    assert qa_engine._row_line_body(row).count("이유:") == 1
+    assert qa_engine._format_history_row(row, "[decision #7][최신]").count("이유:") == 1
+
+
 def test_category_match_branch_is_capped_like_the_unmatched_branch(monkeypatch):
     """category가 잡힌 질문도 미매칭 분기와 같은 상한(MYSQL_TOP_N)을 받아야 한다.
 

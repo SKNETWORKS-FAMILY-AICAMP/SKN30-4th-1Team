@@ -13,7 +13,7 @@ from ..document_content import (
     DocumentContentError,
     extract_document_text,
 )
-from ..pipeline.extractor import extract
+from ..pipeline.extractor import cap_open_actions, extract
 from ..pipeline.ingestor import ingest
 from ..reconciler.pr_actions import _fetch_open_actions
 from ..retriever.memory_vector import delete_memory_vector, upsert_memory_vector
@@ -187,7 +187,9 @@ def _process_upload_locked(
 ):
     """실제 업로드 처리 본문. 호출자는 동시 실행을 제한한다."""
     try:
-        open_actions = _fetch_open_actions(project_id)
+        # 프롬프트 예산 안으로 자른 뒤 extract·ingest에 같은 목록을 넘긴다 — ingest의
+        # action_id 허용 목록이 LLM에게 실제로 보여준 목록과 일치해야 한다.
+        open_actions = cap_open_actions(_fetch_open_actions(project_id))
     except Exception:
         logger.warning("open action 목록 조회 실패, 완료 판정 없이 진행 doc_id=%s", doc_id, exc_info=True)
         open_actions = []
@@ -227,6 +229,7 @@ def _process_upload_locked(
             },
             processing_token=processing_token,
             completions=completions,
+            open_actions=open_actions,
         )
     except asyncio.CancelledError:
         compensate_cancelled_document(doc_id)

@@ -142,7 +142,9 @@ def test_memory_tool_rejects_completely_empty_selector(monkeypatch):
 
 
 def test_memory_tool_caps_rows_and_preserves_total(monkeypatch):
-    rows = [_memory_row(index, f"작업 {index}") for index in range(1, 26)]
+    cap = qa_tools.MEMORY_TOOL_MAX_ROWS
+    total = cap + 5
+    rows = [_memory_row(index, f"작업 {index}") for index in range(1, total + 1)]
     monkeypatch.setattr(qa_tools.mysql_search, "search", lambda *args, **kwargs: rows)
     monkeypatch.setattr(
         qa_tools.qa_engine,
@@ -158,10 +160,50 @@ def test_memory_tool_caps_rows_and_preserves_total(monkeypatch):
         limit=999,
     )
 
-    assert artifact["total_rows"] == 25
-    assert artifact["returned_rows"] == 10
+    assert artifact["total_rows"] == total
+    assert artifact["returned_rows"] == cap
     assert artifact["truncated"] is True
-    assert content.count("[action]") == 10
+    assert content.count("[action]") == cap
+
+
+def test_memory_tool_tells_the_model_when_rows_were_truncated(monkeypatch):
+    """F-006: 잘림은 artifact에만 있고 모델이 보는 건 content뿐이라, 상위 N건을 받은
+    모델이 그걸 "전체"라고 답했다. 나머지가 있다는 사실이 content에 있어야 한다."""
+    cap = qa_tools.MEMORY_TOOL_MAX_ROWS
+    total = cap + 32
+    rows = [_memory_row(index, f"작업 {index}") for index in range(1, total + 1)]
+    monkeypatch.setattr(qa_tools.mysql_search, "search", lambda *args, **kwargs: rows)
+    monkeypatch.setattr(
+        qa_tools.qa_engine,
+        "_rank_mysql_rows",
+        lambda project_id, candidates, queries, limit: (candidates[:limit], []),
+    )
+
+    content, artifact = query_structured_memory.func(
+        operation="list", text_query="작업", project_id=1, category="action", limit=999,
+    )
+
+    assert artifact["truncated"] is True
+    assert f"총 {total}건 중 상위 {cap}건" in content
+
+
+def test_memory_tool_does_not_claim_truncation_when_complete(monkeypatch):
+    """잘리지 않았으면 안내 줄을 붙이지 않는다 — 완전한 목록을 부분 목록으로 오인하게
+    만들면 F-006을 반대 방향으로 재현하는 셈이다."""
+    rows = [_memory_row(index, f"작업 {index}") for index in range(1, 4)]
+    monkeypatch.setattr(qa_tools.mysql_search, "search", lambda *args, **kwargs: rows)
+    monkeypatch.setattr(
+        qa_tools.qa_engine,
+        "_rank_mysql_rows",
+        lambda project_id, candidates, queries, limit: (candidates[:limit], []),
+    )
+
+    content, artifact = query_structured_memory.func(
+        operation="list", text_query="작업", project_id=1, category="action", limit=999,
+    )
+
+    assert artifact["truncated"] is False
+    assert "상위" not in content
 
 
 def test_memory_tool_all_scope_omits_sql_category(monkeypatch):

@@ -88,6 +88,34 @@ def _system_prompt(source_kind: str) -> str:
     return _REPO_PROMPTS.get(source_kind, "") + SYSTEM_PROMPT
 
 
+# 열린 action 목록을 system prompt에 넣을 때의 상한. 이 system은 청크마다 재사용되므로
+# (_CHUNK_SIZE=15000자) 목록이 커지면 매 청크에서 컨텍스트를 잡아먹어 결국 그 프로젝트의
+# 문서 업로드가 통째로 extraction 실패로 끝난다. action content는 API로 생성 가능해
+# 개수·길이 모두 상한이 없으므로 세 축을 각각 막는다.
+_OPEN_ACTIONS_MAX_ITEMS = 50      # 항목 수
+_OPEN_ACTIONS_MAX_CHARS = 4000    # 렌더링된 목록 전체 문자 수
+_OPEN_ACTIONS_ITEM_CHARS = 200    # 항목 하나가 예산을 독식하지 않도록 개별 절단
+
+
+def cap_open_actions(open_actions: List[dict]) -> List[dict]:
+    """프롬프트에 넣을 열린 action 목록을 예산 안으로 자른다.
+
+    최신순(_fetch_open_actions가 created_at DESC)이므로 앞에서부터 채우고, 예산을 넘기면
+    거기서 끊는다. 잘린 항목은 이 문서에서 완료 판정 대상이 되지 않는다 — 목록 전체를
+    넣어 extraction 자체를 실패시키는 것보다 일부만 판정하는 쪽이 낫다는 판단.
+    호출부가 이 결과를 extract()와 ingest()에 **같이** 넘겨야 한다. 그러지 않으면 LLM이
+    본 적 없는 id가 ingest의 허용 목록을 통과한다.
+    """
+    capped, used = [], 0
+    for a in open_actions[:_OPEN_ACTIONS_MAX_ITEMS]:
+        content = (a.get("content") or "")[:_OPEN_ACTIONS_ITEM_CHARS]
+        used += len(content) + len(str(a.get("id", ""))) + 20  # id/담당/서식 오버헤드 개산
+        if used > _OPEN_ACTIONS_MAX_CHARS:
+            break
+        capped.append({**a, "content": content})
+    return capped
+
+
 def _open_actions_prompt(open_actions: List[dict]) -> str:
     """현재 열린 action 목록을 프롬프트에 덧붙여, 이 문서가 그중 일부를 완료로
     보고하는지 같은 추출 호출 안에서 함께 판정하게 한다(사후 reconciler 대체).

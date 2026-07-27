@@ -21,7 +21,11 @@ from .query_intent import _fetch_overview_context
 MemoryCategory = Literal["decision", "action", "issue", "risk", "all"]
 MemoryOperation = Literal["list", "count"]
 CompletionStatus = Literal["open", "completed", "unknown"]
-MEMORY_TOOL_MAX_ROWS = 10
+# list 응답 행 상한. "액션 아이템 전체 목록" 같은 질문이 이 도구로 라우팅되는데(e3a57da)
+# 10이면 실사용 프로젝트에서 흔히 잘린다. 상한을 넘는 경우 자체를 없앨 수는 없으므로
+# (그건 페이지네이션 영역) 실사용 분포를 덮는 선까지만 올리고, 잘렸다는 사실은 아래에서
+# content에 노출해 모델이 "이게 전부"라고 답하지 않게 한다.
+MEMORY_TOOL_MAX_ROWS = 25
 _ALL_SCOPE_WORDS = frozenset({"전체", "모든", "프로젝트", "기록", "항목", "메모리"})
 
 
@@ -149,7 +153,9 @@ def query_structured_memory(
     Put a concrete target phrase in ``text_query`` so list records can be ranked
     and count records can be restricted by that phrase. Leave it empty when the
     structured filters define the complete target set, including an all-record count.
-    Raw SQL is not supported, and list output is always capped at ten rows.
+    Raw SQL is not supported, and list output is capped. When the result is
+    capped the content starts with a "(총 N건 중 상위 M건만 표시)" line — say so
+    in your answer instead of presenting the listed rows as the complete set.
     """
     text_query = str(text_query or "").strip()
     limit = max(1, min(int(limit), MEMORY_TOOL_MAX_ROWS))
@@ -216,6 +222,11 @@ def query_structured_memory(
     ranked = ranked[:limit]
     if ranked:
         content = "\n".join(qa_engine._format_mysql_row(row) for row in ranked)
+        # 잘림은 artifact에만 있고 모델이 보는 건 content뿐이라, 상위 N건을 받은 모델이
+        # 그걸 "전체"라고 답했다. 나머지가 있다는 사실을 content에 명시해 답변에
+        # 반영되게 한다(F-006).
+        if len(rows) > len(ranked):
+            content = f"(총 {len(rows)}건 중 상위 {len(ranked)}건만 표시)\n{content}"
     else:
         content = (
             "구조화 조건으로 일치하는 행을 찾지 못했습니다. 이것만으로 기록 부재를 "

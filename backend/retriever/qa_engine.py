@@ -308,7 +308,14 @@ def _memory_vector_rank_lists(project_id: int, queries: List[str], rows: List[Di
         result.get("ids") or [],
         result.get("distances") or [[] for _ in queries],
     ):
-        min_dist = min(distances, default=None)
+        # 임계값 기준선은 **허용 후보 안에서** 잡는다. Chroma where절은 project/item_type만
+        # 거르므로 category 분기가 rows에 일부만 넘겨도 프로젝트 전체가 돌아온다. 전체
+        # distances로 min을 잡으면 제외 대상이 기준선을 만들고(예: 제외 행 0.1, 후보 최적
+        # 0.4, MARGIN 0.15 → cutoff 0.25) 후보의 벡터 축이 통째로 잘려 recall이 떨어진다.
+        min_dist = min(
+            (d for mid, d in zip(ids, distances) if mid in id_to_idx and d is not None),
+            default=None,
+        )
         ranks: List[int] = []
         for rank, memory_id in enumerate(ids):
             idx = id_to_idx.get(memory_id)
@@ -466,11 +473,12 @@ def _annotation_for(r: Dict, preds: Dict[int, List[int]]) -> str:
 
 
 def _format_history_row(r: Dict, annotation: str) -> str:
-    """관계 참여 행의 컨텍스트 라인: 주석 접두 + 공통 꼬리 + (있으면) 이유."""
-    line = f"{annotation} {_row_line_body(r)}"
-    if r.get("reason"):
-        line += f" 이유: {r['reason']}"
-    return line
+    """관계 참여 행의 컨텍스트 라인: 주석 접두 + 공통 꼬리.
+
+    reason 렌더링은 _row_line_body()가 전담한다 — 여기서 또 붙이면 LLM 입력과 RAGAS
+    rendered 컨텍스트에 "이유: X 이유: X"가 들어간다.
+    """
+    return f"{annotation} {_row_line_body(r)}"
 
 
 def _reverse_bfs_levels(

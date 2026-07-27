@@ -145,6 +145,212 @@ def test_dedup_completions_keeps_different_action_ids():
     assert {c.action_id for c in result} == {1, 2}
 
 
+def test_full_completion_is_stored_as_complete_action_doc_kind():
+    """F-011: 문서 기반 전체 완료는 PR 기반과 다른 kind로 저장한다.
+
+    evidence에 title/number/url이 없어 kind='complete_action'으로 저장하면 구 데스크톱이
+    evidence.title.trim()에서 죽는다(해당 렌더 트리에 ErrorBoundary 없음). 부분 완료는
+    기존대로 split_action."""
+    from backend.pipeline.ingestor import ingest
+    from backend.pipeline.models import CompletionReport
+
+    cursor = MagicMock()
+    cursor.fetchone.return_value = {"content": "인원 관리 로직 구현"}
+    cursor.fetchall.return_value = []
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cursor
+    conn.cursor.return_value.__exit__.return_value = False
+    reports = [
+        CompletionReport(action_id=1, evidence="완료 보고", fully_complete=True),
+        CompletionReport(
+            action_id=2, evidence="일부 완료", fully_complete=False,
+            done_part="인원관리", remaining_part="알림",
+        ),
+    ]
+    with patch("backend.pipeline.ingestor.get_connection", return_value=conn), \
+         patch("backend.pipeline.ingestor.upsert_memory_vectors"):
+        ingest(
+            project_id=1, doc_id=5, items=[], raw_text="", source="2026-04-13.md",
+            date="2026-04-13", doc_type="meeting", completions=reports,
+        )
+
+    kinds = [
+        c.args[1][2] for c in cursor.execute.call_args_list
+        if "INSERT INTO memory_suggestions" in c.args[0]
+    ]
+    assert kinds == ["complete_action_doc", "split_action"]
+
+
+def _completion_conn(row=None):
+    """ingest() completions 블록용 mock. row=None이면 대상이 열린 action이 아닌 상황."""
+    cursor = MagicMock()
+    cursor.fetchone.return_value = row
+    cursor.fetchall.return_value = []
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cursor
+    conn.cursor.return_value.__exit__.return_value = False
+    return conn, cursor
+
+
+def _suggestion_inserts(cursor):
+    return [
+        c for c in cursor.execute.call_args_list
+        if "INSERT INTO memory_suggestions" in c.args[0]
+    ]
+
+
+def test_completion_with_action_id_outside_provided_list_is_dropped():
+    """F-003: LLM이 제공 목록에 없는 action_id를 반환하면 제안을 만들지 않는다.
+
+    프롬프트의 'never invent one'은 지시이지 검증이 아니다. 환각 id뿐 아니라 F-008
+    예산 절단으로 LLM에게 보여주지 않은 id도 여기서 걸린다."""
+    from backend.pipeline.ingestor import ingest
+    from backend.pipeline.models import CompletionReport
+
+    conn, cursor = _completion_conn({"content": "인원 관리 로직 구현"})
+    reports = [
+        CompletionReport(action_id=1, evidence="완료", fully_complete=True),
+        CompletionReport(action_id=999, evidence="환각", fully_complete=True),
+    ]
+    with patch("backend.pipeline.ingestor.get_connection", return_value=conn), \
+         patch("backend.pipeline.ingestor.upsert_memory_vectors"):
+        ingest(
+            project_id=1, doc_id=5, items=[], raw_text="", source="doc.md",
+            date="2026-04-13", doc_type="meeting", completions=reports,
+            open_actions=[{"id": 1, "content": "인원 관리 로직 구현"}],
+        )
+
+    inserted_ids = [c.args[1][1] for c in _suggestion_inserts(cursor)]
+    assert inserted_ids == [1]
+
+
+def test_completion_targeting_non_open_action_is_dropped():
+    """F-003: 목록 조회 이후 상태가 바뀌었거나(이미 완료) decision id가 섞여 반환되면
+    제안을 만들지 않는다 — SELECT가 category='action' AND completion_status='open'을
+    함께 확인하고, 못 찾으면 건너뛴다."""
+    from backend.pipeline.ingestor import ingest
+    from backend.pipeline.models import CompletionReport
+
+    conn, cursor = _completion_conn(None)  # 열린 action 조건에 안 맞아 조회 결과 없음
+    with patch("backend.pipeline.ingestor.get_connection", return_value=conn), \
+         patch("backend.pipeline.ingestor.upsert_memory_vectors"):
+        ingest(
+            project_id=1, doc_id=5, items=[], raw_text="", source="doc.md",
+            date="2026-04-13", doc_type="meeting",
+            completions=[CompletionReport(action_id=1, evidence="완료", fully_complete=True)],
+            open_actions=[{"id": 1, "content": "이미 완료된 action"}],
+        )
+
+    assert _suggestion_inserts(cursor) == []
+    select_sql = cursor.execute.call_args_list[0].args[0]
+    assert "completion_status = 'open'" in select_sql
+    assert "category = 'action'" in select_sql
+
+
+def test_completion_evidence_date_is_normalized():
+    """F-004: evidence 날짜도 memory 행과 동일하게 정규화한다. 무효한 날짜가 그대로
+    저장되면 승인 시 DATETIME 컬럼에 들어가 strict MySQL에서 500 + 롤백된다.
+    정규화 실패는 None — 승인 시 NOW() 폴백 경로를 탄다."""
+    import json
+    from backend.pipeline.ingestor import ingest
+    from backend.pipeline.models import CompletionReport
+
+    for raw_date, expected in (("2026년 4월 13일", "2026-04-13"), ("2026-02-30", None)):
+        conn, cursor = _completion_conn({"content": "인원 관리 로직 구현"})
+        with patch("backend.pipeline.ingestor.get_connection", return_value=conn), \
+             patch("backend.pipeline.ingestor.upsert_memory_vectors"):
+            ingest(
+                project_id=1, doc_id=5, items=[], raw_text="", source="doc.md",
+                date=raw_date, doc_type="meeting",
+                completions=[CompletionReport(action_id=1, evidence="완료", fully_complete=True)],
+                open_actions=[{"id": 1, "content": "인원 관리 로직 구현"}],
+            )
+        evidence = json.loads(_suggestion_inserts(cursor)[0].args[1][3])
+        assert evidence["date"] == expected
+
+
+def test_cap_open_actions_bounds_prompt_size():
+    """F-008: 열린 action 목록을 프롬프트 예산 안으로 자른다. 이 system은 청크마다
+    재사용되므로 상한이 없으면 해당 프로젝트의 업로드가 통째로 extraction 실패한다."""
+    from backend.pipeline.extractor import (
+        _OPEN_ACTIONS_ITEM_CHARS, _OPEN_ACTIONS_MAX_CHARS, _OPEN_ACTIONS_MAX_ITEMS,
+        _open_actions_prompt, cap_open_actions,
+    )
+
+    many = [{"id": i, "content": f"액션 {i} " * 40} for i in range(500)]
+    capped = cap_open_actions(many)
+    assert 0 < len(capped) <= _OPEN_ACTIONS_MAX_ITEMS
+    assert all(len(a["content"]) <= _OPEN_ACTIONS_ITEM_CHARS for a in capped)
+
+    # 항목 하나가 초장문이어도 예산을 독식하지 못한다
+    huge = cap_open_actions([{"id": 1, "content": "가" * 100_000}])
+    assert len(huge[0]["content"]) == _OPEN_ACTIONS_ITEM_CHARS
+
+    # 실제 렌더링 결과도 예산 근처에 머문다(항목당 서식 오버헤드 감안)
+    assert len(_open_actions_prompt(capped)) < _OPEN_ACTIONS_MAX_CHARS * 2
+
+
+def test_process_upload_wires_capped_open_actions_through_to_ingest():
+    """E2E: _fetch_open_actions → cap_open_actions → extract → ingest 배선 전체를,
+    개별 함수 단위 테스트가 아니라 실제 연결 지점(_process_upload_locked)에서 검증한다.
+
+    F-008 예산 절단 결과가 extract와 ingest 양쪽에 "같은" 목록으로 전달되는지가 핵심 —
+    한쪽만 자르고 다른 쪽은 원본을 넘기면 LLM이 본 적 없는 id가 F-003 허용 목록을
+    통과하거나(반대로 자름 누락), 자른 목록끼리 불일치가 나도 개별 단위 테스트로는
+    안 잡힌다. 전체 완료 + 부분 완료 + 목록 밖 id(환각/절단분) 세 종류를 한 번에 검증한다.
+    """
+    from backend.api import upload
+    from backend.pipeline.models import CompletionReport
+
+    many_actions = [{"id": i, "content": f"액션 {i}"} for i in range(1, 60)]  # 상한(50) 초과
+    completions = [
+        CompletionReport(action_id=1, evidence="전체 완료", fully_complete=True),
+        CompletionReport(
+            action_id=2, evidence="일부 완료", fully_complete=False,
+            done_part="일부", remaining_part="나머지",
+        ),
+        CompletionReport(action_id=999, evidence="목록 밖 id", fully_complete=True),
+        # 51~59는 원본 open_actions(59개)엔 있지만 상한(50)엔 잘려나간 구간. extract가
+        # 실제로 본 목록(50개)엔 없는 id이므로, ingest가 절단 전 원본을 쓰는 배선 버그가
+        # 있으면 이 id는 잘못 허용된다 — 999(완전히 밖)만으로는 그 버그를 못 잡는다.
+        CompletionReport(action_id=55, evidence="절단 경계 밖", fully_complete=True),
+    ]
+
+    cursor = MagicMock()
+    cursor.fetchone.return_value = {"content": "원본 내용"}
+    cursor.fetchall.return_value = []
+    ingest_conn = MagicMock()
+    ingest_conn.cursor.return_value.__enter__.return_value = cursor
+    ingest_conn.cursor.return_value.__exit__.return_value = False
+
+    with patch.object(upload, "_fetch_open_actions", return_value=many_actions), \
+         patch.object(upload, "extract") as mock_extract, \
+         patch.object(upload, "update_project_memory"), \
+         patch.object(upload, "get_connection", return_value=MagicMock()), \
+         patch("backend.pipeline.ingestor.get_connection", return_value=ingest_conn), \
+         patch("backend.pipeline.ingestor.upsert_memory_vectors"):
+        mock_extract.return_value = ([], completions)
+
+        upload._process_upload_locked(
+            project_id=1, doc_id=5, old_doc_ids=[], content="",  # 빈 원문 → 청크 없음 →
+            filename="2026-04-13.md", date="2026-04-13", doc_type="meeting",  # Chroma
+            file_path="/tmp/x",  # 임베딩 호출 자체가 생략됨(이 테스트의 관심사가 아님)
+        )
+
+        extract_open_actions = mock_extract.call_args.kwargs["open_actions"]
+
+    assert len(extract_open_actions) == 50  # cap_open_actions 상한 적용됨
+
+    inserted = [
+        c.args[1] for c in cursor.execute.call_args_list
+        if "INSERT INTO memory_suggestions" in c.args[0]
+    ]
+    inserted_by_action_id = {row[1]: row[2] for row in inserted}  # action_id → kind
+    assert inserted_by_action_id == {1: "complete_action_doc", 2: "split_action"}
+    assert 999 not in inserted_by_action_id  # extract에 안 보여준 id는 ingest에서도 거부
+    assert 55 not in inserted_by_action_id   # 절단으로 잘려나간 id도 마찬가지
+
+
 # ─── upload_document 비동기 경로 ──────────────────────────────────────────────
 
 def _make_conn(fetchone=None, fetchall=None, lastrowid=99):

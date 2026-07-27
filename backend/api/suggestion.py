@@ -1,5 +1,6 @@
 import json
 import logging
+from typing import Optional
 
 import pymysql
 from fastapi import APIRouter, HTTPException
@@ -45,9 +46,16 @@ def _suggestion_response(row: dict) -> dict:
 # suggestion.kind별로 대상 memory가 가져야 하는 category — accept 시 잘못된 대상 방지.
 _KIND_TARGET_CATEGORY = {
     "complete_action": "action",
+    "complete_action_doc": "action",
     "split_action": "action",
     "supersede": "decision",
 }
+
+# 구 데스크톱이 렌더링할 수 있는 kind 집합 — 여기서 영구히 동결한다.
+# kind=all은 "내가 아는 것 전부"라는 뜻으로 쓰였지만 실제로는 "앞으로 생길 것까지 전부"라
+# 신규 kind가 자동으로 구 클라이언트에 샜다(split_action이 supersede 카드로 렌더링됨).
+# 신규 kind를 아는 클라이언트는 ?kind=<신규kind>로 명시 조회한다.
+_LEGACY_KINDS = ("complete_action", "supersede")
 
 
 def _suggestion_or_404(cursor, project_id: int, suggestion_id: int) -> dict:
@@ -77,15 +85,35 @@ def _suggestion_or_404(cursor, project_id: int, suggestion_id: int) -> dict:
 
 
 @router.get("/projects/{project_id}/suggestions")
-def list_suggestions(project_id: int, status: str = "pending", kind: str = "complete_action"):
+def list_suggestions(
+    project_id: int,
+    status: str = "pending",
+    kind: str = "complete_action",
+    kinds: Optional[str] = None,
+):
     require_project_access(project_id)
     if status not in _STATUSES:
         raise HTTPException(status_code=400, detail="Invalid suggestion status")
     # kind 기본값은 complete_action — supersede kind를 모르는 기존 클라이언트(데스크톱)가
     # evidence.title 없는 항목을 받아 렌더링이 죽지 않도록 구 계약을 보존한다.
-    # supersede를 아는 클라이언트는 ?kind=supersede 또는 ?kind=all로 opt-in 조회한다.
+    # supersede를 아는 클라이언트는 ?kind=supersede로 opt-in 조회한다.
+    # kind=all은 _LEGACY_KINDS로 동결 — 신규 kind는 명시 조회로만 나간다.
     if kind != "all" and kind not in _KIND_TARGET_CATEGORY:
         raise HTTPException(status_code=400, detail="Invalid suggestion kind")
+
+    # kinds는 여러 kind를 한 번에 받고 싶은 클라이언트용(콤마 구분) — 자기가 아는 kind를
+    # 스스로 선언하는 구조라, 이후 kind가 추가돼도 선언하지 않은 클라이언트는 영향 없다.
+    # kind와 동시 지정은 모호하므로 400으로 거부해 택일을 강제한다.
+    kind_list: Optional[list[str]] = None
+    if kinds is not None:
+        if kind != "complete_action":  # 기본값이 아닌데 kinds도 왔으면 둘 다 명시한 것
+            raise HTTPException(status_code=400, detail="Specify either kind or kinds, not both")
+        kind_list = [k.strip() for k in kinds.split(",") if k.strip()]
+        if not kind_list:
+            raise HTTPException(status_code=400, detail="kinds must not be empty")
+        unknown = [k for k in kind_list if k not in _KIND_TARGET_CATEGORY]
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"Invalid suggestion kind: {unknown[0]}")
 
     conn = get_connection()
     try:
@@ -98,7 +126,15 @@ def list_suggestions(project_id: int, status: str = "pending", kind: str = "comp
                 " WHERE project_id = %s AND status = %s"
             )
             params = [project_id, status]
-            if kind != "all":
+            if kind_list is not None:
+                placeholders = ", ".join(["%s"] * len(kind_list))
+                sql += f" AND kind IN ({placeholders})"
+                params.extend(kind_list)
+            elif kind == "all":
+                placeholders = ", ".join(["%s"] * len(_LEGACY_KINDS))
+                sql += f" AND kind IN ({placeholders})"
+                params.extend(_LEGACY_KINDS)
+            else:
                 sql += " AND kind = %s"
                 params.append(kind)
             cursor.execute(sql + " ORDER BY created_at DESC", params)
@@ -110,9 +146,10 @@ def list_suggestions(project_id: int, status: str = "pending", kind: str = "comp
 def _apply_accepted_effect(cursor, project_id: int, row: dict) -> None:
     """accept 시 suggestion.kind에 따라 대상 memory에 효과를 반영한다.
 
-    - complete_action: 미완료 action이면 completed_at 설정. evidence.type='document'면
-      그 문서의 날짜를 쓰고(과거 회의록 재처리 시 오늘 날짜로 잘못 찍히는 걸 방지),
-      그 외(PR 등)는 지금까지처럼 NOW().
+    - complete_action / complete_action_doc: 미완료 action이면 completed_at 설정.
+      evidence.type='document'면 그 문서의 날짜를 쓰고(과거 회의록 재처리 시 오늘 날짜로
+      잘못 찍히는 걸 방지), 그 외(PR 등)는 지금까지처럼 NOW(). 두 kind는 근거 종류만
+      다르고 승인 효과가 같아 분기를 공유한다.
     - supersede: 아직 살아있는 decision이면 superseded_by=evidence.superseding_memory_id,
       superseded_at=NOW() 설정(계층1 필터가 이때부터 실효).
     지원하지 않는 kind는 명시적으로 거부한다 — 알 수 없는 kind가 기본 분기로 흘러
@@ -160,7 +197,7 @@ def _apply_accepted_effect(cursor, project_id: int, row: dict) -> None:
             raise HTTPException(status_code=409, detail="Decision already superseded by another decision")
         return
 
-    if kind == "complete_action":
+    if kind in ("complete_action", "complete_action_doc"):
         # 미완료 action 완료 처리. 행 잠금 + 최신 상태 재확인: split_action이 먼저 승인돼
         # 이 action의 content가 이미 바뀌었으면(예: 이 제안은 "인원관리 및 알림" 전체를
         # 근거로 만들어졌는데, 그 사이 split으로 "알림"만 남았다면) 그 변경을 반영 못 하는
@@ -182,20 +219,22 @@ def _apply_accepted_effect(cursor, project_id: int, row: dict) -> None:
                     status_code=409,
                     detail="Action content changed since this suggestion was created — stale, please re-derive",
                 )
-            if evidence.get("type") == "document" and evidence.get("date"):
-                cursor.execute(
-                    "UPDATE memory SET completed_at = %s, completion_status = 'completed',"
-                    " completion_status_source = 'document', updated_by = 'user'"
-                    " WHERE id = %s AND project_id = %s",
-                    (evidence["date"], row["memory_id"], project_id),
-                )
-            else:
-                cursor.execute(
-                    "UPDATE memory SET completed_at = NOW(), completion_status = 'completed',"
-                    " completion_status_source = 'pr', updated_by = 'user'"
-                    " WHERE id = %s AND project_id = %s",
-                    (row["memory_id"], project_id),
-                )
+            # source(근거 종류)와 completed_at(완료 시각)은 서로 다른 축이다. 둘을 한
+            # 조건으로 묶으면 날짜 없는 문서 근거가 'pr'로 기록되는데, 업로드 폼에서
+            # 날짜를 안 넣는 게 기본 경로라 흔하다. completion_status_source는 검색
+            # 컨텍스트에 "상태 근거: ..."로 노출되므로(qa_engine) 답변에 잘못된 근거가
+            # 표시된다. split_action 분기가 날짜와 무관하게 'document'인 것과도 어긋난다.
+            source = "document" if evidence.get("type") == "document" else "pr"
+            # 날짜는 완료 시각 선택에만 쓴다 — 있으면 그 문서 날짜(과거 회의록을 뒤늦게
+            # 적재해도 오늘로 찍히지 않게), 없으면 NOW().
+            completed_sql = "%s" if evidence.get("date") else "NOW()"
+            completed_params = [evidence["date"]] if evidence.get("date") else []
+            cursor.execute(
+                f"UPDATE memory SET completed_at = {completed_sql}, completion_status = 'completed',"
+                " completion_status_source = %s, updated_by = 'user'"
+                " WHERE id = %s AND project_id = %s",
+                completed_params + [source, row["memory_id"], project_id],
+            )
         return
 
     if kind == "split_action":
@@ -218,7 +257,15 @@ def _apply_accepted_effect(cursor, project_id: int, row: dict) -> None:
         if current is None:
             raise HTTPException(status_code=404, detail="Target action no longer exists")
         if current["completed_at"] is not None:
-            return  # 이미 다른 경로로 완료 처리됨 — 분할 대상 없음, 멱등 처리
+            # 이미 다른 경로로 완료 처리된 action은 분할할 수 없다. complete_action과 달리
+            # 여기서 멱등 성공을 반환하면 안 된다 — complete_action은 의도(완료 처리)가 이미
+            # 달성돼 있지만, split은 의도(완료분 분리 + 잔여분 유지)가 아무것도 반영되지
+            # 않았는데 accepted 이력만 남고, "남은 부분은 아직 열려 있다"는 정보가 조용히
+            # 버려져 묶음 action이 통째로 완료된 채 남는다.
+            raise HTTPException(
+                status_code=409,
+                detail="Action already completed — split no longer applicable, please re-derive",
+            )
         original_content = evidence.get("original_content")
         if original_content is not None and current["content"] != original_content:
             raise HTTPException(

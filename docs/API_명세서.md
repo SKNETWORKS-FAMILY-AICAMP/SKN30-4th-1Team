@@ -816,9 +816,18 @@ Memory 항목 삭제.
 
 ## 제안 (Suggestions)
 
-LLM이 만든 메모리 변경 제안(pending)을 사람이 승인/거절한다. `kind`는
-`complete_action`(액션 완료) 또는 `supersede`(결정 번복). 상세 계약·에러는
+LLM이 만든 메모리 변경 제안(pending)을 사람이 승인/거절한다. 상세 계약·에러는
 [HANDOVER_SUPERSEDE_FRONTEND.md](HANDOVER_SUPERSEDE_FRONTEND.md).
+
+| `kind` | 뜻 | evidence 필수 필드 |
+|---|---|---|
+| `complete_action` | PR 기반 액션 완료 | `type="pr"`, `number`, `title`, `url`, `merged_at` |
+| `complete_action_doc` | 문서 기반 액션 완료 | `type="document"`, `doc_id`, `source`, `date`, `quote` |
+| `split_action` | 묶음 액션 분할(완료분 분리) | 위 document 필드 + `done_part`, `remaining_part` |
+| `supersede` | 결정 번복 | `superseding_memory_id` |
+
+**evidence 스키마는 kind마다 다르다.** 특히 문서 기반(`complete_action_doc`/`split_action`)에는
+PR 기반의 `title`/`number`/`url`이 없으므로, 클라이언트는 `kind`로 분기한 뒤 evidence를 읽어야 한다.
 
 ### `GET /api/v1/projects/{project_id}/suggestions`
 
@@ -829,7 +838,18 @@ LLM이 만든 메모리 변경 제안(pending)을 사람이 승인/거절한다.
 | 파라미터 | 타입 | 기본 | 설명 |
 |---------|------|------|------|
 | `status` | string | `pending` | `pending`/`accepted`/`rejected` |
-| `kind` | string | `complete_action` | `complete_action`/`supersede`/`all`. 구 클라이언트 보호를 위해 기본은 `complete_action`만 |
+| `kind` | string | `complete_action` | 위 kind 중 하나 또는 `all`. 구 클라이언트 보호를 위해 기본은 `complete_action`만 |
+| `kinds` | string | (없음) | 콤마 구분 kind 목록(예: `complete_action_doc,split_action`). `kind`와 동시 지정 불가 |
+
+> `all`은 **레거시 kind(`complete_action`, `supersede`)로 동결**돼 있다. 이후 추가된 kind는
+> 포함되지 않는다 — `all`이 "앞으로 생길 것까지 전부"로 동작해 evidence 스키마를 모르는
+> 클라이언트에 신규 kind가 새던 문제를 막기 위함.
+>
+> 신규 kind 하나만 필요하면 `?kind=<kind>`, 여러 개를 한 번에 받고 싶으면
+> `?kinds=<kind1>,<kind2>`를 쓴다. `kinds`는 클라이언트가 **자기가 아는 kind를 스스로
+> 선언**하는 방식이라, 이후 kind가 추가돼도 선언하지 않은 클라이언트는 영향받지 않는다.
+> `kind`(기본값 아닌 값)와 `kinds`를 함께 주면 모호하므로 `400`. `kinds`에 모르는 kind가
+> 섞여도 `400`(오타가 빈 목록으로 위장하지 않도록).
 
 **응답 `200`**
 ```json
@@ -857,13 +877,15 @@ LLM이 만든 메모리 변경 제안(pending)을 사람이 승인/거절한다.
 
 ### `POST /api/v1/projects/{project_id}/suggestions/{suggestion_id}/accept`
 
-제안 승인. (최소 역할: member) `complete_action`은 대상 action을 완료 처리,
+제안 승인. (최소 역할: member) `complete_action`/`complete_action_doc`은 대상 action을
+완료 처리(전자는 `NOW()`, 후자는 문서 날짜), `split_action`은 완료분을 새 action으로 분리,
 `supersede`는 대상 decision을 번복 처리한다.
 
 **응답 `200`** — 갱신된 suggestion 객체(위 목록 항목과 동일 스키마, `status: "accepted"`)
 
 **응답 `400`** — 이미 해소된 제안 / 지원하지 않는 kind  
-**응답 `409`** — supersede 대상/대체 결정 충돌, 동시 경합 (상세: supersede 핸드오버 §4)  
+**응답 `409`** — supersede 대상/대체 결정 충돌, 동시 경합 (상세: supersede 핸드오버 §4),
+대상 action이 이미 완료돼 `split_action`을 적용할 수 없음  
 **응답 `404`** — 제안 없음
 
 ---

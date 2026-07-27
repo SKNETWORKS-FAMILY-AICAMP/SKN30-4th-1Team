@@ -1,4 +1,6 @@
 """memory_suggestions API 계약 테스트."""
+import json
+import pathlib
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
@@ -56,6 +58,28 @@ def _split_action_row(status="pending"):
         "resolved_at": None,
         "memory_category": "action",
         "memory_completed_at": None,
+    }
+
+
+def _complete_action_doc_row(status="pending", completed_at=None):
+    """문서 기반 완료 제안 — evidence에 PR title/number/url이 없고 문서 날짜를 가진다."""
+    evidence = (
+        '{"type":"document","doc_id":5,"source":"2026-04-13.md","date":"2026-04-13",'
+        '"quote":"인원 관리 로직 완료","original_content":"인원 관리 로직 구현"}'
+    )
+    return {
+        "id": 11,
+        "project_id": 1,
+        "memory_id": 10,
+        "kind": "complete_action_doc",
+        "evidence": evidence,
+        "rationale": "'2026-04-13.md' 문서가 완료로 보고",
+        "confidence": "high",
+        "status": status,
+        "created_at": "2026-07-02 10:00:00",
+        "resolved_at": None,
+        "memory_category": "action",
+        "memory_completed_at": completed_at,
     }
 
 
@@ -289,16 +313,71 @@ def test_list_suggestions_kind_supersede_opt_in():
     assert params[-1] == "supersede"
 
 
-def test_list_suggestions_kind_all_returns_every_kind():
-    """H-001: ?kind=all은 kind 필터 없이 전체를 반환한다."""
+def test_list_suggestions_kind_all_is_frozen_to_legacy_kinds():
+    """F-001: ?kind=all은 구 데스크톱이 렌더링할 수 있는 kind만 반환한다.
+
+    kind=all은 "내가 아는 것 전부"라는 뜻으로 도입됐지만 필터 없는 조회라 이후 추가된
+    kind까지 자동으로 샜다(split_action이 supersede 카드로 그려지고 승인 버튼도 활성).
+    신규 kind는 명시 조회로만 나가야 한다."""
     conn, cur = _make_conn(fetchone=[{"id": 1}], fetchall=[])
     with patch("backend.api.suggestion.require_project_access"), \
          patch("backend.api.suggestion.get_connection", return_value=conn):
         resp = _client.get("/api/v1/projects/1/suggestions?kind=all")
 
     assert resp.status_code == 200
-    sql = cur.execute.call_args.args[0]
-    assert "AND kind = %s" not in sql
+    sql, params = cur.execute.call_args.args
+    assert "AND kind IN (%s, %s)" in sql
+    assert set(params[2:]) == {"complete_action", "supersede"}
+    assert "split_action" not in params
+    assert "complete_action_doc" not in params
+
+
+def test_list_suggestions_new_kinds_require_explicit_opt_in():
+    """F-001/F-011: 신규 kind는 ?kind=<kind>로 명시 조회할 때만 나온다."""
+    for kind in ("complete_action_doc", "split_action"):
+        conn, cur = _make_conn(fetchone=[{"id": 1}], fetchall=[])
+        with patch("backend.api.suggestion.require_project_access"), \
+             patch("backend.api.suggestion.get_connection", return_value=conn):
+            resp = _client.get(f"/api/v1/projects/1/suggestions?kind={kind}")
+
+        assert resp.status_code == 200
+        sql, params = cur.execute.call_args.args
+        assert "AND kind = %s" in sql
+        assert params[-1] == kind
+
+
+def test_list_suggestions_kinds_returns_union_of_named_kinds():
+    """kinds=는 자기가 아는 kind를 스스로 선언하는 다중 조회 — 이후 kind가 추가돼도
+    선언 안 한 클라이언트는 영향받지 않는다."""
+    conn, cur = _make_conn(fetchone=[{"id": 1}], fetchall=[])
+    with patch("backend.api.suggestion.require_project_access"), \
+         patch("backend.api.suggestion.get_connection", return_value=conn):
+        resp = _client.get(
+            "/api/v1/projects/1/suggestions?kinds=complete_action_doc,split_action"
+        )
+
+    assert resp.status_code == 200
+    sql, params = cur.execute.call_args.args
+    assert "AND kind IN (%s, %s)" in sql
+    assert params[2:] == ["complete_action_doc", "split_action"]
+
+
+def test_list_suggestions_kinds_and_kind_together_is_400():
+    """kind와 kinds를 동시에 명시하면 모호하므로 거부 — 택일을 강제한다."""
+    with patch("backend.api.suggestion.require_project_access"):
+        resp = _client.get(
+            "/api/v1/projects/1/suggestions?kind=supersede&kinds=split_action"
+        )
+
+    assert resp.status_code == 400
+
+
+def test_list_suggestions_kinds_with_unknown_kind_is_400():
+    """kinds에 모르는 kind가 섞이면 오타가 빈 목록으로 위장하지 않도록 400."""
+    with patch("backend.api.suggestion.require_project_access"):
+        resp = _client.get("/api/v1/projects/1/suggestions?kinds=split_action,frobnicate")
+
+    assert resp.status_code == 400
 
 
 def test_list_suggestions_unknown_kind_is_400():
@@ -356,9 +435,12 @@ def test_accept_suggestion_completes_open_action_and_resolves_suggestion():
     assert resp.status_code == 200
     assert resp.json()["status"] == "accepted"
     sql_calls = [call.args[0] for call in cur.execute.call_args_list]
-    completion_sql = next(sql for sql in sql_calls if "UPDATE memory SET completed_at = NOW()" in sql)
-    assert "completion_status = 'completed'" in completion_sql
-    assert "completion_status_source = 'pr'" in completion_sql
+    completion = next(
+        c for c in cur.execute.call_args_list
+        if "UPDATE memory SET completed_at = NOW()" in c.args[0]
+    )
+    assert "completion_status = 'completed'" in completion.args[0]
+    assert completion.args[1][0] == "pr"  # PR evidence → source='pr'
     assert any("UPDATE memory_suggestions SET status = %s" in sql for sql in sql_calls)
 
 
@@ -409,6 +491,73 @@ def test_accept_split_action_rewrites_original_and_creates_completed_row():
     assert "2026-04-13" in insert_params  # 문서 날짜로 completed_at
 
     mock_upsert.assert_called_once()  # 원본·신규 두 행 벡터 재동기화
+
+
+def test_accept_complete_action_doc_completes_action_with_document_date():
+    """F-011: 분리된 complete_action_doc도 complete_action과 같은 승인 효과를 갖는다
+    (분기 공유). 문서 근거이므로 완료 시점은 NOW()가 아니라 그 문서 날짜다."""
+    row = _complete_action_doc_row()
+    updated = {**row, "status": "accepted", "resolved_at": "2026-07-02 11:00:00"}
+    locked = {"content": "인원 관리 로직 구현", "completed_at": None}  # original_content 일치
+    conn, cur = _make_conn(fetchone=[row, locked, updated])
+    with patch("backend.api.suggestion.require_project_access"), \
+         patch("backend.api.suggestion.get_connection", return_value=conn):
+        resp = _client.post("/api/v1/projects/1/suggestions/11/accept")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "accepted"
+    completion = next(
+        c for c in cur.execute.call_args_list
+        if "UPDATE memory SET completed_at" in c.args[0]
+    )
+    assert completion.args[1][:2] == ["2026-04-13", "document"]
+
+
+def test_accept_document_completion_without_date_keeps_document_source():
+    """F-005: 날짜 없는 문서 완료도 source='document'로 기록한다.
+
+    source 종류와 날짜 유무가 한 조건으로 묶여 있어 날짜가 비면 'pr'로 기록됐다.
+    업로드 폼에서 날짜를 안 넣는 게 기본 경로라 흔하고, completion_status_source는
+    검색 컨텍스트에 "상태 근거: ..."로 노출돼 답변에 잘못된 근거가 표시된다."""
+    row = _complete_action_doc_row()
+    row["evidence"] = row["evidence"].replace('"date":"2026-04-13"', '"date":""')
+    updated = {**row, "status": "accepted", "resolved_at": "2026-07-02 11:00:00"}
+    locked = {"content": "인원 관리 로직 구현", "completed_at": None}
+    conn, cur = _make_conn(fetchone=[row, locked, updated])
+    with patch("backend.api.suggestion.require_project_access"), \
+         patch("backend.api.suggestion.get_connection", return_value=conn):
+        resp = _client.post("/api/v1/projects/1/suggestions/11/accept")
+
+    assert resp.status_code == 200
+    completion = next(
+        c for c in cur.execute.call_args_list
+        if "UPDATE memory SET completed_at" in c.args[0]
+    )
+    assert "completed_at = NOW()" in completion.args[0]  # 날짜 없으면 NOW()
+    assert completion.args[1][0] == "document"           # 그래도 근거는 document
+
+
+def test_accept_split_action_on_completed_action_is_409():
+    """F-002: 이미 완료된 action의 분할 승인은 멱등 성공이 아니라 409로 거부한다.
+
+    dedup이 (memory_id, kind, status) 단위라 완료 제안과 분할 제안이 같은 action에
+    동시에 pending으로 존재할 수 있다. 완료를 먼저 승인한 뒤 분할을 승인하면 조기
+    return이 accepted 커밋으로 이어져, 아무 행도 안 만들어졌는데 승인 이력만 남고
+    "남은 부분은 아직 열려 있다"는 정보가 조용히 버려졌다."""
+    row = _split_action_row()
+    locked = {"content": "인원 관리 및 알림 로직 구현", "completed_at": "2026-07-01 09:00:00"}
+    conn, cur = _make_conn(fetchone=[row, locked])
+    with patch("backend.api.suggestion.require_project_access"), \
+         patch("backend.api.suggestion.get_connection", return_value=conn):
+        resp = _client.post("/api/v1/projects/1/suggestions/9/accept")
+
+    assert resp.status_code == 409
+    assert conn.rollback.called
+    assert not conn.commit.called
+    sql_calls = [call.args[0] for call in cur.execute.call_args_list]
+    # suggestion은 pending 유지 — 승인 이력만 남는 상황을 만들지 않는다
+    assert not any("UPDATE memory_suggestions SET status" in sql for sql in sql_calls)
+    assert not any(sql.startswith("UPDATE memory SET content") for sql in sql_calls)
 
 
 def test_accept_split_action_rejects_stale_content():
@@ -472,3 +621,43 @@ def test_resolve_suggestion_allows_member():
 
     assert accept.status_code == 200
     assert accept.json()["status"] == "accepted"
+
+
+# ─── migrate_v9.sql 재분류 로직 ──────────────────────────────────────────────
+# 이 프로젝트 테스트는 실제 DB 없이 mock cursor로 돈다(MySQL 전용 SQL이라 SQLite 대체
+# 불가, 기존 migrate_v5 테스트도 SQL 파일 텍스트만 검사). 여기서는 WHERE 절의 판정
+# 로직을 파이썬으로 재현해 "문서 근거만 재분류하고 PR 근거는 건드리지 않는지"를
+# 검증하고, 재현이 실제 SQL과 어긋나지 않도록 파일에 같은 조건 문자열이 있는지도 본다.
+
+def _migrate_v9_reclassifies(kind: str, evidence: dict) -> bool:
+    """migrate_v9.sql의 WHERE 절과 동일한 판정."""
+    return kind == "complete_action" and evidence.get("type") == "document"
+
+
+def test_migrate_v9_sql_contains_expected_predicate():
+    sql = pathlib.Path("backend/db/migrate_v9.sql").read_text(encoding="utf-8")
+    assert "SET kind = 'complete_action_doc'" in sql
+    assert "WHERE kind = 'complete_action'" in sql
+    assert "JSON_UNQUOTE(JSON_EXTRACT(evidence, '$.type')) = 'document'" in sql
+
+
+def test_migrate_v9_only_reclassifies_document_evidence_complete_action():
+    """문서 근거로 저장된 complete_action만 재분류 대상이고, PR 근거·다른 kind·이미
+    재분류된 행은 대상에서 빠진다 — 잘못 짜면 멀쩡한 PR 완료 제안까지 재분류될 수 있다."""
+    cases = [
+        ("complete_action", {"type": "document", "doc_id": 5}, True),
+        ("complete_action", {"type": "pr", "number": 20}, False),
+        ("complete_action_doc", {"type": "document", "doc_id": 5}, False),  # 이미 재실행됨
+        ("split_action", {"type": "document", "doc_id": 5}, False),
+        ("supersede", {"type": "supersede", "superseding_memory_id": 1}, False),
+    ]
+    for kind, evidence, expected in cases:
+        assert _migrate_v9_reclassifies(kind, evidence) is expected, (kind, evidence)
+
+
+def test_migrate_v9_is_idempotent():
+    """재실행하면 이미 재분류된 행은 다시 걸리지 않는다(kind가 이미 바뀌어 WHERE 미충족)."""
+    kind, evidence = "complete_action", {"type": "document", "doc_id": 5}
+    assert _migrate_v9_reclassifies(kind, evidence) is True
+    kind_after = "complete_action_doc"  # 마이그레이션 적용 후 상태
+    assert _migrate_v9_reclassifies(kind_after, evidence) is False

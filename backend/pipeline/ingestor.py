@@ -170,6 +170,7 @@ def ingest(
     source_metadata: Optional[dict] = None,
     processing_token: Optional[str] = None,
     completions: Optional[List[CompletionReport]] = None,
+    open_actions: Optional[List[dict]] = None,
 ):
     """추출 결과를 두 DB에 순서대로 저장.
     1단계: MySQL — items 각각을 memory + memory_sources 테이블에 INSERT (같은 트랜잭션)
@@ -337,30 +338,62 @@ def ingest(
     # action의 일부만 확인) 완료된 부분만 떼어내는 분할 제안 — 둘 다 사람 승인이 있어야
     # 실제 반영되고, 완료 시점은 이 문서 날짜를 쓴다.
     if completions:
+        # LLM에게 실제로 보여준 action id 집합 — 프롬프트의 "never invent one"은 지시일 뿐
+        # 검증이 아니므로, 반환된 action_id가 이 목록에 있는지 대조한다(PR 경로가
+        # pr_actions.py에서 하는 것과 같은 방어). 호출부가 목록을 안 넘기면 DB 상태
+        # 검사만 적용한다.
+        allowed_action_ids = (
+            {int(a["id"]) for a in open_actions} if open_actions is not None else None
+        )
+        # evidence에 넣을 문서 날짜도 memory 행과 동일하게 정규화 — 무효한 날짜
+        # ("2026-02-30", 한국어 표기 등)가 그대로 저장되면 승인 시 DATETIME 컬럼에
+        # 들어가 strict 모드에서 500 + 롤백, 느슨한 설정에서는 잘못된 완료 시각이 남는다.
+        # None이면 승인 시 NOW() 폴백 경로를 탄다(빈 문자열과 동일 취급).
+        evidence_date = _normalize_date(date)
         conn = get_connection()
         try:
             # 항목별로 개별 커밋 — completions 하나(예: LLM이 목록에 없는 action_id를
             # 잘못 반환해 FK 위반)가 실패해도 같은 문서의 다른 정상 제안까지 같이
             # 롤백되지 않게 격리한다.
             for c in completions:
+                if allowed_action_ids is not None and c.action_id not in allowed_action_ids:
+                    logger.warning(
+                        "완료 판정에 없는 action_id 무시(환각 또는 예산 절단분)"
+                        " action_id=%s project_id=%s", c.action_id, project_id,
+                    )
+                    continue
                 try:
                     with conn.cursor() as cursor:
                         # 제안 생성 시점의 실제 content를 같이 저장 — 승인 시점에 그 사이
                         # 다른 제안이 먼저 적용돼 content가 바뀌었는지 대조하기 위함
                         # (complete_action/split_action 둘 다 — 낡은 제안이 최신 content를
                         # 잘못 덮어쓰는 것 방지).
+                        # category/completion_status까지 함께 확인 — 목록 조회 이후 상태가
+                        # 바뀌었거나(이미 완료됨) LLM이 decision id를 섞어 반환한 경우를
+                        # 여기서 거른다. 조건에 안 맞으면 제안을 만들지 않는다.
                         cursor.execute(
-                            "SELECT content FROM memory WHERE id = %s AND project_id = %s",
+                            "SELECT content FROM memory WHERE id = %s AND project_id = %s"
+                            " AND category = 'action' AND completion_status = 'open'",
                             (c.action_id, project_id),
                         )
                         current = cursor.fetchone()
-                        original_content = current["content"] if current else None
+                        if current is None:
+                            logger.warning(
+                                "완료 판정 대상이 열린 action이 아님 — 제안 생성 안 함"
+                                " action_id=%s project_id=%s", c.action_id, project_id,
+                            )
+                            continue
+                        original_content = current["content"]
 
                         if c.fully_complete:
-                            kind = "complete_action"
+                            # PR 기반 complete_action과 별도 kind — evidence 스키마가 달라
+                            # (title/number/url 없음) 구 데스크톱이 evidence.title.trim()에서
+                            # 죽는다. 신규 kind는 레거시 응답에서 제외되므로 데스크톱이
+                            # 대응하기 전까지 안전하게 격리된다.
+                            kind = "complete_action_doc"
                             evidence = {
                                 "type": "document", "doc_id": doc_id,
-                                "source": source, "date": date, "quote": c.evidence,
+                                "source": source, "date": evidence_date, "quote": c.evidence,
                                 "original_content": original_content,
                             }
                             rationale = f"'{source}' 문서가 완료로 보고: {c.evidence}"
@@ -370,7 +403,7 @@ def ingest(
                             kind = "split_action"
                             evidence = {
                                 "type": "document", "doc_id": doc_id,
-                                "source": source, "date": date, "quote": c.evidence,
+                                "source": source, "date": evidence_date, "quote": c.evidence,
                                 "done_part": c.done_part, "remaining_part": c.remaining_part,
                                 "original_content": original_content,
                             }
