@@ -331,6 +331,14 @@ type ApiDocumentStatus = "uploaded" | "processing" | "indexed" | "failed";
 type ApiDocumentUploadResponse = {
   doc_id: number;
   status: ApiDocumentStatus;
+  format?: string;
+  blocks?: number;
+  pages?: number | null;
+  warnings?: Array<{
+    code: string;
+    message: string;
+    location?: string | null;
+  }>;
 };
 
 type ApiDocumentListItem = {
@@ -1086,7 +1094,7 @@ function getFileExtension(name: string) {
 }
 
 function isSupportedProjectDocument(name: string) {
-  return ["md", "txt", "pdf"].includes(getFileExtension(name));
+  return ["md", "txt", "pdf", "docx"].includes(getFileExtension(name));
 }
 
 function getBase64ByteLength(encoded: string) {
@@ -1099,6 +1107,10 @@ function getUploadMimeType(name: string) {
 
   if (extension === "pdf") {
     return "application/pdf";
+  }
+
+  if (extension === "docx") {
+    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
   }
 
   return "text/plain";
@@ -5202,7 +5214,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     try {
       const selectedPaths = await open({
         directory: false,
-        filters: [{ name: t("지원 문서"), extensions: ["md", "txt", "pdf"] }],
+        filters: [{ name: t("지원 문서"), extensions: ["md", "txt", "pdf", "docx"] }],
         multiple: true,
         title: t("프로젝트 자료 추가"),
       });
@@ -6990,7 +7002,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     const selectedPaths = await open({
       multiple: true,
       directory: false,
-      filters: [{ name: t("지원 문서"), extensions: ["md", "txt", "pdf"] }],
+      filters: [{ name: t("지원 문서"), extensions: ["md", "txt", "pdf", "docx"] }],
       title: t("PaiM에 첨부할 파일 선택"),
     });
 
