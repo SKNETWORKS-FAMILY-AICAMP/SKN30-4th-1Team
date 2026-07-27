@@ -84,6 +84,7 @@ function createPaimApiMockScript() {
       window.__paimLayoutApiCalls = [];
       window.__paimLayoutApiRequests = [];
       const originalFetch = window.fetch.bind(window);
+      const serverDocumentsByProject = new Map();
       const serverSessionsByProject = new Map();
       let includeSupersedingDecision = false;
       let pendingMemorySuggestions = [];
@@ -102,6 +103,13 @@ function createPaimApiMockScript() {
         sessionRequested: 0,
         sessionResolved: 0,
       };
+      const documentControl = {
+        delayMs: 0,
+        deleted: 0,
+        lastFile: null,
+        requested: 0,
+        resolved: 0,
+      };
       const smokeUser = ${JSON.stringify(SMOKE_USER)};
       const smokeAuthSession = ${JSON.stringify(AUTH_SESSION)};
       const smokeAccessToken = ${JSON.stringify(SMOKE_ACCESS_TOKEN)};
@@ -116,6 +124,7 @@ function createPaimApiMockScript() {
           JSON.stringify(smokeAuthSession),
         );
       }
+      let nextDocumentId = 7000;
       let nextProjectId = 1000;
       let nextSessionId = 1000;
 
@@ -155,6 +164,23 @@ function createPaimApiMockScript() {
         creationControl.sessionResolved = 0;
       };
       window.__paimLayoutReadCreationControl = () => ({ ...creationControl });
+      window.__paimLayoutConfigureDocument = ({ delayMs = 0 } = {}) => {
+        documentControl.delayMs = Math.max(0, Number(delayMs) || 0);
+        documentControl.deleted = 0;
+        documentControl.lastFile = null;
+        documentControl.requested = 0;
+        documentControl.resolved = 0;
+        nextDocumentId = 7000;
+        serverDocumentsByProject.clear();
+      };
+      window.__paimLayoutReadDocumentControl = () => ({
+        ...documentControl,
+        lastFile: documentControl.lastFile ? { ...documentControl.lastFile } : null,
+        serverDocumentCount: Array.from(serverDocumentsByProject.values()).reduce(
+          (count, documents) => count + documents.length,
+          0,
+        ),
+      });
 
       const json = (payload, status = 200) =>
         Promise.resolve(new Response(JSON.stringify(payload), {
@@ -485,8 +511,75 @@ function createPaimApiMockScript() {
           return empty();
         }
 
-        if (/^\\/api\\/v1\\/projects\\/\\d+\\/documents$/.test(url.pathname)) {
-          return json([]);
+        const projectDocumentsMatch = url.pathname.match(
+          /^\\/api\\/v1\\/projects\\/(\\d+)\\/documents$/,
+        );
+        if (projectDocumentsMatch && method === "GET") {
+          return json(serverDocumentsByProject.get(Number(projectDocumentsMatch[1])) || []);
+        }
+
+        if (projectDocumentsMatch && method === "POST") {
+          const projectId = Number(projectDocumentsMatch[1]);
+          const file = init?.body instanceof FormData ? init.body.get("file") : null;
+          const docId = nextDocumentId;
+          nextDocumentId += 1;
+          documentControl.requested += 1;
+          documentControl.lastFile = file instanceof File
+            ? { name: file.name, size: file.size, type: file.type }
+            : null;
+
+          if (documentControl.delayMs > 0) {
+            await new Promise((resolve) => window.setTimeout(resolve, documentControl.delayMs));
+          }
+
+          const document = {
+            id: docId,
+            filename: file instanceof File ? file.name : "drop.pdf",
+            doc_type: "pdf",
+            status: "indexed",
+            uploaded_at: "2026-01-01T00:00:00.000Z",
+          };
+          serverDocumentsByProject.set(projectId, [
+            ...(serverDocumentsByProject.get(projectId) || []),
+            document,
+          ]);
+          documentControl.resolved += 1;
+          return json({
+            doc_id: docId,
+            status: "indexed",
+            format: "pdf",
+            blocks: 1,
+            pages: 1,
+            warnings: [],
+          }, 201);
+        }
+
+        const projectDocumentStatusMatch = url.pathname.match(
+          /^\\/api\\/v1\\/projects\\/(\\d+)\\/documents\\/(\\d+)\\/status$/,
+        );
+        if (projectDocumentStatusMatch && method === "GET") {
+          return json({
+            doc_id: Number(projectDocumentStatusMatch[2]),
+            status: "indexed",
+            blocks: 1,
+            error_message: null,
+          });
+        }
+
+        const projectDocumentMatch = url.pathname.match(
+          /^\\/api\\/v1\\/projects\\/(\\d+)\\/documents\\/(\\d+)$/,
+        );
+        if (projectDocumentMatch && method === "DELETE") {
+          const projectId = Number(projectDocumentMatch[1]);
+          const docId = Number(projectDocumentMatch[2]);
+          serverDocumentsByProject.set(
+            projectId,
+            (serverDocumentsByProject.get(projectId) || []).filter(
+              (document) => document.id !== docId,
+            ),
+          );
+          documentControl.deleted += 1;
+          return empty();
         }
 
         if (/^\\/api\\/v1\\/projects\\/\\d+\\/repositories$/.test(url.pathname)) {
@@ -513,6 +606,113 @@ function createPaimApiMockScript() {
 async function installPaimApiMock(send) {
   await send("Page.addScriptToEvaluateOnNewDocument", {
     source: createPaimApiMockScript(),
+  });
+}
+
+// 실제 Tauri 창 없이도 해당 문서에서만 native file-drop 이벤트와 파일 IPC를 재현한다.
+function createPaimTauriMockScript() {
+  return `
+    (() => {
+      if (window.__paimLayoutTauriMockInstalled) {
+        return;
+      }
+
+      window.__paimLayoutTauriMockInstalled = true;
+      const callbacks = new Map();
+      const listeners = new Map();
+      let nextCallbackId = 1;
+      let nextEventId = 1;
+
+      const unregisterCallback = (callbackId) => {
+        callbacks.delete(callbackId);
+      };
+      const transformCallback = (callback, once = false) => {
+        const callbackId = nextCallbackId;
+        nextCallbackId += 1;
+        callbacks.set(callbackId, (payload) => {
+          if (once) {
+            callbacks.delete(callbackId);
+          }
+          return callback?.(payload);
+        });
+        return callbackId;
+      };
+      const unregisterListener = (event, eventId) => {
+        const eventListeners = listeners.get(event) || [];
+        const listener = eventListeners.find((candidate) => candidate.eventId === eventId);
+        if (listener) {
+          unregisterCallback(listener.callbackId);
+        }
+        listeners.set(
+          event,
+          eventListeners.filter((candidate) => candidate.eventId !== eventId),
+        );
+      };
+
+      window.__TAURI_INTERNALS__ = {
+        callbacks,
+        convertFileSrc: (path) => "asset://localhost/" + encodeURIComponent(path),
+        metadata: {
+          currentWindow: { label: "main" },
+          currentWebview: { label: "main", windowLabel: "main" },
+        },
+        transformCallback,
+        unregisterCallback,
+        invoke: async (cmd, args = {}) => {
+          if (cmd === "plugin:event|listen") {
+            const eventId = nextEventId;
+            nextEventId += 1;
+            listeners.set(args.event, [
+              ...(listeners.get(args.event) || []),
+              { callbackId: args.handler, eventId },
+            ]);
+            return eventId;
+          }
+          if (cmd === "plugin:event|unlisten") {
+            unregisterListener(args.event, args.eventId);
+            return null;
+          }
+          if (cmd === "plugin:event|emit") {
+            window.__paimLayoutEmitTauriEvent?.(args.event, args.payload);
+            return null;
+          }
+          if (cmd === "path_kind") {
+            return "file";
+          }
+          if (cmd === "read_file_base64") {
+            return "JVBERi0xLjQK";
+          }
+          if (cmd === "read_directory_children") {
+            return [];
+          }
+          if (cmd === "plugin:app|version") {
+            return "1.0.3";
+          }
+          return null;
+        },
+      };
+      window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener };
+      window.__paimLayoutEmitTauriEvent = (event, payload) => {
+        const eventListeners = [...(listeners.get(event) || [])];
+        for (const listener of eventListeners) {
+          callbacks.get(listener.callbackId)?.({
+            event,
+            id: listener.eventId,
+            payload,
+          });
+        }
+        return eventListeners.length;
+      };
+      window.__paimLayoutReadTauriMock = () => ({
+        dragDropListeners: (listeners.get("tauri://drag-drop") || []).length,
+      });
+    })();
+  `;
+}
+
+async function installPaimTauriMock(send) {
+  return send("Page.addScriptToEvaluateOnNewDocument", {
+    source: createPaimTauriMockScript(),
   });
 }
 
@@ -3427,6 +3627,504 @@ async function verifyProjectCreationFlow(send) {
     failures.push("project home name editing should cancel with Escape and commit with Enter");
   }
 
+  return { value, failures };
+}
+
+// 프로젝트 홈 native drop은 로컬 행만 남기지 않고 PDF를 서버 문서로 확정해야 한다.
+async function verifyProjectHomeDroppedPdfUpload(send) {
+  const seededProjectState = createProjectStorage(
+    "project-drop-upload",
+    "Drop Upload Project",
+    [],
+    null,
+    [],
+  );
+  const tauriMockScript = await installPaimTauriMock(send);
+  const value = {};
+  const failures = [];
+
+  try {
+    await send("Emulation.setDeviceMetricsOverride", {
+      width: 960,
+      height: 680,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+    await evaluateAndNavigateToSelector(
+      send,
+      `localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(SIDEBAR_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(SIDEBAR_WIDTH_STORAGE_KEY)}, '272'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_WIDTH_STORAGE_KEY)}, '360'); localStorage.removeItem(${JSON.stringify(PROJECT_COLLAPSED_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(seededProjectState)})`,
+      APP_URL,
+      ".project-home",
+    );
+
+    const readyResult = await send("Runtime.evaluate", {
+      awaitPromise: true,
+      returnByValue: true,
+      expression: `(async () => {
+        const timeoutAt = Date.now() + 5000;
+        while (Date.now() < timeoutAt) {
+          const listenerCount =
+            window.__paimLayoutReadTauriMock?.().dragDropListeners ?? 0;
+          if (listenerCount > 0) {
+            window.__paimLayoutConfigureDocument?.({ delayMs: 150 });
+            return { listenerCount, ready: true };
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        return {
+          listenerCount: window.__paimLayoutReadTauriMock?.().dragDropListeners ?? 0,
+          ready: false,
+        };
+      })()`,
+    });
+    value.nativeReady = readyResult.result.value;
+
+    const dropResult = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `(() => {
+        const canvas = document.querySelector('.project-home-canvas');
+        if (!canvas) {
+          return { emittedListeners: 0, foundCanvas: false };
+        }
+        const rect = canvas.getBoundingClientRect();
+        const scale = window.devicePixelRatio || 1;
+        const position = {
+          x: (rect.left + rect.width / 2) * scale,
+          y: (rect.top + rect.height / 2) * scale,
+        };
+        return {
+          emittedListeners: window.__paimLayoutEmitTauriEvent?.(
+            'tauri://drag-drop',
+            { paths: ['/mock/drop.pdf'], position },
+          ) ?? 0,
+          foundCanvas: true,
+        };
+      })()`,
+    });
+    value.drop = dropResult.result.value;
+
+    const uploadResult = await send("Runtime.evaluate", {
+      awaitPromise: true,
+      returnByValue: true,
+      expression: `(async () => {
+        const timeoutAt = Date.now() + 6000;
+        while (Date.now() < timeoutAt) {
+          const control = window.__paimLayoutReadDocumentControl?.();
+          const row = document.querySelector('.project-home-source-row');
+          if (
+            control?.resolved >= 1 &&
+            (row?.getAttribute('data-status') === 'indexed' || control.deleted > 0)
+          ) {
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+
+        const savedState = JSON.parse(
+          localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}',
+        );
+        const activeProject = savedState.projects?.find(
+          (project) => project.id === savedState.selectedProjectId,
+        );
+        const storedFile = activeProject?.files?.find(
+          (file) => file.name === 'drop.pdf',
+        );
+        const apiCalls = window.__paimLayoutApiCalls || [];
+        const summary = Object.fromEntries(
+          Array.from(document.querySelectorAll('.project-home-summary-item')).map(
+            (item) => [item.getAttribute('data-kind'), item.textContent.trim()],
+          ),
+        );
+        const row = document.querySelector('.project-home-source-row');
+
+        return {
+          apiProjectId: activeProject?.apiProjectId ?? null,
+          deleteCalls: apiCalls.filter(
+            (call) => /^DELETE \\/api\\/v1\\/projects\\/\\d+\\/documents\\/\\d+$/.test(call),
+          ),
+          documentControl: window.__paimLayoutReadDocumentControl?.() ?? null,
+          documentPostCalls: apiCalls.filter(
+            (call) => /^POST \\/api\\/v1\\/projects\\/\\d+\\/documents$/.test(call),
+          ),
+          projectPostCalls: apiCalls.filter(
+            (call) => call === 'POST /api/v1/projects',
+          ),
+          rowName: row?.querySelector('.project-home-source-name')?.textContent.trim() || '',
+          rowStatus: row?.getAttribute('data-status') || '',
+          rowStatusText:
+            row?.querySelector('.project-home-source-status')?.textContent.trim() || '',
+          storedFile: storedFile
+            ? {
+                docId: storedFile.docId ?? null,
+                documentStatus: storedFile.documentStatus ?? null,
+                name: storedFile.name,
+              }
+            : null,
+          summary,
+        };
+      })()`,
+    });
+    value.upload = uploadResult.result.value;
+
+    if (!value.nativeReady.ready ||
+        value.nativeReady.listenerCount !== 1 ||
+        !value.drop.foundCanvas ||
+        value.drop.emittedListeners !== 1) {
+      failures.push("project home should register exactly one native file-drop listener");
+    }
+
+    if (value.upload.projectPostCalls.length !== 1 ||
+        value.upload.documentPostCalls.length !== 1 ||
+        value.upload.apiProjectId !== 1000) {
+      failures.push("dropping a PDF should create its server project and upload one document");
+    }
+
+    const lastFile = value.upload.documentControl?.lastFile;
+    if (value.upload.documentControl?.requested !== 1 ||
+        value.upload.documentControl?.resolved !== 1 ||
+        !lastFile ||
+        lastFile.name !== "drop.pdf" ||
+        lastFile.type !== "application/pdf" ||
+        lastFile.size <= 0) {
+      failures.push("native PDF drop should send one non-empty application/pdf multipart file");
+    }
+
+    if (value.upload.documentControl?.deleted !== 0 ||
+        value.upload.deleteCalls.length !== 0) {
+      failures.push("a completed native PDF drop must not issue a compensating document DELETE");
+    }
+
+    if (value.upload.storedFile?.name !== "drop.pdf" ||
+        value.upload.storedFile?.docId !== 7000 ||
+        value.upload.storedFile?.documentStatus !== "indexed" ||
+        value.upload.rowName !== "drop.pdf" ||
+        value.upload.rowStatus !== "indexed" ||
+        value.upload.rowStatusText !== "완료") {
+      failures.push("a dropped PDF should remain linked to its indexed server document");
+    }
+
+    if (value.upload.summary.ready !== "1개 완료" ||
+        value.upload.summary.processing !== "0개 처리 중" ||
+        value.upload.summary.failed !== "0개 실패") {
+      failures.push("project home should count the dropped PDF as one completed document");
+    }
+  } finally {
+    await send("Page.removeScriptToEvaluateOnNewDocument", {
+      identifier: tauriMockScript.identifier,
+    });
+    await navigateAndWaitForSelector(send, APP_URL, ".app-shell");
+    const cleanupResult = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `(() => ({
+        hasTauriInternals: '__TAURI_INTERNALS__' in window,
+        hasTauriMock: Boolean(window.__paimLayoutTauriMockInstalled),
+        pageZoomMode: document.documentElement.dataset.pageZoomMode || '',
+      }))()`,
+    });
+    value.cleanup = cleanupResult.result.value;
+  }
+
+  if (value.cleanup.hasTauriInternals ||
+      value.cleanup.hasTauriMock ||
+      value.cleanup.pageZoomMode !== "css") {
+    failures.push("the native drop preload should be removed before later browser-mode scenarios");
+  }
+
+  debugLayout("project home dropped PDF upload", value);
+  return { value, failures };
+}
+
+// 사용자가 전송 중인 PDF를 명시적으로 지우면 늦게 생성된 서버 문서도 한 번만 정리한다.
+async function verifyProjectHomeDroppedPdfCancellation(send) {
+  const seededProjectState = createProjectStorage(
+    "project-drop-cancel",
+    "Drop Cancel Project",
+    [],
+    null,
+    [],
+  );
+  const tauriMockScript = await installPaimTauriMock(send);
+  const value = {};
+  const failures = [];
+
+  try {
+    await send("Emulation.setDeviceMetricsOverride", {
+      width: 960,
+      height: 680,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+    await evaluateAndNavigateToSelector(
+      send,
+      `localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(SIDEBAR_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(SIDEBAR_WIDTH_STORAGE_KEY)}, '272'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_WIDTH_STORAGE_KEY)}, '360'); localStorage.removeItem(${JSON.stringify(PROJECT_COLLAPSED_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(seededProjectState)})`,
+      APP_URL,
+      ".project-home",
+    );
+
+    const readyResult = await send("Runtime.evaluate", {
+      awaitPromise: true,
+      returnByValue: true,
+      expression: `(async () => {
+        const timeoutAt = Date.now() + 5000;
+        while (Date.now() < timeoutAt) {
+          const listenerCount =
+            window.__paimLayoutReadTauriMock?.().dragDropListeners ?? 0;
+          if (listenerCount > 0) {
+            window.__paimLayoutConfigureDocument?.({ delayMs: 2000 });
+            return { listenerCount, ready: true };
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        return {
+          listenerCount: window.__paimLayoutReadTauriMock?.().dragDropListeners ?? 0,
+          ready: false,
+        };
+      })()`,
+    });
+    value.nativeReady = readyResult.result.value;
+
+    const dropResult = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `(() => {
+        const canvas = document.querySelector('.project-home-canvas');
+        if (!canvas) {
+          return { emittedListeners: 0, foundCanvas: false };
+        }
+        const rect = canvas.getBoundingClientRect();
+        const scale = window.devicePixelRatio || 1;
+        const position = {
+          x: (rect.left + rect.width / 2) * scale,
+          y: (rect.top + rect.height / 2) * scale,
+        };
+        return {
+          emittedListeners: window.__paimLayoutEmitTauriEvent?.(
+            'tauri://drag-drop',
+            { paths: ['/mock/cancel-drop.pdf'], position },
+          ) ?? 0,
+          foundCanvas: true,
+        };
+      })()`,
+    });
+    value.drop = dropResult.result.value;
+
+    const startedResult = await send("Runtime.evaluate", {
+      awaitPromise: true,
+      returnByValue: true,
+      expression: `(async () => {
+        const timeoutAt = Date.now() + 5000;
+        while (Date.now() < timeoutAt) {
+          const control = window.__paimLayoutReadDocumentControl?.();
+          const row = document.querySelector('.project-home-source-row');
+          if (
+            control?.requested === 1 &&
+            control.resolved === 0 &&
+            row?.getAttribute('data-status') === 'uploading'
+          ) {
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        const row = document.querySelector('.project-home-source-row');
+        return {
+          control: window.__paimLayoutReadDocumentControl?.() ?? null,
+          deleteButton: Boolean(row?.querySelector('.project-home-source-delete')),
+          rowName: row?.querySelector('.project-home-source-name')?.textContent.trim() || '',
+          rowStatus: row?.getAttribute('data-status') || '',
+        };
+      })()`,
+    });
+    value.started = startedResult.result.value;
+
+    await send("Runtime.evaluate", {
+      expression: `document.querySelector('.project-home-source-delete')?.click()`,
+    });
+    const armedResult = await send("Runtime.evaluate", {
+      awaitPromise: true,
+      returnByValue: true,
+      expression: `(async () => {
+        const timeoutAt = Date.now() + 1000;
+        while (Date.now() < timeoutAt) {
+          const row = document.querySelector('.project-home-source-row');
+          if (row?.getAttribute('data-delete') === 'confirm') {
+            return {
+              armed: true,
+              control: window.__paimLayoutReadDocumentControl?.() ?? null,
+            };
+          }
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        return {
+          armed: false,
+          control: window.__paimLayoutReadDocumentControl?.() ?? null,
+        };
+      })()`,
+    });
+    value.armed = armedResult.result.value;
+
+    await send("Runtime.evaluate", {
+      expression: `document.querySelector('.project-home-source-delete')?.click()`,
+    });
+    const localCancelResult = await send("Runtime.evaluate", {
+      awaitPromise: true,
+      returnByValue: true,
+      expression: `(async () => {
+        const timeoutAt = Date.now() + 750;
+        while (
+          Date.now() < timeoutAt &&
+          document.querySelector('.project-home-source-row')
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        const savedState = JSON.parse(
+          localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}',
+        );
+        const activeProject = savedState.projects?.find(
+          (project) => project.id === savedState.selectedProjectId,
+        );
+        return {
+          control: window.__paimLayoutReadDocumentControl?.() ?? null,
+          rowGone: !document.querySelector('.project-home-source-row'),
+          storedFileCount: activeProject?.files?.length ?? -1,
+        };
+      })()`,
+    });
+    value.localCancel = localCancelResult.result.value;
+
+    const settledResult = await send("Runtime.evaluate", {
+      awaitPromise: true,
+      returnByValue: true,
+      expression: `(async () => {
+        const timeoutAt = Date.now() + 6000;
+        while (Date.now() < timeoutAt) {
+          const control = window.__paimLayoutReadDocumentControl?.();
+          if (
+            control?.resolved === 1 &&
+            control.deleted === 1 &&
+            control.serverDocumentCount === 0
+          ) {
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+
+        const savedState = JSON.parse(
+          localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}',
+        );
+        const activeProject = savedState.projects?.find(
+          (project) => project.id === savedState.selectedProjectId,
+        );
+        const apiCalls = window.__paimLayoutApiCalls || [];
+
+        return {
+          apiProjectId: activeProject?.apiProjectId ?? null,
+          canvasState:
+            document.querySelector('.project-home-canvas')?.getAttribute('data-state') || '',
+          deleteCalls: apiCalls.filter(
+            (call) => /^DELETE \\/api\\/v1\\/projects\\/\\d+\\/documents\\/\\d+$/.test(call),
+          ),
+          documentControl: window.__paimLayoutReadDocumentControl?.() ?? null,
+          documentPostCalls: apiCalls.filter(
+            (call) => /^POST \\/api\\/v1\\/projects\\/\\d+\\/documents$/.test(call),
+          ),
+          emptyText:
+            document.querySelector('.project-home-canvas-empty')?.textContent.trim() || '',
+          projectPostCalls: apiCalls.filter(
+            (call) => call === 'POST /api/v1/projects',
+          ),
+          runtimeStatus: document.querySelector('.runtime-status')?.textContent.trim() || '',
+          sourceRowCount: document.querySelectorAll('.project-home-source-row').length,
+          storedFileCount: activeProject?.files?.length ?? -1,
+        };
+      })()`,
+    });
+    value.settled = settledResult.result.value;
+
+    if (!value.nativeReady.ready ||
+        value.nativeReady.listenerCount !== 1 ||
+        !value.drop.foundCanvas ||
+        value.drop.emittedListeners !== 1) {
+      failures.push("cancel test should register and invoke exactly one native file-drop listener");
+    }
+
+    if (value.started.control?.requested !== 1 ||
+        value.started.control?.resolved !== 0 ||
+        value.started.rowName !== "cancel-drop.pdf" ||
+        value.started.rowStatus !== "uploading" ||
+        !value.started.deleteButton) {
+      failures.push("the PDF upload should be in flight before explicit deletion");
+    }
+
+    if (!value.armed.armed ||
+        value.armed.control?.resolved !== 0) {
+      failures.push("the first source delete click should arm confirmation before upload response");
+    }
+
+    if (!value.localCancel.rowGone ||
+        value.localCancel.storedFileCount !== 0 ||
+        value.localCancel.control?.resolved !== 0 ||
+        value.localCancel.control?.deleted !== 0) {
+      failures.push("the confirmed delete should remove the local row and abort before the POST resolves");
+    }
+
+    const lastFile = value.settled.documentControl?.lastFile;
+    if (value.settled.projectPostCalls.length !== 1 ||
+        value.settled.documentPostCalls.length !== 1 ||
+        value.settled.apiProjectId !== 1000 ||
+        value.settled.documentControl?.requested !== 1 ||
+        value.settled.documentControl?.resolved !== 1 ||
+        !lastFile ||
+        lastFile.name !== "cancel-drop.pdf" ||
+        lastFile.type !== "application/pdf" ||
+        lastFile.size <= 0) {
+      failures.push("the cancelled native drop should still receive exactly one delayed PDF POST response");
+    }
+
+    if (value.settled.documentControl?.deleted !== 1 ||
+        value.settled.documentControl?.serverDocumentCount !== 0 ||
+        value.settled.deleteCalls.length !== 1 ||
+        value.settled.deleteCalls[0] !==
+          "DELETE /api/v1/projects/1000/documents/7000") {
+      failures.push("the delayed cancelled upload should issue exactly one compensating document DELETE");
+    }
+
+    if (value.settled.storedFileCount !== 0 ||
+        value.settled.sourceRowCount !== 0 ||
+        value.settled.canvasState !== "empty" ||
+        !value.settled.emptyText.includes("자료를 여기에 끌어다 놓으세요")) {
+      failures.push("the cancelled PDF should stay removed from project home and local storage");
+    }
+
+    if (!value.settled.runtimeStatus.includes("0개 완료") ||
+        !value.settled.runtimeStatus.includes("0개 실패") ||
+        !value.settled.runtimeStatus.includes("1개 취소")) {
+      failures.push("the upload result should report one explicit cancellation");
+    }
+  } finally {
+    await send("Page.removeScriptToEvaluateOnNewDocument", {
+      identifier: tauriMockScript.identifier,
+    });
+    await navigateAndWaitForSelector(send, APP_URL, ".app-shell");
+    const cleanupResult = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `(() => ({
+        hasTauriInternals: '__TAURI_INTERNALS__' in window,
+        hasTauriMock: Boolean(window.__paimLayoutTauriMockInstalled),
+        pageZoomMode: document.documentElement.dataset.pageZoomMode || '',
+      }))()`,
+    });
+    value.cleanup = cleanupResult.result.value;
+  }
+
+  if (value.cleanup.hasTauriInternals ||
+      value.cleanup.hasTauriMock ||
+      value.cleanup.pageZoomMode !== "css") {
+    failures.push("the cancellation test preload should be removed before later browser scenarios");
+  }
+
+  debugLayout("project home dropped PDF cancellation", value);
   return { value, failures };
 }
 
@@ -8326,6 +9024,29 @@ try {
     projectCreationResult.failures.forEach((failure) => console.log(`  - ${failure}`));
   } else {
     console.log("PASS new projects are created as active workspaces");
+  }
+
+  const projectHomeDroppedPdfResult = await verifyProjectHomeDroppedPdfUpload(send);
+
+  if (projectHomeDroppedPdfResult.failures.length > 0) {
+    hasFailures = true;
+    console.log("FAIL project home native PDF drop upload");
+    projectHomeDroppedPdfResult.failures.forEach((failure) => console.log(`  - ${failure}`));
+  } else {
+    console.log("PASS project home native PDF drop uploads without cancellation");
+  }
+
+  const projectHomeDroppedPdfCancellationResult =
+    await verifyProjectHomeDroppedPdfCancellation(send);
+
+  if (projectHomeDroppedPdfCancellationResult.failures.length > 0) {
+    hasFailures = true;
+    console.log("FAIL project home native PDF drop cancellation");
+    projectHomeDroppedPdfCancellationResult.failures.forEach(
+      (failure) => console.log(`  - ${failure}`),
+    );
+  } else {
+    console.log("PASS project home native PDF drop cancellation cleans the server document once");
   }
 
   const projectBriefingResult = await verifyProjectBriefingStartsWithoutVisiblePrompt(send);

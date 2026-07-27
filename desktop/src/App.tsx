@@ -70,6 +70,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
 import packageJson from "../package.json";
 import {
   clearPaimAuthSession,
@@ -4314,7 +4315,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
     try {
       const file = await readUploadFile(entry);
-      if (controller.signal.aborted || !hasProjectAttachment(projectId, entry.id)) {
+      if (controller.signal.aborted) {
         return "cancelled" as const;
       }
       const formData = new FormData();
@@ -4328,7 +4329,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         formData,
       );
 
-      if (controller.signal.aborted || !hasProjectAttachment(projectId, entry.id)) {
+      if (controller.signal.aborted) {
         cancelledDocumentIdsRef.current.add(response.doc_id);
         try {
           await fetchPaimJson<void>(
@@ -4364,7 +4365,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       }
       return "uploaded" as const;
     } catch (error) {
-      if (controller.signal.aborted || !hasProjectAttachment(projectId, entry.id)) {
+      if (controller.signal.aborted) {
         return "cancelled" as const;
       }
       updateProjectAttachment(projectId, entry.id, (attachment) => ({
@@ -5108,14 +5109,20 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       return;
     }
 
-    updateProject(projectId, (project) => ({
-      ...project,
-      files: [...entries, ...(project.files ?? [])],
-    }));
+    // 네이티브 드롭 콜백에서는 React 상태 반영보다 업로드 비동기 흐름이 먼저 진행될 수 있다.
+    // 기존에 예약된 프로젝트 갱신까지 보존하면서, 업로드 전에 새 파일 등록을 확정한다.
+    flushSync(() => {
+      updateProject(projectId, (project) => ({
+        ...project,
+        files: [...entries, ...(project.files ?? [])],
+      }));
+    });
+    const registeredProject =
+      projectsRef.current.find((project) => project.id === projectId) ?? targetProject;
     if (selectedProjectIdRef.current === projectId) {
       setProjectSourcesMode("library");
     }
-    void uploadProjectDocuments(projectId, targetProject, entries);
+    void uploadProjectDocuments(projectId, registeredProject, entries);
   }
 
   async function addDroppedPathsToProject(projectId: string, paths: string[]) {
