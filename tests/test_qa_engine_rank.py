@@ -64,6 +64,33 @@ def test_rank_mysql_rows_without_floor_keeps_all_rows_for_enumeration():
     assert listed[0]["id"] == 1                     # 순위는 그대로 매겨진다
 
 
+def test_vector_distance_margin_follows_apply_floor():
+    """apply_floor=False면 벡터 거리 마진도 함께 꺼진다.
+
+    마진은 행을 최종 결과에서 빼지는 않지만(candidates가 전체 행), 벡터 축에서
+    배제된 행은 BM25 점수만으로 순위가 매겨져 rows > limit일 때 밀린다. 관련도 컷을
+    끈다고 해놓고 같은 성격의 컷 하나가 남아 있으면 플래그 의미가 흔들린다.
+    """
+    from backend.retriever.memory_vector import memory_vector_id
+
+    rows = [_row(i, f"기록 {i}") for i in range(1, 5)]
+    # 1번만 마진 안(0.1), 나머지는 밖(0.9 > 0.1 + 0.15)
+    fake_collection = MagicMock()
+    fake_collection.query.return_value = {
+        "ids": [[memory_vector_id(r["id"]) for r in rows]],
+        "distances": [[0.1, 0.9, 0.9, 0.9]],
+    }
+
+    with patch.object(qa_engine, "get_collection", return_value=fake_collection):
+        with_margin, _ = qa_engine._memory_vector_rank_lists(1, ["기록"], rows)
+        without_margin, _ = qa_engine._memory_vector_rank_lists(
+            1, ["기록"], rows, apply_margin=False
+        )
+
+    assert with_margin == [[0]]                  # 마진 밖 3건 배제
+    assert without_margin == [[0, 1, 2, 3]]      # 전부 랭크에 실림
+
+
 def test_memory_vector_pool_is_independent_of_final_row_limit():
     """벡터 이웃 후보 수는 MYSQL_CANDIDATE_POOL을 따라야 한다 — 최종 선정 개수인
     MYSQL_TOP_N(4)을 그대로 n_results로 넘기면 융합할 재료가 4개로 줄어 랭킹이 나빠진다.

@@ -5,6 +5,7 @@ import logging
 import re
 from typing import List, Optional
 from .models import MemoryItem, CompletionReport
+from .extractor import _OPEN_ACTIONS_ITEM_CHARS
 from ..db.mysql import get_connection
 from ..db.chroma import get_collection
 from ..retriever.memory_vector import upsert_memory_vectors
@@ -400,6 +401,19 @@ def ingest(
                         else:
                             if not c.done_part or not c.remaining_part:
                                 continue  # 부분 완료인데 분할 근거가 없으면 애매하니 건너뜀
+                            if len(original_content or "") > _OPEN_ACTIONS_ITEM_CHARS:
+                                # 프롬프트에는 앞 _OPEN_ACTIONS_ITEM_CHARS자만 들어갔으므로
+                                # LLM은 이 action의 뒷부분을 본 적이 없다. 그 상태의
+                                # remaining_part를 승인하면 content를 통째로 덮어써
+                                # (suggestion._apply_accepted_effect) 못 본 부분이 소실된다.
+                                # stale 검사는 전체 content끼리 비교라 이 경로를 못 막는다.
+                                # 완료분만 떼는 판단 자체가 근거 없이 이뤄진 것이므로 제안하지 않는다.
+                                logger.warning(
+                                    "action content가 프롬프트 예산으로 잘려 split 제안 생략"
+                                    " action_id=%s project_id=%s len=%s",
+                                    c.action_id, project_id, len(original_content),
+                                )
+                                continue
                             kind = "split_action"
                             evidence = {
                                 "type": "document", "doc_id": doc_id,

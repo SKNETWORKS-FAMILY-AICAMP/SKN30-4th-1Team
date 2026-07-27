@@ -69,7 +69,8 @@ def _suggestion_or_404(cursor, project_id: int, suggestion_id: int) -> dict:
         " m.completed_at AS memory_completed_at,"
         " m.superseded_by AS memory_superseded_by,"
         " m.owner AS memory_owner, m.date AS memory_date, m.source AS memory_source,"
-        " m.doc_id AS memory_doc_id, m.repo_id AS memory_repo_id"
+        " m.doc_id AS memory_doc_id, m.repo_id AS memory_repo_id,"
+        " m.topic AS memory_topic, m.reason AS memory_reason"
         " FROM memory_suggestions s"
         " JOIN memory m ON m.id = s.memory_id AND m.project_id = s.project_id"
         " WHERE s.id = %s AND s.project_id = %s",
@@ -286,12 +287,18 @@ def _apply_accepted_effect(cursor, project_id: int, row: dict) -> None:
             f"""
             INSERT INTO memory
                 (project_id, doc_id, repo_id, category, content, owner, date, source,
+                 topic, reason,
                  completed_at, completion_status, completion_status_source, updated_by)
-            VALUES (%s, %s, %s, 'action', %s, %s, %s, %s, {completed_sql}, 'completed', 'document', 'user')
+            VALUES (%s, %s, %s, 'action', %s, %s, %s, %s, %s, %s, {completed_sql}, 'completed', 'document', 'user')
             """,
+            # topic/reason은 원본에서 승계 — format_memory_document가 BM25·벡터 입력에
+            # 쓰는 필드라, 비우면 떼어낸 완료분이 검색에서 주제·근거 신호를 잃는다.
+            # due_date는 일부러 승계하지 않는다: 새 행은 완료 상태로 태어나므로
+            # 마감일이 붙으면 마감/지연 조회에 완료된 일이 섞인다.
             [
                 project_id, row.get("memory_doc_id"), row.get("memory_repo_id"),
                 done_part, row.get("memory_owner"), row.get("memory_date"), row.get("memory_source"),
+                row.get("memory_topic"), row.get("memory_reason"),
             ] + completed_params,
         )
         row["_split_new_memory_id"] = cursor.lastrowid  # 아래 post-commit 벡터 동기화용

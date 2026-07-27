@@ -537,6 +537,31 @@ def test_accept_document_completion_without_date_keeps_document_source():
     assert completion.args[1][0] == "document"           # 그래도 근거는 document
 
 
+def test_accept_split_action_copies_topic_and_reason_but_not_due_date():
+    """분리된 완료 행은 원본의 topic/reason을 승계한다 — format_memory_document가
+    BM25·벡터 입력으로 쓰는 필드라 비면 검색에서 주제·근거 신호를 잃는다.
+    due_date는 승계하지 않는다: 새 행은 완료 상태라 마감 조회에 섞이면 안 된다."""
+    row = {**_split_action_row(), "memory_topic": "알림", "memory_reason": "QA 요청"}
+    updated = {**row, "status": "accepted", "resolved_at": "2026-07-02 11:00:00"}
+    locked = {"content": "인원 관리 및 알림 로직 구현", "completed_at": None}
+    conn, cur = _make_conn(fetchone=[row, locked, updated])
+    cur.lastrowid = 55
+    with patch("backend.api.suggestion.require_project_access"), \
+         patch("backend.api.suggestion.get_connection", return_value=conn), \
+         patch("backend.retriever.memory_vector.upsert_memory_vectors"):
+        resp = _client.post("/api/v1/projects/1/suggestions/9/accept")
+
+    assert resp.status_code == 200
+    insert_call = next(
+        c for c in cur.execute.call_args_list
+        if "INSERT INTO memory" in c.args[0] and "category" in c.args[0]
+    )
+    assert "topic" in insert_call.args[0] and "reason" in insert_call.args[0]
+    assert "알림" in insert_call.args[1]
+    assert "QA 요청" in insert_call.args[1]
+    assert "due_date" not in insert_call.args[0]
+
+
 def test_accept_split_action_on_completed_action_is_409():
     """F-002: 이미 완료된 action의 분할 승인은 멱등 성공이 아니라 409로 거부한다.
 

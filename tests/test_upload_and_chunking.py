@@ -224,6 +224,66 @@ def test_completion_with_action_id_outside_provided_list_is_dropped():
     assert inserted_ids == [1]
 
 
+def test_split_suggestion_is_skipped_when_action_content_was_truncated():
+    """프롬프트 예산으로 잘린 action은 split 제안을 만들지 않는다.
+
+    cap_open_actions가 content를 _OPEN_ACTIONS_ITEM_CHARS로 자르므로 LLM은 뒷부분을
+    본 적이 없는데, 승인 시 remaining_part가 전체 content를 덮어써 못 본 부분이
+    영구 소실된다. original_content stale 검사는 전체끼리 비교라 이 경로를 못 막는다.
+    content를 건드리지 않는 전체 완료(complete_action_doc)는 계속 허용한다.
+    """
+    from backend.pipeline.ingestor import ingest
+    from backend.pipeline.models import CompletionReport
+    from backend.pipeline.extractor import _OPEN_ACTIONS_ITEM_CHARS
+
+    long_content = "가" * (_OPEN_ACTIONS_ITEM_CHARS + 1)
+    conn, cursor = _completion_conn({"content": long_content})
+    reports = [
+        CompletionReport(
+            action_id=1, evidence="일부 완료", fully_complete=False,
+            done_part="앞부분", remaining_part="뒷부분",
+        ),
+        CompletionReport(action_id=1, evidence="전부 완료", fully_complete=True),
+    ]
+    with patch("backend.pipeline.ingestor.get_connection", return_value=conn), \
+         patch("backend.pipeline.ingestor.upsert_memory_vectors"):
+        ingest(
+            project_id=1, doc_id=5, items=[], raw_text="", source="doc.md",
+            date="2026-04-13", doc_type="meeting", completions=reports,
+            open_actions=[{"id": 1, "content": long_content}],
+        )
+
+    kinds = [c.args[1][2] for c in _suggestion_inserts(cursor)]
+    assert "split_action" not in kinds
+    assert kinds == ["complete_action_doc"]
+
+
+def test_split_suggestion_is_kept_when_action_content_fits_budget():
+    """예산 안에 들어오는 action은 LLM이 전체를 봤으므로 split 제안을 그대로 만든다.
+    위 가드가 split 자체를 죽이지 않았음을 고정한다."""
+    from backend.pipeline.ingestor import ingest
+    from backend.pipeline.models import CompletionReport
+    from backend.pipeline.extractor import _OPEN_ACTIONS_ITEM_CHARS
+
+    short_content = "가" * _OPEN_ACTIONS_ITEM_CHARS  # 경계값 — 절단되지 않는 최대 길이
+    conn, cursor = _completion_conn({"content": short_content})
+    reports = [
+        CompletionReport(
+            action_id=1, evidence="일부 완료", fully_complete=False,
+            done_part="앞부분", remaining_part="뒷부분",
+        ),
+    ]
+    with patch("backend.pipeline.ingestor.get_connection", return_value=conn), \
+         patch("backend.pipeline.ingestor.upsert_memory_vectors"):
+        ingest(
+            project_id=1, doc_id=5, items=[], raw_text="", source="doc.md",
+            date="2026-04-13", doc_type="meeting", completions=reports,
+            open_actions=[{"id": 1, "content": short_content}],
+        )
+
+    assert [c.args[1][2] for c in _suggestion_inserts(cursor)] == ["split_action"]
+
+
 def test_completion_targeting_non_open_action_is_dropped():
     """F-003: 목록 조회 이후 상태가 바뀌었거나(이미 완료) decision id가 섞여 반환되면
     제안을 만들지 않는다 — SELECT가 category='action' AND completion_status='open'을

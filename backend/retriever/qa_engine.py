@@ -281,8 +281,17 @@ def _generate_multi_queries(question: str) -> List[str]:
     return queries
 
 
-def _memory_vector_rank_lists(project_id: int, queries: List[str], rows: List[Dict]) -> tuple[List[List[int]], List[Dict]]:
+def _memory_vector_rank_lists(
+    project_id: int,
+    queries: List[str],
+    rows: List[Dict],
+    apply_margin: bool = True,
+) -> tuple[List[List[int]], List[Dict]]:
     """ChromaDB memory 벡터 검색 결과를 rows 인덱스 rank list로 변환한다.
+
+    apply_margin=False면 거리 컷 없이 이웃 전부를 랭크에 싣는다 — 열거 경로(
+    _rank_mysql_rows(apply_floor=False))에서는 약하게 걸린 행도 순위만 밀릴 뿐
+    빠지면 안 되는데, 벡터 축에서 배제되면 BM25 점수만으로 순위가 매겨진다.
 
     쿼리별 최근접 거리 대비 VECTOR_DISTANCE_MARGIN 밖의 이웃은 제외한다 — 작은
     코퍼스에서는 같은 회의록 소속이라는 이유만으로도 코사인 거리가 가까워, 무제한
@@ -322,7 +331,7 @@ def _memory_vector_rank_lists(project_id: int, queries: List[str], rows: List[Di
             if idx is None or idx in ranks:
                 continue
             dist = distances[rank] if rank < len(distances) else None
-            if min_dist is not None and dist is not None and dist > min_dist + VECTOR_DISTANCE_MARGIN:
+            if apply_margin and min_dist is not None and dist is not None and dist > min_dist + VECTOR_DISTANCE_MARGIN:
                 continue
             ranks.append(idx)
             hits.append({
@@ -346,7 +355,8 @@ def _rank_mysql_rows(
 ) -> tuple[List[Dict], List[Dict]]:
     """BM25와 memory vector rank를 RRF로 합쳐 MySQL memory rows를 선별한다.
 
-    apply_floor=False면 아래 관련도 threshold를 끄고 순위만 매긴다(limit까지 채움).
+    apply_floor=False면 관련도 컷(아래 BM25/fused threshold + 벡터 거리 마진)을 전부
+    끄고 순위만 매긴다(limit까지 채움).
     threshold는 _build_context의 precision을 위한 것인데, 이 함수는 "조건에 맞는 행을
     열거"하는 게 계약인 query_structured_memory도 같이 쓴다 — 거기서는 약하게라도
     걸린 행을 잘라내면 목록이 사실과 달라진다(열린 액션 12건 중 1건만 나오는 식).
@@ -378,7 +388,9 @@ def _rank_mysql_rows(
             rank_lists.append(ranked)
             weights.append(BM25_WEIGHT)
 
-    vector_rank_lists, vector_hits = _memory_vector_rank_lists(project_id, queries, rows)
+    vector_rank_lists, vector_hits = _memory_vector_rank_lists(
+        project_id, queries, rows, apply_margin=apply_floor
+    )
     rank_lists.extend(vector_rank_lists)
     weights.extend([1.0 - BM25_WEIGHT] * len(vector_rank_lists))
 
