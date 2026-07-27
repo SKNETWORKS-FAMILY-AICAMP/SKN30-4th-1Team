@@ -36,6 +36,34 @@ def test_rank_mysql_rows_excludes_rows_with_no_relevance_signal():
     assert [r["id"] for r in selected] == [1]
 
 
+def test_rank_mysql_rows_without_floor_keeps_all_rows_for_enumeration():
+    """apply_floor=False면 관련도 컷 없이 limit까지 채운다.
+
+    query_structured_memory("액션 아이템 목록")는 열거가 계약이라, precision용 컷을
+    공유하면 명백히 관련 있는 행("푸시 알림 연동")까지 잘려 목록이 사실과 달라졌다.
+    """
+    rows = [
+        _row(1, "알림 로직 리팩토링"),
+        _row(2, "푸시 알림 연동 작업"),
+        _row(3, "결제 모듈 연동"),
+        _row(4, "DB 인덱스 추가"),
+    ]
+    fake_collection = MagicMock()
+    fake_collection.query.return_value = {"ids": [[]], "distances": [[]]}
+
+    with patch.object(qa_engine, "get_collection", return_value=fake_collection):
+        floored, _ = qa_engine._rank_mysql_rows(
+            project_id=1, rows=rows, queries=["알림 로직"], limit=4
+        )
+        listed, _ = qa_engine._rank_mysql_rows(
+            project_id=1, rows=rows, queries=["알림 로직"], limit=4, apply_floor=False
+        )
+
+    assert [r["id"] for r in floored] == [1]        # 컨텍스트 경로: 컷 유지
+    assert sorted(r["id"] for r in listed) == [1, 2, 3, 4]  # 열거 경로: 전부 유지
+    assert listed[0]["id"] == 1                     # 순위는 그대로 매겨진다
+
+
 def test_memory_vector_pool_is_independent_of_final_row_limit():
     """벡터 이웃 후보 수는 MYSQL_CANDIDATE_POOL을 따라야 한다 — 최종 선정 개수인
     MYSQL_TOP_N(4)을 그대로 n_results로 넘기면 융합할 재료가 4개로 줄어 랭킹이 나빠진다.

@@ -251,6 +251,39 @@ def ensure_schema_v9() -> None:
         conn.close()
 
 
+def ensure_schema_v10() -> None:
+    """migrate_v10(문서 기반 완료 제안을 complete_action_doc으로 재분류)를 기동 시 보증한다.
+
+    v8과 같은 이유로 런타임 가드가 필요하다 — initdb.d는 기존 볼륨에서 재실행되지 않아
+    compose 마운트만으로는 이미 저장된 행이 그대로 남는다. 남으면 kind=all 조회에
+    evidence.title 없는 행이 섞여 구 데스크톱 제안 패널이 죽는다.
+
+    migrate_v10.sql과 동일한 UPDATE 한 문장이며 재실행 안전(두 번째 실행은 0행).
+    v9(quota)와 달리 실패해도 기동을 막지 않는다 — 렌더링 호환 문제라 서빙 자체를
+    중단시킬 사유는 아니다.
+    """
+    try:
+        conn = get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE memory_suggestions SET kind = 'complete_action_doc'"
+                    " WHERE kind = 'complete_action'"
+                    " AND JSON_UNQUOTE(JSON_EXTRACT(evidence, '$.type')) = 'document'"
+                )
+                if cursor.rowcount:
+                    logger.info("v10 스키마 보증: 문서 기반 제안 %d건 재분류", cursor.rowcount)
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        logger.error(
+            "v10 스키마 보증 실패 — 앱은 계속 기동됩니다"
+            " (문서 기반 완료 제안이 구 클라이언트 렌더링을 깨뜨릴 수 있음)",
+            exc_info=True,
+        )
+
+
 def backfill_dev_user_membership() -> None:
     """DEV_USER_ID가 설정된 경우, project_members row가 없는 기존 프로젝트에 owner 멤버십을 보장.
 

@@ -337,8 +337,19 @@ def _memory_vector_rank_lists(project_id: int, queries: List[str], rows: List[Di
     return rank_lists, hits
 
 
-def _rank_mysql_rows(project_id: int, rows: List[Dict], queries: List[str], limit: int) -> tuple[List[Dict], List[Dict]]:
+def _rank_mysql_rows(
+    project_id: int,
+    rows: List[Dict],
+    queries: List[str],
+    limit: int,
+    apply_floor: bool = True,
+) -> tuple[List[Dict], List[Dict]]:
     """BM25와 memory vector rank를 RRF로 합쳐 MySQL memory rows를 선별한다.
+
+    apply_floor=False면 아래 관련도 threshold를 끄고 순위만 매긴다(limit까지 채움).
+    threshold는 _build_context의 precision을 위한 것인데, 이 함수는 "조건에 맞는 행을
+    열거"하는 게 계약인 query_structured_memory도 같이 쓴다 — 거기서는 약하게라도
+    걸린 행을 잘라내면 목록이 사실과 달라진다(열린 액션 12건 중 1건만 나오는 식).
 
     관련도 threshold: BM25 랭크는 쿼리별 최고점 대비 BM25_RELEVANCE_RATIO 미만인 행을 제외
     (무관한 행이 약한 토큰 중복만으로 순위를 차지해 RRF 점수를 받아가는 것을 방지), 최종
@@ -361,7 +372,7 @@ def _rank_mysql_rows(project_id: int, rows: List[Dict], queries: List[str], limi
     for query in queries:
         scores = _bm25_scores(query, texts)
         top_score = max(scores, default=0.0)
-        floor = top_score * BM25_RELEVANCE_RATIO
+        floor = top_score * BM25_RELEVANCE_RATIO if apply_floor else 0.0
         ranked = [i for i in sorted(range(len(rows)), key=lambda i: -scores[i]) if scores[i] >= floor and scores[i] > 0]
         if ranked:
             rank_lists.append(ranked)
@@ -375,10 +386,12 @@ def _rank_mysql_rows(project_id: int, rows: List[Dict], queries: List[str], limi
         return rows[:limit], vector_hits
 
     fused = _rrf_fuse(rank_lists, weights, len(rows))
-    top_fused = max(fused, default=0.0)
-    floor = top_fused * FUSED_RELEVANCE_RATIO
-    relevant = [i for i in range(len(rows)) if fused[i] >= floor and fused[i] > 0]
-    top = sorted(relevant, key=lambda i: -fused[i])[:limit]
+    if apply_floor:
+        floor = max(fused, default=0.0) * FUSED_RELEVANCE_RATIO
+        candidates = [i for i in range(len(rows)) if fused[i] >= floor and fused[i] > 0]
+    else:
+        candidates = list(range(len(rows)))
+    top = sorted(candidates, key=lambda i: -fused[i])[:limit]
     return [rows[i] for i in top], vector_hits
 
 

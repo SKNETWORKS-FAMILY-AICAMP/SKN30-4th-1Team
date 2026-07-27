@@ -149,7 +149,7 @@ def test_memory_tool_caps_rows_and_preserves_total(monkeypatch):
     monkeypatch.setattr(
         qa_tools.qa_engine,
         "_rank_mysql_rows",
-        lambda project_id, candidates, queries, limit: (candidates[:limit], []),
+        lambda project_id, candidates, queries, limit, **_: (candidates[:limit], []),
     )
 
     content, artifact = query_structured_memory.func(
@@ -176,7 +176,7 @@ def test_memory_tool_tells_the_model_when_rows_were_truncated(monkeypatch):
     monkeypatch.setattr(
         qa_tools.qa_engine,
         "_rank_mysql_rows",
-        lambda project_id, candidates, queries, limit: (candidates[:limit], []),
+        lambda project_id, candidates, queries, limit, **_: (candidates[:limit], []),
     )
 
     content, artifact = query_structured_memory.func(
@@ -195,7 +195,7 @@ def test_memory_tool_does_not_claim_truncation_when_complete(monkeypatch):
     monkeypatch.setattr(
         qa_tools.qa_engine,
         "_rank_mysql_rows",
-        lambda project_id, candidates, queries, limit: (candidates[:limit], []),
+        lambda project_id, candidates, queries, limit, **_: (candidates[:limit], []),
     )
 
     content, artifact = query_structured_memory.func(
@@ -355,7 +355,7 @@ def test_agent_can_combine_multiple_tools(monkeypatch):
     monkeypatch.setattr(
         qa_tools.qa_engine,
         "_rank_mysql_rows",
-        lambda project_id, rows, queries, limit: (rows[:limit], []),
+        lambda project_id, rows, queries, limit, **_: (rows[:limit], []),
     )
     monkeypatch.setattr(qa_tools, "get_project_memory", lambda project_id: "")
     monkeypatch.setattr(

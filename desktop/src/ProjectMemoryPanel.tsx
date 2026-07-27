@@ -322,8 +322,11 @@ function getActionDisplayItems(items: ProjectMemoryItem[]) {
   });
 }
 
-function formatSuggestionTitle(title: string) {
-  const trimmed = title.trim();
+// evidence 스키마는 kind마다 다르고(PR 기반은 title 있음, 문서 기반은 없음) 타입은
+// 서버 응답을 신뢰할 뿐 강제하지 못한다. 여기서 죽으면 제안 패널 전체가 내려가므로
+// (해당 렌더 트리에 ErrorBoundary 없음) undefined는 빈 문자열로 흡수한다.
+function formatSuggestionTitle(title: string | undefined) {
+  const trimmed = title?.trim() ?? "";
 
   return trimmed.length > 56 ? `${trimmed.slice(0, 56).trim()}...` : trimmed;
 }

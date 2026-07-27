@@ -138,7 +138,10 @@ def query_structured_memory(
     ] = None,
     due_within_days: Optional[int] = None,
     overdue: Optional[bool] = None,
-    limit: int = 8,
+    # 기본값을 상한과 일치시킨다 — 모델이 이 인자를 거의 지정하지 않아 기본값이 곧
+    # 실질 상한이었고, MEMORY_TOOL_MAX_ROWS를 올려도 기본 경로엔 닿지 않았다.
+    # 상한을 넘으면 아래에서 잘렸다는 사실을 content에 명시한다.
+    limit: int = MEMORY_TOOL_MAX_ROWS,
 ) -> tuple[str, dict]:
     """List or count project memory using explicit structured conditions.
 
@@ -216,8 +219,11 @@ def query_structured_memory(
     ranked = rows
     vector_hits: list[dict] = []
     if text_query and rows:
+        # apply_floor=False — 이 도구의 계약은 "조건에 맞는 행 열거"라서 순서만 필요하다.
+        # _build_context용 관련도 컷을 그대로 쓰면 명백히 관련 있는 행까지 잘려 목록이
+        # 사실과 달라진다("알림" 질의에 "푸시 알림 연동"이 빠지는 식).
         ranked, vector_hits = qa_engine._rank_mysql_rows(
-            project_id, rows, [text_query], limit
+            project_id, rows, [text_query], limit, apply_floor=False
         )
     ranked = ranked[:limit]
     if ranked:

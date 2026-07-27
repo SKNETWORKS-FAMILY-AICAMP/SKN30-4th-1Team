@@ -58,6 +58,7 @@ services:
       - ./backend/db/migrate_v7.sql:/docker-entrypoint-initdb.d/07_migrate_v7.sql:ro
       - ./backend/db/migrate_v8.sql:/docker-entrypoint-initdb.d/08_migrate_v8.sql:ro
       - ./backend/db/migrate_v9.sql:/docker-entrypoint-initdb.d/09_migrate_v9.sql:ro
+      - ./backend/db/migrate_v10.sql:/docker-entrypoint-initdb.d/10_migrate_v10.sql:ro
     healthcheck:
       # `$$`로 이스케이프해 Compose 보간이 아니라 **컨테이너 안에서** 확장시킨다.
       # `-p${DB_PASSWORD}`로 쓰면 비밀번호가 `docker compose config` 출력과
