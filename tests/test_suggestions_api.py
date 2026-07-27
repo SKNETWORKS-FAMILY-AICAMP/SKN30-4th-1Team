@@ -603,13 +603,12 @@ def test_accept_split_action_creates_open_rows_for_every_remaining_part():
 
     open_insert, done_insert = inserts
     assert "배포 자동화" in open_insert.args[1]
-    assert open_insert.args[1][-1] == "open"
-    assert "completed_at, completion_status" in open_insert.args[0]
+    assert open_insert.args[1][-2:] == ["open", None]  # 상태 open, 상태 근거는 비움
     assert "NULL," in open_insert.args[0]              # 열린 행은 완료 시각 없음
     assert "2026-05-01" in open_insert.args[1]         # 잔여분은 원본 마감일 승계
 
     assert "알림 설정" in done_insert.args[1]
-    assert done_insert.args[1][-1] == "completed"
+    assert done_insert.args[1][-2:] == ["completed", "document"]
     assert "2026-04-13" in done_insert.args[1]         # 완료 시각은 문서 날짜
     assert "2026-05-01" not in done_insert.args[1]     # 완료 행은 마감일 미승계
 

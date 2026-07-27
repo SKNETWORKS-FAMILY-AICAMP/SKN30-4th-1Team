@@ -284,6 +284,92 @@ def test_split_suggestion_is_kept_when_action_content_fits_budget():
     assert [c.args[1][2] for c in _suggestion_inserts(cursor)] == ["split_action"]
 
 
+def test_completion_suggestion_failure_does_not_destroy_indexed_document():
+    """제안 생성 실패가 이미 색인된 문서를 파괴하면 안 된다.
+
+    completions 블록은 status='indexed' 커밋 뒤에 실행되는 부차 단계다. 여기서 예외가
+    새면 _process_upload_locked의 except가 fail_document를 불러 memory 행 DELETE + 파일·
+    벡터 삭제까지 간다 — 제안 하나 실패의 대가로 적재 결과 전체가 사라진다. 바로 위
+    supersede 블록과 동일하게 best-effort로 격리돼 있어야 한다."""
+    from backend.api import upload
+    from backend.pipeline.models import CompletionReport
+
+    cursor = MagicMock()
+    # 리스 fence 검사와 completions SELECT를 한 dict으로 동시에 만족시킨다
+    cursor.fetchone.return_value = {
+        "status": "processing", "processing_token": "tok",
+        "content": "인원 관리 및 알림 로직 구현",
+    }
+    cursor.fetchall.return_value = []
+    cursor.rowcount = 1  # status='indexed' UPDATE의 fence 확인 통과
+    ingest_conn = MagicMock()
+    ingest_conn.cursor.return_value.__enter__.return_value = cursor
+    ingest_conn.cursor.return_value.__exit__.return_value = False
+
+    calls = {"n": 0}
+
+    def fake_get_connection():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ingest_conn          # ingest 본체 — 성공
+        raise RuntimeError("DB 순단")   # completions 블록 — 실패
+
+    reports = [CompletionReport(
+        action_id=1, evidence="일부 완료", fully_complete=False,
+        done_parts=["인원관리"], remaining_parts=["알림"],
+    )]
+
+    with patch("backend.pipeline.ingestor.get_connection", side_effect=fake_get_connection), \
+         patch("backend.pipeline.ingestor.upsert_memory_vectors"), \
+         patch("backend.pipeline.ingestor.get_collection"), \
+         patch("backend.api.upload.extract", return_value=([], reports)), \
+         patch("backend.api.upload.cap_open_actions",
+               return_value=[{"id": 1, "content": "인원 관리 및 알림 로직 구현"}]), \
+         patch("backend.api.upload._fetch_open_actions", return_value=[]), \
+         patch("backend.api.upload.processing_owned", return_value=True), \
+         patch("backend.api.upload.update_project_memory"), \
+         patch("backend.api.upload.fail_document") as mock_fail:
+        upload._process_upload_locked(
+            project_id=1, doc_id=5, old_doc_ids=[], content="본문",
+            filename="2026-04-13.md", date="2026-04-13", doc_type="meeting",
+            file_path="/tmp/x", processing_token="tok",
+        )
+
+    # 재현 조건 확인 — completions 블록까지 도달했고 색인이 이미 확정된 상태여야 한다
+    assert calls["n"] >= 2
+    assert any(
+        "status='indexed'" in str(c.args[0]) for c in cursor.execute.call_args_list
+    )
+    assert not mock_fail.called  # 적재 결과는 그대로 유지된다
+
+
+def test_split_suggestion_is_skipped_when_parts_overlap():
+    """완료·잔여 조각이 겹치면 split 제안을 만들지 않는다.
+
+    겹친 채로 승인되면 그 조각이 open 행과 completed 행으로 동시에 존재하고, 검색이
+    둘 다 반환해 LLM이 모순된 근거를 받는다. 어느 쪽이 맞는지 판단할 근거가 없으므로
+    절단 가드와 같은 방침으로 제안 자체를 생략한다."""
+    from backend.pipeline.ingestor import ingest
+    from backend.pipeline.models import CompletionReport
+
+    conn, cursor = _completion_conn({"content": "인원 관리 및 알림 로직 구현"})
+    reports = [
+        CompletionReport(
+            action_id=1, evidence="일부 완료", fully_complete=False,
+            done_parts=["알림"], remaining_parts=["알림", "인원관리"],
+        ),
+    ]
+    with patch("backend.pipeline.ingestor.get_connection", return_value=conn), \
+         patch("backend.pipeline.ingestor.upsert_memory_vectors"):
+        ingest(
+            project_id=1, doc_id=5, items=[], raw_text="", source="doc.md",
+            date="2026-04-13", doc_type="meeting", completions=reports,
+            open_actions=[{"id": 1, "content": "인원 관리 및 알림 로직 구현"}],
+        )
+
+    assert _suggestion_inserts(cursor) == []
+
+
 def test_suggestion_dedup_key_includes_source_document():
     """중복 방지 키에 근거 문서(doc_id)가 들어간다.
 

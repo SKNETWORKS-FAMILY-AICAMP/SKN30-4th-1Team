@@ -305,13 +305,17 @@ def _apply_accepted_effect(cursor, project_id: int, row: dict) -> None:
                 completed_sql = "%s" if evidence.get("date") else "NOW()"
                 completed_params = [evidence["date"]] if evidence.get("date") else []
                 # 완료 행에는 마감일을 승계하지 않는다 — 마감/지연 조회에 완료된 일이 섞인다.
-                status, due_date = "completed", None
+                status, due_date, status_source = "completed", None, "document"
             else:
                 completed_sql = "NULL"
                 completed_params = []
                 # 잔여분은 아직 열려 있으므로 원본의 마감일을 그대로 승계한다. 승계하지
                 # 않으면 마감이 걸린 묶음 action을 쪼갠 순간 잔여분이 마감 조회에서 빠진다.
-                status, due_date = "open", row.get("memory_due_date")
+                # completion_status_source는 비운다 — 상태가 확정된 행에만 채우는 필드이고
+                # (ingestor가 open 행을 NULL로 넣는 것과 동일), qa_engine이 이 값을
+                # "상태 근거: ..."로 검색 컨텍스트에 노출하므로 열린 행에 값이 있으면
+                # LLM이 미완료 항목을 완료 근거가 있는 것으로 읽는다.
+                status, due_date, status_source = "open", row.get("memory_due_date"), None
             cursor.execute(
                 f"""
                 INSERT INTO memory
@@ -319,7 +323,7 @@ def _apply_accepted_effect(cursor, project_id: int, row: dict) -> None:
                      topic, reason, due_date,
                      completed_at, completion_status, completion_status_source, updated_by)
                 VALUES (%s, %s, %s, 'action', %s, %s, %s, %s, %s, %s, %s,
-                        {completed_sql}, %s, 'document', 'user')
+                        {completed_sql}, %s, %s, 'user')
                 """,
                 # topic/reason은 원본에서 승계 — format_memory_document가 BM25·벡터 입력에
                 # 쓰는 필드라, 비우면 떼어낸 행이 검색에서 주제·근거 신호를 잃는다.
@@ -328,7 +332,7 @@ def _apply_accepted_effect(cursor, project_id: int, row: dict) -> None:
                     content, row.get("memory_owner"), row.get("memory_date"),
                     row.get("memory_source"), row.get("memory_topic"), row.get("memory_reason"),
                     due_date,
-                ] + completed_params + [status],
+                ] + completed_params + [status, status_source],
             )
             return cursor.lastrowid
 

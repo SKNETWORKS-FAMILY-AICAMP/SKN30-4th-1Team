@@ -339,124 +339,152 @@ def ingest(
     # action의 일부만 확인) 완료된 부분만 떼어내는 분할 제안 — 둘 다 사람 승인이 있어야
     # 실제 반영되고, 완료 시점은 이 문서 날짜를 쓴다.
     if completions:
-        # LLM에게 실제로 보여준 action id 집합 — 프롬프트의 "never invent one"은 지시일 뿐
-        # 검증이 아니므로, 반환된 action_id가 이 목록에 있는지 대조한다(PR 경로가
-        # pr_actions.py에서 하는 것과 같은 방어). 호출부가 목록을 안 넘기면 DB 상태
-        # 검사만 적용한다.
-        allowed_action_ids = (
-            {int(a["id"]) for a in open_actions} if open_actions is not None else None
-        )
-        # evidence에 넣을 문서 날짜도 memory 행과 동일하게 정규화 — 무효한 날짜
-        # ("2026-02-30", 한국어 표기 등)가 그대로 저장되면 승인 시 DATETIME 컬럼에
-        # 들어가 strict 모드에서 500 + 롤백, 느슨한 설정에서는 잘못된 완료 시각이 남는다.
-        # None이면 승인 시 NOW() 폴백 경로를 탄다(빈 문자열과 동일 취급).
-        evidence_date = _normalize_date(date)
-        conn = get_connection()
+        # 제안 생성은 적재 성공을 막지 않는 부차 단계다 — 위 supersede 블록과 동일하게
+        # best-effort로 격리한다. 여기서 예외가 새면 호출부(upload._process_upload_locked)의
+        # except가 fail_document를 불러, 이미 status='indexed'로 커밋된 문서의 memory 행·
+        # 파일·벡터를 전부 삭제한다(제안 하나 실패의 대가로 적재 결과를 파괴).
         try:
-            # 항목별로 개별 커밋 — completions 하나(예: LLM이 목록에 없는 action_id를
-            # 잘못 반환해 FK 위반)가 실패해도 같은 문서의 다른 정상 제안까지 같이
-            # 롤백되지 않게 격리한다.
-            for c in completions:
-                if allowed_action_ids is not None and c.action_id not in allowed_action_ids:
-                    logger.warning(
-                        "완료 판정에 없는 action_id 무시(환각 또는 예산 절단분)"
-                        " action_id=%s project_id=%s", c.action_id, project_id,
-                    )
-                    continue
-                try:
-                    with conn.cursor() as cursor:
-                        # 제안 생성 시점의 실제 content를 같이 저장 — 승인 시점에 그 사이
-                        # 다른 제안이 먼저 적용돼 content가 바뀌었는지 대조하기 위함
-                        # (complete_action/split_action 둘 다 — 낡은 제안이 최신 content를
-                        # 잘못 덮어쓰는 것 방지).
-                        # category/completion_status까지 함께 확인 — 목록 조회 이후 상태가
-                        # 바뀌었거나(이미 완료됨) LLM이 decision id를 섞어 반환한 경우를
-                        # 여기서 거른다. 조건에 안 맞으면 제안을 만들지 않는다.
-                        cursor.execute(
-                            "SELECT content FROM memory WHERE id = %s AND project_id = %s"
-                            " AND category = 'action' AND completion_status = 'open'",
-                            (c.action_id, project_id),
+            # LLM에게 실제로 보여준 action id 집합 — 프롬프트의 "never invent one"은 지시일 뿐
+            # 검증이 아니므로, 반환된 action_id가 이 목록에 있는지 대조한다(PR 경로가
+            # pr_actions.py에서 하는 것과 같은 방어). 호출부가 목록을 안 넘기면 DB 상태
+            # 검사만 적용한다.
+            allowed_action_ids = (
+                {int(a["id"]) for a in open_actions} if open_actions is not None else None
+            )
+            # evidence에 넣을 문서 날짜도 memory 행과 동일하게 정규화 — 무효한 날짜
+            # ("2026-02-30", 한국어 표기 등)가 그대로 저장되면 승인 시 DATETIME 컬럼에
+            # 들어가 strict 모드에서 500 + 롤백, 느슨한 설정에서는 잘못된 완료 시각이 남는다.
+            # None이면 승인 시 NOW() 폴백 경로를 탄다(빈 문자열과 동일 취급).
+            evidence_date = _normalize_date(date)
+            conn = get_connection()
+            try:
+                # 항목별로 개별 커밋 — completions 하나(예: LLM이 목록에 없는 action_id를
+                # 잘못 반환해 FK 위반)가 실패해도 같은 문서의 다른 정상 제안까지 같이
+                # 롤백되지 않게 격리한다.
+                for c in completions:
+                    if allowed_action_ids is not None and c.action_id not in allowed_action_ids:
+                        logger.warning(
+                            "완료 판정에 없는 action_id 무시(환각 또는 예산 절단분)"
+                            " action_id=%s project_id=%s", c.action_id, project_id,
                         )
-                        current = cursor.fetchone()
-                        if current is None:
-                            logger.warning(
-                                "완료 판정 대상이 열린 action이 아님 — 제안 생성 안 함"
-                                " action_id=%s project_id=%s", c.action_id, project_id,
+                        continue
+                    try:
+                        with conn.cursor() as cursor:
+                            # 제안 생성 시점의 실제 content를 같이 저장 — 승인 시점에 그 사이
+                            # 다른 제안이 먼저 적용돼 content가 바뀌었는지 대조하기 위함
+                            # (complete_action/split_action 둘 다 — 낡은 제안이 최신 content를
+                            # 잘못 덮어쓰는 것 방지).
+                            # category/completion_status까지 함께 확인 — 목록 조회 이후 상태가
+                            # 바뀌었거나(이미 완료됨) LLM이 decision id를 섞어 반환한 경우를
+                            # 여기서 거른다. 조건에 안 맞으면 제안을 만들지 않는다.
+                            cursor.execute(
+                                "SELECT content FROM memory WHERE id = %s AND project_id = %s"
+                                " AND category = 'action' AND completion_status = 'open'",
+                                (c.action_id, project_id),
                             )
-                            continue
-                        original_content = current["content"]
-
-                        if c.fully_complete:
-                            # PR 기반 complete_action과 별도 kind — evidence 스키마가 달라
-                            # (title/number/url 없음) 구 데스크톱이 evidence.title.trim()에서
-                            # 죽는다. 신규 kind는 레거시 응답에서 제외되므로 데스크톱이
-                            # 대응하기 전까지 안전하게 격리된다.
-                            kind = "complete_action_doc"
-                            evidence = {
-                                "type": "document", "doc_id": doc_id,
-                                "source": source, "date": evidence_date, "quote": c.evidence,
-                                "original_content": original_content,
-                            }
-                            rationale = f"'{source}' 문서가 완료로 보고: {c.evidence}"
-                        else:
-                            if not c.done_parts or not c.remaining_parts:
-                                continue  # 부분 완료인데 분할 근거가 없으면 애매하니 건너뜀
-                            if len(original_content or "") > _OPEN_ACTIONS_ITEM_CHARS:
-                                # 프롬프트에는 앞 _OPEN_ACTIONS_ITEM_CHARS자만 들어갔으므로
-                                # LLM은 이 action의 뒷부분을 본 적이 없다. 그 상태의
-                                # remaining_part를 승인하면 content를 통째로 덮어써
-                                # (suggestion._apply_accepted_effect) 못 본 부분이 소실된다.
-                                # stale 검사는 전체 content끼리 비교라 이 경로를 못 막는다.
-                                # 완료분만 떼는 판단 자체가 근거 없이 이뤄진 것이므로 제안하지 않는다.
+                            current = cursor.fetchone()
+                            if current is None:
                                 logger.warning(
-                                    "action content가 프롬프트 예산으로 잘려 split 제안 생략"
-                                    " action_id=%s project_id=%s len=%s",
-                                    c.action_id, project_id, len(original_content),
+                                    "완료 판정 대상이 열린 action이 아님 — 제안 생성 안 함"
+                                    " action_id=%s project_id=%s", c.action_id, project_id,
                                 )
                                 continue
-                            kind = "split_action"
-                            evidence = {
-                                "type": "document", "doc_id": doc_id,
-                                "source": source, "date": evidence_date, "quote": c.evidence,
-                                "done_parts": c.done_parts, "remaining_parts": c.remaining_parts,
-                                "original_content": original_content,
-                            }
-                            rationale = (
-                                f"'{source}' 문서가 일부만 완료로 보고: {c.evidence}"
-                                f" (완료: {' / '.join(c.done_parts)}"
-                                f" / 남음: {' / '.join(c.remaining_parts)})"
+                            original_content = current["content"]
+
+                            if c.fully_complete:
+                                # PR 기반 complete_action과 별도 kind — evidence 스키마가 달라
+                                # (title/number/url 없음) 구 데스크톱이 evidence.title.trim()에서
+                                # 죽는다. 신규 kind는 레거시 응답에서 제외되므로 데스크톱이
+                                # 대응하기 전까지 안전하게 격리된다.
+                                kind = "complete_action_doc"
+                                evidence = {
+                                    "type": "document", "doc_id": doc_id,
+                                    "source": source, "date": evidence_date, "quote": c.evidence,
+                                    "original_content": original_content,
+                                }
+                                rationale = f"'{source}' 문서가 완료로 보고: {c.evidence}"
+                            else:
+                                if not c.done_parts or not c.remaining_parts:
+                                    continue  # 부분 완료인데 분할 근거가 없으면 애매하니 건너뜀
+                                overlap = set(c.done_parts) & set(c.remaining_parts)
+                                if overlap:
+                                    # 같은 sub-task가 완료·잔여 양쪽에 있으면 승인 시 그 조각이
+                                    # open 행과 completed 행으로 동시에 존재하게 된다. 검색은 둘 다
+                                    # 반환하므로 LLM이 서로 모순되는 근거를 받는다. 어느 쪽이
+                                    # 맞는지 판단할 근거가 없으니 제안하지 않는다(절단 가드와 동일
+                                    # 방침). 표기가 다른 부분 겹침("알림" vs "알림 설정")은 정확
+                                    # 일치가 아니라 여기서 못 걸러진다 — 사람 승인이 그 방어선이다.
+                                    logger.warning(
+                                        "완료/잔여 조각이 겹쳐 split 제안 생략"
+                                        " action_id=%s project_id=%s overlap=%s",
+                                        c.action_id, project_id, sorted(overlap),
+                                    )
+                                    continue
+                                if len(original_content or "") > _OPEN_ACTIONS_ITEM_CHARS:
+                                    # 프롬프트에는 앞 _OPEN_ACTIONS_ITEM_CHARS자만 들어갔으므로
+                                    # LLM은 이 action의 뒷부분을 본 적이 없다. 그 상태의
+                                    # remaining_part를 승인하면 content를 통째로 덮어써
+                                    # (suggestion._apply_accepted_effect) 못 본 부분이 소실된다.
+                                    # stale 검사는 전체 content끼리 비교라 이 경로를 못 막는다.
+                                    # 완료분만 떼는 판단 자체가 근거 없이 이뤄진 것이므로 제안하지 않는다.
+                                    logger.warning(
+                                        "action content가 프롬프트 예산으로 잘려 split 제안 생략"
+                                        " action_id=%s project_id=%s len=%s",
+                                        c.action_id, project_id, len(original_content),
+                                    )
+                                    continue
+                                kind = "split_action"
+                                evidence = {
+                                    "type": "document", "doc_id": doc_id,
+                                    "source": source, "date": evidence_date, "quote": c.evidence,
+                                    "done_parts": c.done_parts, "remaining_parts": c.remaining_parts,
+                                    "original_content": original_content,
+                                }
+                                rationale = (
+                                    f"'{source}' 문서가 일부만 완료로 보고: {c.evidence}"
+                                    f" (완료: {' / '.join(c.done_parts)}"
+                                    f" / 남음: {' / '.join(c.remaining_parts)})"
+                                )
+                            # 중복 방지 키에 근거 문서(doc_id)를 포함한다 — PR 경로(pr_actions)가
+                            # $.number를, supersede 경로가 $.superseding_memory_id를 키에 넣는 것과
+                            # 같은 규칙이다. 문서 경로만 (memory_id, kind)로만 걸러서, 같은 action에
+                            # 대해 다른 문서가 보고한 진행 상황이 앞 제안이 pending인 동안 통째로
+                            # 버려졌다(0행 INSERT라 예외도 로그도 없음). 문서는 이미 indexed라
+                            # 재처리되지 않으므로 그 판정은 영구 소실이었다. 같은 문서를 재처리할
+                            # 때의 멱등성은 doc_id가 같아 그대로 유지된다.
+                            cursor.execute(
+                                """
+                                INSERT INTO memory_suggestions
+                                    (project_id, memory_id, kind, evidence, rationale, confidence, status)
+                                SELECT %s, %s, %s, %s, %s, 'high', 'pending'
+                                FROM DUAL
+                                WHERE NOT EXISTS (
+                                    SELECT 1 FROM memory_suggestions
+                                    WHERE memory_id = %s AND kind = %s AND status = 'pending'
+                                      AND CAST(JSON_UNQUOTE(JSON_EXTRACT(evidence, '$.doc_id')) AS UNSIGNED) = %s
+                                )
+                                """,
+                                (
+                                    project_id, c.action_id, kind,
+                                    json.dumps(evidence, ensure_ascii=False), rationale,
+                                    c.action_id, kind, doc_id,
+                                ),
                             )
-                        # 중복 방지 키에 근거 문서(doc_id)를 포함한다 — PR 경로(pr_actions)가
-                        # $.number를, supersede 경로가 $.superseding_memory_id를 키에 넣는 것과
-                        # 같은 규칙이다. 문서 경로만 (memory_id, kind)로만 걸러서, 같은 action에
-                        # 대해 다른 문서가 보고한 진행 상황이 앞 제안이 pending인 동안 통째로
-                        # 버려졌다(0행 INSERT라 예외도 로그도 없음). 문서는 이미 indexed라
-                        # 재처리되지 않으므로 그 판정은 영구 소실이었다. 같은 문서를 재처리할
-                        # 때의 멱등성은 doc_id가 같아 그대로 유지된다.
-                        cursor.execute(
-                            """
-                            INSERT INTO memory_suggestions
-                                (project_id, memory_id, kind, evidence, rationale, confidence, status)
-                            SELECT %s, %s, %s, %s, %s, 'high', 'pending'
-                            FROM DUAL
-                            WHERE NOT EXISTS (
-                                SELECT 1 FROM memory_suggestions
-                                WHERE memory_id = %s AND kind = %s AND status = 'pending'
-                                  AND CAST(JSON_UNQUOTE(JSON_EXTRACT(evidence, '$.doc_id')) AS UNSIGNED) = %s
-                            )
-                            """,
-                            (
-                                project_id, c.action_id, kind,
-                                json.dumps(evidence, ensure_ascii=False), rationale,
-                                c.action_id, kind, doc_id,
-                            ),
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
+                        logger.warning(
+                            "문서 기반 완료 제안 저장 실패(이 action만 건너뜀) action_id=%s project_id=%s",
+                            c.action_id, project_id, exc_info=True,
                         )
-                    conn.commit()
-                except Exception:
-                    conn.rollback()
-                    logger.warning(
-                        "문서 기반 완료 제안 저장 실패(이 action만 건너뜀) action_id=%s project_id=%s",
-                        c.action_id, project_id, exc_info=True,
-                    )
-        finally:
-            conn.close()
+            finally:
+                conn.close()
+        except Exception:
+            # exc_info=True — 이 가드의 존재 이유가 "예상 못 한 실패로부터 적재 결과를
+            # 지키는 것"이라, 원인을 남기지 않으면 왜 제안이 안 생겼는지 추적할 수 없다.
+            # 안쪽 per-item 핸들러와도 동일한 수준으로 맞춘다.
+            logger.warning(
+                "document_completion_suggestion_failed",
+                extra={"project_id": project_id, "code": "DOC_COMPLETION_SUGGESTION_FAILED"},
+                exc_info=True,
+            )
