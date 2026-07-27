@@ -358,3 +358,58 @@ def test_cancel_compensation_does_not_consume_base_exception(signal_type):
     with patch.object(quota_module, "fail_document", side_effect=signal_type()):
         with pytest.raises(signal_type):
             quota_module.compensate_cancelled_document(45)
+
+
+def _cleanup_conns(doc_status: str):
+    """transfer_document_to_cleanup용 get_connection 목록(snapshot conn, 본 conn)."""
+    snap_cur = MagicMock()
+    snap_cur.fetchone.return_value = {"project_id": 1, "uploaded_by": 7}
+    snap = MagicMock()
+    snap.cursor.return_value.__enter__.return_value = snap_cur
+    snap.cursor.return_value.__exit__.return_value = False
+
+    cur = MagicMock()
+    cur.fetchone.side_effect = [
+        {"id": 7},                       # 사용자 행 잠금
+        {"id": 1},                       # 프로젝트 행 잠금
+        {                                # 대상 문서
+            "id": 5, "project_id": 1, "status": doc_status,
+            "uploaded_by": 7, "file_path": None, "size_bytes": 0,
+            "processing_token": None,
+        },
+    ]
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    conn.cursor.return_value.__exit__.return_value = False
+    return [snap, conn], cur
+
+
+def test_user_delete_removes_failed_document():
+    """failed 문서도 사용자 삭제로 지워져야 한다.
+
+    delete_document는 204를 돌려주는데 행이 남아 재시도해도 지울 수 없었다. LLM 실패로
+    생긴 failed 문서가 목록에 영구히 쌓이고 정리할 방법이 없다."""
+    conns, cur = _cleanup_conns("failed")
+    with patch.object(quota_module, "get_connection", side_effect=conns):
+        project_id = quota_module.transfer_document_to_cleanup(
+            5, "DOCUMENT_DELETED", delete_row=True
+        )
+
+    assert project_id == 1
+    deletes = [c.args[0] for c in cur.execute.call_args_list if c.args[0].startswith("DELETE FROM documents")]
+    assert deletes == ["DELETE FROM documents WHERE id=%s"]  # status 필터로 다시 막지 않는다
+
+
+def test_failure_path_still_skips_already_failed_document():
+    """실패 처리 경로는 이미 failed인 문서를 다시 정리 큐에 넣지 않는다(멱등성).
+
+    위 수정이 이 구분까지 지우지 않았는지 고정한다 — 지우면 fail_document가 반복 호출될
+    때마다 cleanup 행과 파일 삭제를 다시 시도한다."""
+    conns, cur = _cleanup_conns("failed")
+    with patch.object(quota_module, "get_connection", side_effect=conns):
+        project_id = quota_module.transfer_document_to_cleanup(5, "UPLOAD_INGEST_FAILED")
+
+    assert project_id is None
+    assert not any(
+        "storage_cleanup_pending" in c.args[0] for c in cur.execute.call_args_list
+    )
