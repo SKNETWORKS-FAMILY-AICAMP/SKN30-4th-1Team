@@ -138,6 +138,7 @@ import {
   type SuggestionMinConfidence,
   type ThemeSetting,
 } from "./settings";
+import { WorkspacePageLayout } from "./WorkspacePageLayout";
 import type {
   Attachment,
   ChatSession,
@@ -524,7 +525,7 @@ const SIDEBAR_WIDTH_STORAGE_KEY = "paim.sidebarWidth.v1";
 const PROJECT_PANEL_COLLAPSED_STORAGE_KEY = "paim.projectPanelCollapsed.v2";
 const PROJECT_PANEL_WIDTH_STORAGE_KEY = "paim.projectPanelWidth.v1";
 const ZOOM_STORAGE_KEY = "paim.zoomScale.v1";
-const DEFAULT_SIDEBAR_WIDTH = 252;
+const DEFAULT_SIDEBAR_WIDTH = 264;
 const COLLAPSED_SIDEBAR_WIDTH = 52;
 const MIN_SIDEBAR_WIDTH = 232;
 const MAX_SIDEBAR_WIDTH = 332;
@@ -7363,8 +7364,11 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
   function renderMembersPage() {
     return (
-      <section className="members-page" aria-label={t("프로젝트 멤버 관리")}>
-        <div className="members-page-content">
+      <WorkspacePageLayout
+        ariaLabel={t("프로젝트 멤버 관리")}
+        className="members-page"
+        contentClassName="members-page-content"
+      >
           <header className="settings-header members-page-header">
             <Button
               className="settings-back-button"
@@ -7397,15 +7401,17 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
               title={t("로그인된 서버 프로젝트에서만 멤버를 관리할 수 있습니다.")}
             />
           )}
-        </div>
-      </section>
+      </WorkspacePageLayout>
     );
   }
 
   function renderProfilePage() {
     return (
-      <section className="profile-page" aria-label={t("프로필")}>
-        <div className="profile-content">
+      <WorkspacePageLayout
+        ariaLabel={t("프로필")}
+        className="profile-page"
+        contentClassName="profile-content"
+      >
           <header className="settings-header">
             <Button
               className="settings-back-button"
@@ -7458,8 +7464,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
               title={t("오프라인 또는 인증이 없는 개발 서버를 사용 중입니다.")}
             />
           )}
-        </div>
-      </section>
+      </WorkspacePageLayout>
     );
   }
 
@@ -7473,8 +7478,11 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       getProjectStorageKey(authUser, canLogout, draftServerUrl) !== projectStorageKey;
 
     return (
-      <section className="settings-page" aria-label={t("설정")}>
-        <div className="settings-content">
+      <WorkspacePageLayout
+        ariaLabel={t("설정")}
+        className="settings-page"
+        contentClassName="settings-content"
+      >
           <header className="settings-header">
             <Button
               className="settings-back-button"
@@ -7711,8 +7719,87 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
               variant="secondary"
             />
           </section>
+      </WorkspacePageLayout>
+    );
+  }
+
+  function renderProjectHomeMemorySummary() {
+    if (!selectedProject) {
+      return null;
+    }
+
+    return (
+      <>
+        <div>
+          <p className="project-home-slots-title">{t("추출될 항목")}</p>
+          <p className="project-home-slots-hint">
+            {canOpenProjectMemory
+              ? t("서버 프로젝트 메모리 개수를 표시합니다")
+              : t("자료 업로드 후 서버 메모리 개수를 표시합니다")}
+          </p>
         </div>
-      </section>
+        <div className="project-home-slot-list">
+          <div
+            className="project-home-slot"
+            data-kind="action"
+            data-state={getProjectMemorySlotState(
+              canOpenProjectMemory,
+              selectedProjectMemorySlotCounts.action,
+            )}
+          >
+            <Zap size={13} />
+            <span>{t("액션")}</span>
+            <strong>
+              {canOpenProjectMemory ? selectedProjectMemorySlotCounts.action : "—"}
+            </strong>
+          </div>
+          <div
+            className="project-home-slot"
+            data-kind="decision"
+            data-state={getProjectMemorySlotState(
+              canOpenProjectMemory,
+              selectedProjectMemorySlotCounts.decision,
+            )}
+          >
+            <Check size={13} />
+            <span>{t("결정")}</span>
+            <strong>
+              {canOpenProjectMemory ? selectedProjectMemorySlotCounts.decision : "—"}
+            </strong>
+          </div>
+          <div
+            className="project-home-slot"
+            data-kind="issue"
+            data-state={getProjectMemorySlotState(
+              canOpenProjectMemory,
+              selectedProjectMemorySlotCounts.issue,
+            )}
+          >
+            <AlertTriangle size={13} />
+            <span>{t("이슈")}</span>
+            <strong>
+              {canOpenProjectMemory ? selectedProjectMemorySlotCounts.issue : "—"}
+            </strong>
+          </div>
+          <div
+            className="project-home-slot"
+            data-kind="risk"
+            data-state={getProjectMemorySlotState(
+              canOpenProjectMemory,
+              selectedProjectMemorySlotCounts.risk,
+            )}
+          >
+            <Flag size={13} />
+            <span>{t("리스크")}</span>
+            <strong>
+              {canOpenProjectMemory ? selectedProjectMemorySlotCounts.risk : "—"}
+            </strong>
+          </div>
+        </div>
+        <p className="project-home-slots-foot">
+          {t("업로드와 분석 결과가 서버에 반영되면 자동으로 갱신됩니다.")}
+        </p>
+      </>
     );
   }
 
@@ -8218,20 +8305,23 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         {showNoticeStack ? (
           <div className="notice-stack" ref={noticeStackRef}>
             {serverStatus === "offline" ? (
-              <Banner
-                className="notice"
-                container="card"
-                endContent={
-                  <Button
-                    label={t("다시 연결")}
-                    onClick={() => void syncProjectsWithServer(true)}
-                    size="sm"
-                    variant="primary"
-                  />
-                }
-                status="error"
-                title={t("PaiM 서버에 연결할 수 없습니다 — 마지막 저장 상태를 표시 중")}
-              />
+              <div
+                aria-live="polite"
+                className="app-connection-status notice"
+                data-state="offline"
+                role="status"
+              >
+                <span className="app-connection-status-copy">
+                  <span aria-hidden="true" className="app-connection-status-dot" />
+                  <span>{t("오프라인 · 저장된 프로젝트 사용 중")}</span>
+                </span>
+                <Button
+                  label={t("다시 연결")}
+                  onClick={() => void syncProjectsWithServer(true)}
+                  size="sm"
+                  variant="ghost"
+                />
+              </div>
             ) : null}
             {showBackgroundQueryNotice && pendingQueryProject && pendingQuerySession ? (
               <Banner
@@ -8560,16 +8650,21 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
           </>
         ) : selectedProject ? (
           <>
-            <section
+            <WorkspacePageLayout
+              ariaLabel={t("프로젝트 시작 화면")}
+              aside={renderProjectHomeMemorySummary()}
+              asideAriaLabel={t("추출될 항목")}
+              asideClassName="project-home-slots"
               className="project-home"
-              data-drop-zone="project-files"
-              aria-label={t("프로젝트 시작 화면")}
+              contentClassName="project-home-main-content"
+              layoutClassName="project-home-content"
+              mainClassName="project-home-main"
+              sectionProps={{
+                "data-context-ready": hasProjectHomeContext ? "true" : "false",
+                "data-drop-zone": "project-files",
+                "data-stage": "context",
+              }}
             >
-              <div
-                className="project-home-content"
-                data-has-sources={selectedProjectFileCount > 0 ? "true" : "false"}
-              >
-                <div className="project-home-main">
                   <div className="project-home-name-row">
                     <TextInput
                       className="project-home-name"
@@ -8632,32 +8727,50 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                     />
                     <Pencil aria-hidden="true" className="project-home-name-edit" size={15} />
                   </div>
-                  <p className="project-home-subtitle">
-                    {selectedProjectFileCount > 0
-                      ? t("{count}개 자료가 연결되었습니다", { count: selectedProjectFileCount })
-                      : t("자료를 추가하거나 설명만으로 바로 대화를 시작하세요")}
-                  </p>
-                  <TextArea
-                    className="project-home-description"
-                    isDisabled={!canMutateSelectedProject}
-                    isLabelHidden
-                    label={t("프로젝트 설명")}
-                    onChange={(nextDescription) => {
-                      updateProject(selectedProject.id, (project) => ({
-                        ...project,
-                        description: nextDescription,
-                      }));
-                    }}
-                    placeholder={t("프로젝트 설명을 적어두면 PaiM이 맥락을 잡는 데 도움이 됩니다.")}
-                    rows={2}
-                    value={selectedProject.description ?? ""}
-                    width="100%"
-                  />
+                  <ol className="project-home-steps" aria-label={t("프로젝트 시작 단계")}>
+                    <li aria-current="step" data-state="current">
+                      <span className="project-home-step-number">1</span>
+                      <span className="project-home-step-label">{t("맥락 추가")}</span>
+                    </li>
+                    <li data-state="upcoming">
+                      <span className="project-home-step-number">2</span>
+                      <span className="project-home-step-label">{t("분석")}</span>
+                    </li>
+                    <li data-state="upcoming">
+                      <span className="project-home-step-number">3</span>
+                      <span className="project-home-step-label">{t("첫 질문")}</span>
+                    </li>
+                  </ol>
 
-                  <div
-                    className="project-home-canvas"
-                    data-state={selectedProjectFileCount > 0 ? "filled" : "empty"}
-                  >
+                  <section className="project-home-section">
+                    <h2>{t("프로젝트 설명")}</h2>
+                    <TextArea
+                      className="project-home-description"
+                      isDisabled={!canMutateSelectedProject}
+                      isLabelHidden
+                      label={t("프로젝트 설명")}
+                      onChange={(nextDescription) => {
+                        updateProject(selectedProject.id, (project) => ({
+                          ...project,
+                          description: nextDescription,
+                        }));
+                      }}
+                      placeholder={t("프로젝트 설명을 적어두면 PaiM이 맥락을 잡는 데 도움이 됩니다.")}
+                      rows={2}
+                      value={selectedProject.description ?? ""}
+                      width="100%"
+                    />
+                  </section>
+
+                  <section className="project-home-section project-home-context-section">
+                    <header className="project-home-section-header">
+                      <h2>{t("프로젝트 맥락 추가")}</h2>
+                      <p>{t("회의록, README, PDF, 스펙 문서 등 관련 자료를 추가해 주세요.")}</p>
+                    </header>
+                    <div
+                      className="project-home-canvas"
+                      data-state={selectedProjectFileCount > 0 ? "filled" : "empty"}
+                    >
                     {selectedProjectFileCount > 0 ? (
                       <div
                         aria-label={t("프로젝트 자료")}
@@ -8759,13 +8872,14 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                       </div>
                     ) : (
                       <div className="project-home-canvas-empty">
-                        <div className="project-home-paper-stack" aria-hidden="true">
-                          <span />
-                          <span />
-                          <span />
-                        </div>
-                        <h2>{t("자료를 여기에 끌어다 놓으세요")}</h2>
-                        <p>{t("회의록, README, PDF, 스펙 문서를 읽고 프로젝트 맥락을 정리합니다")}</p>
+                        <FileText
+                          aria-hidden="true"
+                          className="project-home-drop-icon"
+                          size={30}
+                          strokeWidth={1.6}
+                        />
+                        <h3>{t("자료를 추가해 프로젝트 맥락을 만드세요")}</h3>
+                        <p>{t("파일을 드래그하거나 아래 버튼을 이용해 추가할 수 있습니다.")}</p>
                         <div className="project-home-picker-row">
                           <Button
                             className="project-home-picker"
@@ -8788,7 +8902,8 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                         </div>
                       </div>
                     )}
-                  </div>
+                    </div>
+                  </section>
 
                   <div className="project-home-footer">
                     <p
@@ -8823,84 +8938,15 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                         }
                         size="sm"
                         variant="primary"
-                      />
+                      >
+                        <span className="project-home-primary-content">
+                          <span>{isSending ? t("분석 중") : t("분석 시작")}</span>
+                          <ChevronRight aria-hidden="true" size={15} />
+                        </span>
+                      </Button>
                     </div>
                   </div>
-                </div>
-
-                <aside className="project-home-slots" aria-label={t("추출될 항목")}>
-                  <div>
-                    <p className="project-home-slots-title">{t("추출될 항목")}</p>
-                    <p className="project-home-slots-hint">
-                      {canOpenProjectMemory
-                        ? t("서버 프로젝트 메모리 개수를 표시합니다")
-                        : t("자료 업로드 후 서버 메모리 개수를 표시합니다")}
-                    </p>
-                  </div>
-                  <div className="project-home-slot-list">
-                    <div
-                      className="project-home-slot"
-                      data-kind="action"
-                      data-state={getProjectMemorySlotState(
-                        canOpenProjectMemory,
-                        selectedProjectMemorySlotCounts.action,
-                      )}
-                    >
-                      <Zap size={13} />
-                      <span>{t("액션")}</span>
-                      <strong>
-                        {canOpenProjectMemory ? selectedProjectMemorySlotCounts.action : "—"}
-                      </strong>
-                    </div>
-                    <div
-                      className="project-home-slot"
-                      data-kind="decision"
-                      data-state={getProjectMemorySlotState(
-                        canOpenProjectMemory,
-                        selectedProjectMemorySlotCounts.decision,
-                      )}
-                    >
-                      <Check size={13} />
-                      <span>{t("결정")}</span>
-                      <strong>
-                        {canOpenProjectMemory ? selectedProjectMemorySlotCounts.decision : "—"}
-                      </strong>
-                    </div>
-                    <div
-                      className="project-home-slot"
-                      data-kind="issue"
-                      data-state={getProjectMemorySlotState(
-                        canOpenProjectMemory,
-                        selectedProjectMemorySlotCounts.issue,
-                      )}
-                    >
-                      <AlertTriangle size={13} />
-                      <span>{t("이슈")}</span>
-                      <strong>
-                        {canOpenProjectMemory ? selectedProjectMemorySlotCounts.issue : "—"}
-                      </strong>
-                    </div>
-                    <div
-                      className="project-home-slot"
-                      data-kind="risk"
-                      data-state={getProjectMemorySlotState(
-                        canOpenProjectMemory,
-                        selectedProjectMemorySlotCounts.risk,
-                      )}
-                    >
-                      <Flag size={13} />
-                      <span>{t("리스크")}</span>
-                      <strong>
-                        {canOpenProjectMemory ? selectedProjectMemorySlotCounts.risk : "—"}
-                      </strong>
-                    </div>
-                  </div>
-                  <p className="project-home-slots-foot">
-                    {t("업로드와 분석 결과가 서버에 반영되면 자동으로 갱신됩니다.")}
-                  </p>
-                </aside>
-              </div>
-            </section>
+            </WorkspacePageLayout>
           </>
         ) : (
           <section className="project-start" aria-labelledby="project-start-title">
