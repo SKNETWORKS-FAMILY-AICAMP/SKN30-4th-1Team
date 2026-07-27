@@ -142,10 +142,14 @@ literal sentence as evidence.
   percentage (e.g. "80% 진행됐습니다").
 - If an item bundles multiple sub-tasks (e.g. "X 기능 및 Y 로직 구현") and the text
   confirms only some of them done while another part remains in-progress or unmentioned,
-  do NOT set fully_complete=true. Instead set fully_complete=false and fill done_part
-  (the confirmed-done sub-task, in the action's own words) and remaining_part (the
-  sub-task that is not yet confirmed done, in the action's own words) — this splits the
-  item so the finished part is recorded without prematurely closing the rest.
+  do NOT set fully_complete=true. Instead set fully_complete=false and split the item
+  into its sub-tasks: put every confirmed-done sub-task in done_parts and every
+  not-yet-confirmed one in remaining_parts, one sub-task per entry, in the action's own
+  words. This records the finished parts without prematurely closing the rest.
+  Break the item down as far as it actually names separate sub-tasks — an item bundling
+  three (e.g. "A 화면, B 설정, C 자동화") with only B done becomes done_parts=["B 설정"]
+  and remaining_parts=["A 화면", "C 자동화"], not one lumped remaining entry.
+  Together the two lists must cover the whole item and must not repeat the same sub-task.
   The text may name a sub-task with different wording than the item's own text (e.g.
   item says "알림 로직 구현", text says "알림은 푸시 연동 중입니다" — that is the same
   sub-task, still open).

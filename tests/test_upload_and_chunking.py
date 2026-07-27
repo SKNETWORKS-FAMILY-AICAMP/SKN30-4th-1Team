@@ -128,7 +128,7 @@ def test_dedup_completions_later_report_wins_even_if_less_complete():
     )
     later_precise = CompletionReport(
         action_id=1, evidence="인원관리는 완료, 알림은 진행중", fully_complete=False,
-        done_part="인원관리", remaining_part="알림",
+        done_parts=["인원관리"], remaining_parts=["알림"],
     )
     result = _dedup_completions([early_optimistic, later_precise])
     assert len(result) == 1
@@ -164,7 +164,7 @@ def test_full_completion_is_stored_as_complete_action_doc_kind():
         CompletionReport(action_id=1, evidence="완료 보고", fully_complete=True),
         CompletionReport(
             action_id=2, evidence="일부 완료", fully_complete=False,
-            done_part="인원관리", remaining_part="알림",
+            done_parts=["인원관리"], remaining_parts=["알림"],
         ),
     ]
     with patch("backend.pipeline.ingestor.get_connection", return_value=conn), \
@@ -241,7 +241,7 @@ def test_split_suggestion_is_skipped_when_action_content_was_truncated():
     reports = [
         CompletionReport(
             action_id=1, evidence="일부 완료", fully_complete=False,
-            done_part="앞부분", remaining_part="뒷부분",
+            done_parts=["앞부분"], remaining_parts=["뒷부분"],
         ),
         CompletionReport(action_id=1, evidence="전부 완료", fully_complete=True),
     ]
@@ -270,7 +270,7 @@ def test_split_suggestion_is_kept_when_action_content_fits_budget():
     reports = [
         CompletionReport(
             action_id=1, evidence="일부 완료", fully_complete=False,
-            done_part="앞부분", remaining_part="뒷부분",
+            done_parts=["앞부분"], remaining_parts=["뒷부분"],
         ),
     ]
     with patch("backend.pipeline.ingestor.get_connection", return_value=conn), \
@@ -282,6 +282,36 @@ def test_split_suggestion_is_kept_when_action_content_fits_budget():
         )
 
     assert [c.args[1][2] for c in _suggestion_inserts(cursor)] == ["split_action"]
+
+
+def test_suggestion_dedup_key_includes_source_document():
+    """중복 방지 키에 근거 문서(doc_id)가 들어간다.
+
+    빠져 있으면 (memory_id, kind)만으로 걸러져, 같은 action에 대해 다른 문서가 보고한
+    진행 상황이 앞 제안이 pending인 동안 0행 INSERT로 조용히 사라진다(예외도 로그도
+    없음). 문서는 이미 indexed라 재처리되지 않으므로 그 판정은 영구 소실이다.
+    PR 경로($.number)·supersede 경로($.superseding_memory_id)와 같은 규칙."""
+    from backend.pipeline.ingestor import ingest
+    from backend.pipeline.models import CompletionReport
+
+    conn, cursor = _completion_conn({"content": "인원 관리 및 알림 로직 구현"})
+    reports = [
+        CompletionReport(
+            action_id=1, evidence="일부 완료", fully_complete=False,
+            done_parts=["인원관리"], remaining_parts=["알림"],
+        ),
+    ]
+    with patch("backend.pipeline.ingestor.get_connection", return_value=conn), \
+         patch("backend.pipeline.ingestor.upsert_memory_vectors"):
+        ingest(
+            project_id=1, doc_id=9, items=[], raw_text="", source="2026-04-20.md",
+            date="2026-04-20", doc_type="meeting", completions=reports,
+            open_actions=[{"id": 1, "content": "인원 관리 및 알림 로직 구현"}],
+        )
+
+    insert = _suggestion_inserts(cursor)[0]
+    assert "JSON_EXTRACT(evidence, '$.doc_id')" in insert.args[0]
+    assert insert.args[1][-1] == 9  # 중복 검사에 이 문서의 doc_id가 실제로 바인딩된다
 
 
 def test_completion_targeting_non_open_action_is_dropped():
@@ -367,7 +397,7 @@ def test_process_upload_wires_capped_open_actions_through_to_ingest():
         CompletionReport(action_id=1, evidence="전체 완료", fully_complete=True),
         CompletionReport(
             action_id=2, evidence="일부 완료", fully_complete=False,
-            done_part="일부", remaining_part="나머지",
+            done_parts=["일부"], remaining_parts=["나머지"],
         ),
         CompletionReport(action_id=999, evidence="목록 밖 id", fully_complete=True),
         # 51~59는 원본 open_actions(59개)엔 있지만 상한(50)엔 잘려나간 구간. extract가

@@ -39,11 +39,11 @@ def _suggestion_row(status="pending", completed_at=None):
     }
 
 
-def _split_action_row(status="pending"):
-    evidence = (
+def _split_action_row(status="pending", evidence=None):
+    evidence = evidence or (
         '{"type":"document","doc_id":5,"source":"2026-04-13.md","date":"2026-04-13",'
-        '"quote":"인원관리는 완료, 알림은 진행중","done_part":"인원 관리 로직 완료",'
-        '"remaining_part":"알림 로직 구현","original_content":"인원 관리 및 알림 로직 구현"}'
+        '"quote":"인원관리는 완료, 알림은 진행중","done_parts":["인원 관리 로직 완료"],'
+        '"remaining_parts":["알림 로직 구현"],"original_content":"인원 관리 및 알림 로직 구현"}'
     )
     return {
         "id": 9,
@@ -541,7 +541,10 @@ def test_accept_split_action_copies_topic_and_reason_but_not_due_date():
     """분리된 완료 행은 원본의 topic/reason을 승계한다 — format_memory_document가
     BM25·벡터 입력으로 쓰는 필드라 비면 검색에서 주제·근거 신호를 잃는다.
     due_date는 승계하지 않는다: 새 행은 완료 상태라 마감 조회에 섞이면 안 된다."""
-    row = {**_split_action_row(), "memory_topic": "알림", "memory_reason": "QA 요청"}
+    row = {
+        **_split_action_row(), "memory_topic": "알림", "memory_reason": "QA 요청",
+        "memory_due_date": "2026-05-01",
+    }
     updated = {**row, "status": "accepted", "resolved_at": "2026-07-02 11:00:00"}
     locked = {"content": "인원 관리 및 알림 로직 구현", "completed_at": None}
     conn, cur = _make_conn(fetchone=[row, locked, updated])
@@ -559,7 +562,88 @@ def test_accept_split_action_copies_topic_and_reason_but_not_due_date():
     assert "topic" in insert_call.args[0] and "reason" in insert_call.args[0]
     assert "알림" in insert_call.args[1]
     assert "QA 요청" in insert_call.args[1]
-    assert "due_date" not in insert_call.args[0]
+    # 완료 행에는 원본 마감일이 실리지 않는다(컬럼은 있고 값이 None)
+    assert "2026-05-01" not in insert_call.args[1]
+
+
+def test_accept_split_action_creates_open_rows_for_every_remaining_part():
+    """N분할: 잔여분이 여러 개면 원본은 첫 잔여분만 갖고, 나머지 잔여분은 각각 열린
+    행으로 새로 만든다. 완료분도 각각 별도 completed 행이 된다 — 2분할 시절처럼
+    잔여분을 한 덩어리로 남기면 다음 부분 완료 때 또 통째로 덮어써야 한다."""
+    evidence = (
+        '{"type":"document","doc_id":5,"source":"2026-04-13.md","date":"2026-04-13",'
+        '"quote":"알림 설정 완료","done_parts":["알림 설정"],'
+        '"remaining_parts":["인원 관리 화면","배포 자동화"],'
+        '"original_content":"인원 관리 화면, 알림 설정, 배포 자동화를 완료한다"}'
+    )
+    row = {**_split_action_row(evidence=evidence), "memory_due_date": "2026-05-01"}
+    updated = {**row, "status": "accepted", "resolved_at": "2026-07-02 11:00:00"}
+    locked = {
+        "content": "인원 관리 화면, 알림 설정, 배포 자동화를 완료한다", "completed_at": None,
+    }
+    conn, cur = _make_conn(fetchone=[row, locked, updated])
+    cur.lastrowid = 55
+    with patch("backend.api.suggestion.require_project_access"), \
+         patch("backend.api.suggestion.get_connection", return_value=conn), \
+         patch("backend.retriever.memory_vector.upsert_memory_vectors"):
+        resp = _client.post("/api/v1/projects/1/suggestions/9/accept")
+
+    assert resp.status_code == 200
+    rewrite = next(
+        c for c in cur.execute.call_args_list
+        if c.args[0].startswith("UPDATE memory SET content")
+    )
+    assert rewrite.args[1][0] == "인원 관리 화면"  # 원본은 첫 잔여분만 남고 열린 채 유지
+
+    inserts = [
+        c for c in cur.execute.call_args_list
+        if "INSERT INTO memory" in c.args[0] and "category" in c.args[0]
+    ]
+    assert len(inserts) == 2  # 남은 잔여분 1개 + 완료분 1개
+
+    open_insert, done_insert = inserts
+    assert "배포 자동화" in open_insert.args[1]
+    assert open_insert.args[1][-1] == "open"
+    assert "completed_at, completion_status" in open_insert.args[0]
+    assert "NULL," in open_insert.args[0]              # 열린 행은 완료 시각 없음
+    assert "2026-05-01" in open_insert.args[1]         # 잔여분은 원본 마감일 승계
+
+    assert "알림 설정" in done_insert.args[1]
+    assert done_insert.args[1][-1] == "completed"
+    assert "2026-04-13" in done_insert.args[1]         # 완료 시각은 문서 날짜
+    assert "2026-05-01" not in done_insert.args[1]     # 완료 행은 마감일 미승계
+
+
+def test_accept_split_action_accepts_legacy_singular_evidence():
+    """N분할 이전에 만들어져 아직 pending인 제안은 evidence가 단수 필드다. 그대로
+    승인 가능해야 한다 — 못 읽으면 이미 쌓인 제안이 전부 400으로 죽는다."""
+    evidence = (
+        '{"type":"document","doc_id":5,"source":"2026-04-13.md","date":"2026-04-13",'
+        '"quote":"인원관리는 완료","done_part":"인원 관리 로직 완료",'
+        '"remaining_part":"알림 로직 구현","original_content":"인원 관리 및 알림 로직 구현"}'
+    )
+    row = _split_action_row(evidence=evidence)
+    updated = {**row, "status": "accepted", "resolved_at": "2026-07-02 11:00:00"}
+    locked = {"content": "인원 관리 및 알림 로직 구현", "completed_at": None}
+    conn, cur = _make_conn(fetchone=[row, locked, updated])
+    cur.lastrowid = 55
+    with patch("backend.api.suggestion.require_project_access"), \
+         patch("backend.api.suggestion.get_connection", return_value=conn), \
+         patch("backend.retriever.memory_vector.upsert_memory_vectors"):
+        resp = _client.post("/api/v1/projects/1/suggestions/9/accept")
+
+    assert resp.status_code == 200
+    rewrite = next(
+        c for c in cur.execute.call_args_list
+        if c.args[0].startswith("UPDATE memory SET content")
+    )
+    assert rewrite.args[1][0] == "알림 로직 구현"
+    inserts = [
+        c for c in cur.execute.call_args_list
+        if "INSERT INTO memory" in c.args[0] and "category" in c.args[0]
+    ]
+    assert len(inserts) == 1
+    assert "인원 관리 로직 완료" in inserts[0].args[1]
 
 
 def test_accept_split_action_on_completed_action_is_409():

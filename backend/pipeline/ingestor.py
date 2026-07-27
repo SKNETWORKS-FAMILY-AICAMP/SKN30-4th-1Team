@@ -399,7 +399,7 @@ def ingest(
                             }
                             rationale = f"'{source}' 문서가 완료로 보고: {c.evidence}"
                         else:
-                            if not c.done_part or not c.remaining_part:
+                            if not c.done_parts or not c.remaining_parts:
                                 continue  # 부분 완료인데 분할 근거가 없으면 애매하니 건너뜀
                             if len(original_content or "") > _OPEN_ACTIONS_ITEM_CHARS:
                                 # 프롬프트에는 앞 _OPEN_ACTIONS_ITEM_CHARS자만 들어갔으므로
@@ -418,13 +418,21 @@ def ingest(
                             evidence = {
                                 "type": "document", "doc_id": doc_id,
                                 "source": source, "date": evidence_date, "quote": c.evidence,
-                                "done_part": c.done_part, "remaining_part": c.remaining_part,
+                                "done_parts": c.done_parts, "remaining_parts": c.remaining_parts,
                                 "original_content": original_content,
                             }
                             rationale = (
                                 f"'{source}' 문서가 일부만 완료로 보고: {c.evidence}"
-                                f" (완료: {c.done_part} / 남음: {c.remaining_part})"
+                                f" (완료: {' / '.join(c.done_parts)}"
+                                f" / 남음: {' / '.join(c.remaining_parts)})"
                             )
+                        # 중복 방지 키에 근거 문서(doc_id)를 포함한다 — PR 경로(pr_actions)가
+                        # $.number를, supersede 경로가 $.superseding_memory_id를 키에 넣는 것과
+                        # 같은 규칙이다. 문서 경로만 (memory_id, kind)로만 걸러서, 같은 action에
+                        # 대해 다른 문서가 보고한 진행 상황이 앞 제안이 pending인 동안 통째로
+                        # 버려졌다(0행 INSERT라 예외도 로그도 없음). 문서는 이미 indexed라
+                        # 재처리되지 않으므로 그 판정은 영구 소실이었다. 같은 문서를 재처리할
+                        # 때의 멱등성은 doc_id가 같아 그대로 유지된다.
                         cursor.execute(
                             """
                             INSERT INTO memory_suggestions
@@ -434,12 +442,13 @@ def ingest(
                             WHERE NOT EXISTS (
                                 SELECT 1 FROM memory_suggestions
                                 WHERE memory_id = %s AND kind = %s AND status = 'pending'
+                                  AND CAST(JSON_UNQUOTE(JSON_EXTRACT(evidence, '$.doc_id')) AS UNSIGNED) = %s
                             )
                             """,
                             (
                                 project_id, c.action_id, kind,
                                 json.dumps(evidence, ensure_ascii=False), rationale,
-                                c.action_id, kind,
+                                c.action_id, kind, doc_id,
                             ),
                         )
                     conn.commit()

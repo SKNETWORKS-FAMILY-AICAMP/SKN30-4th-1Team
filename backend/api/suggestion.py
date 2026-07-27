@@ -58,6 +58,20 @@ _KIND_TARGET_CATEGORY = {
 _LEGACY_KINDS = ("complete_action", "supersede")
 
 
+def _split_parts(evidence: dict, list_key: str, legacy_key: str) -> list[str]:
+    """split evidence에서 분할 조각 목록을 읽는다.
+
+    N분할 이전에 만들어져 아직 pending으로 남아 있는 제안은 단수 문자열 필드
+    (done_part/remaining_part)를 갖고 있다. 그 제안을 승인 불가로 버리지 않도록
+    여기서 원소 1개짜리 목록으로 승격해 같은 경로로 처리한다.
+    """
+    parts = evidence.get(list_key)
+    if not parts:
+        legacy = evidence.get(legacy_key)
+        parts = [legacy] if legacy else []
+    return [str(part).strip() for part in parts if str(part).strip()]
+
+
 def _suggestion_or_404(cursor, project_id: int, suggestion_id: int) -> dict:
     """프로젝트에 속한 suggestion과 대상 memory 상태를 함께 조회한다.
 
@@ -69,6 +83,7 @@ def _suggestion_or_404(cursor, project_id: int, suggestion_id: int) -> dict:
         " m.completed_at AS memory_completed_at,"
         " m.superseded_by AS memory_superseded_by,"
         " m.owner AS memory_owner, m.date AS memory_date, m.source AS memory_source,"
+        " m.due_date AS memory_due_date,"
         " m.doc_id AS memory_doc_id, m.repo_id AS memory_repo_id,"
         " m.topic AS memory_topic, m.reason AS memory_reason"
         " FROM memory_suggestions s"
@@ -239,13 +254,15 @@ def _apply_accepted_effect(cursor, project_id: int, row: dict) -> None:
         return
 
     if kind == "split_action":
-        # 묶음 action의 일부만 완료 보고된 경우: 원본은 남은 부분만 남기고 계속 열어두고,
-        # 완료된 부분은 새 action으로 떼어내 바로 completed 처리한다.
+        # 묶음 action이 부분 완료 보고된 경우: sub-task 단위로 쪼개 완료분은 completed
+        # 행으로, 잔여분은 열린 행으로 남긴다. 원본 행은 id를 유지한 채 첫 잔여분을
+        # 갖고 계속 열려 있다 — 이 action을 가리키는 다른 pending 제안·벡터가 그대로
+        # 유효해야 하므로 원본을 완료분 쪽에 쓰지 않는다.
         evidence = _decode_evidence(row["evidence"]) or {}
-        done_part = evidence.get("done_part")
-        remaining_part = evidence.get("remaining_part")
-        if not done_part or not remaining_part:
-            raise HTTPException(status_code=400, detail="Split evidence missing done_part/remaining_part")
+        done_parts = _split_parts(evidence, "done_parts", "done_part")
+        remaining_parts = _split_parts(evidence, "remaining_parts", "remaining_part")
+        if not done_parts or not remaining_parts:
+            raise HTTPException(status_code=400, detail="Split evidence missing done_parts/remaining_parts")
         # 행 잠금 + 최신 상태 재확인: 이 제안이 만들어진 뒤 다른 제안(같은 memory_id)이
         # 먼저 승인돼 completed 되거나 content가 바뀌었으면, 이 제안은 그 사이 상황을
         # 반영 못 하는 낡은 근거이므로 그대로 적용하지 않고 거부한다(정확도 우선).
@@ -276,32 +293,51 @@ def _apply_accepted_effect(cursor, project_id: int, row: dict) -> None:
         cursor.execute(
             "UPDATE memory SET content = %s, updated_by = 'user'"
             " WHERE id = %s AND project_id = %s",
-            (remaining_part, row["memory_id"], project_id),
+            (remaining_parts[0], row["memory_id"], project_id),
         )
-        # complete_action과 동일하게: evidence에 문서 날짜가 있으면 그 날짜를, 없으면(빈
-        # 문자열 등 — 업로드 폼에서 날짜를 안 넣은 경우) NOW()를 쓴다. 빈 문자열을 그대로
-        # DATETIME 컬럼에 넣으면 안 됨.
-        completed_sql = "%s" if evidence.get("date") else "NOW()"
-        completed_params = [evidence["date"]] if evidence.get("date") else []
-        cursor.execute(
-            f"""
-            INSERT INTO memory
-                (project_id, doc_id, repo_id, category, content, owner, date, source,
-                 topic, reason,
-                 completed_at, completion_status, completion_status_source, updated_by)
-            VALUES (%s, %s, %s, 'action', %s, %s, %s, %s, %s, %s, {completed_sql}, 'completed', 'document', 'user')
-            """,
-            # topic/reason은 원본에서 승계 — format_memory_document가 BM25·벡터 입력에
-            # 쓰는 필드라, 비우면 떼어낸 완료분이 검색에서 주제·근거 신호를 잃는다.
-            # due_date는 일부러 승계하지 않는다: 새 행은 완료 상태로 태어나므로
-            # 마감일이 붙으면 마감/지연 조회에 완료된 일이 섞인다.
-            [
-                project_id, row.get("memory_doc_id"), row.get("memory_repo_id"),
-                done_part, row.get("memory_owner"), row.get("memory_date"), row.get("memory_source"),
-                row.get("memory_topic"), row.get("memory_reason"),
-            ] + completed_params,
+
+        def insert_part(content: str, *, done: bool) -> int:
+            """분할된 sub-task 하나를 새 memory 행으로 만들고 id를 돌려준다."""
+            if done:
+                # complete_action과 동일하게: evidence에 문서 날짜가 있으면 그 날짜를,
+                # 없으면(빈 문자열 등 — 업로드 폼에서 날짜를 안 넣은 경우) NOW()를 쓴다.
+                # 빈 문자열을 그대로 DATETIME 컬럼에 넣으면 안 됨.
+                completed_sql = "%s" if evidence.get("date") else "NOW()"
+                completed_params = [evidence["date"]] if evidence.get("date") else []
+                # 완료 행에는 마감일을 승계하지 않는다 — 마감/지연 조회에 완료된 일이 섞인다.
+                status, due_date = "completed", None
+            else:
+                completed_sql = "NULL"
+                completed_params = []
+                # 잔여분은 아직 열려 있으므로 원본의 마감일을 그대로 승계한다. 승계하지
+                # 않으면 마감이 걸린 묶음 action을 쪼갠 순간 잔여분이 마감 조회에서 빠진다.
+                status, due_date = "open", row.get("memory_due_date")
+            cursor.execute(
+                f"""
+                INSERT INTO memory
+                    (project_id, doc_id, repo_id, category, content, owner, date, source,
+                     topic, reason, due_date,
+                     completed_at, completion_status, completion_status_source, updated_by)
+                VALUES (%s, %s, %s, 'action', %s, %s, %s, %s, %s, %s, %s,
+                        {completed_sql}, %s, 'document', 'user')
+                """,
+                # topic/reason은 원본에서 승계 — format_memory_document가 BM25·벡터 입력에
+                # 쓰는 필드라, 비우면 떼어낸 행이 검색에서 주제·근거 신호를 잃는다.
+                [
+                    project_id, row.get("memory_doc_id"), row.get("memory_repo_id"),
+                    content, row.get("memory_owner"), row.get("memory_date"),
+                    row.get("memory_source"), row.get("memory_topic"), row.get("memory_reason"),
+                    due_date,
+                ] + completed_params + [status],
+            )
+            return cursor.lastrowid
+
+        # ponytail: 신규 행은 sort_order를 안 받아 목록 끝으로 간다. 원본 옆에 붙이려면
+        # 형제 행 재정렬이 필요한데, 지금은 사용자가 드래그로 옮길 수 있어 미룬다.
+        row["_split_new_memory_ids"] = (
+            [insert_part(part, done=False) for part in remaining_parts[1:]]
+            + [insert_part(part, done=True) for part in done_parts]
         )
-        row["_split_new_memory_id"] = cursor.lastrowid  # 아래 post-commit 벡터 동기화용
         return
 
     raise HTTPException(status_code=400, detail="Unsupported suggestion kind")
@@ -366,17 +402,21 @@ def _resolve_suggestion(project_id: int, suggestion_id: int, status: str) -> dic
         from ..graph import refresh_project_memory_after_delete
         refresh_project_memory_after_delete(project_id)
 
-    # split_action accept가 확정되면 원본(남은 부분)·신규(완료된 부분) 두 행 모두 벡터를
-    # 최신 상태로 맞춘다 — 그러지 않으면 원본 벡터에 방금 떼어낸 완료 내용이 그대로 남는다.
-    if status == "accepted" and row["kind"] == "split_action" and row.get("_split_new_memory_id"):
+    # split_action accept가 확정되면 원본(첫 잔여분)·신규(나머지 조각 전부) 행 모두 벡터를
+    # 최신 상태로 맞춘다 — 그러지 않으면 원본 벡터에 방금 떼어낸 내용이 그대로 남는다.
+    split_ids = row.get("_split_new_memory_ids")
+    if status == "accepted" and row["kind"] == "split_action" and split_ids:
         try:
             from ..retriever.memory_vector import upsert_memory_vectors
             conn2 = get_connection()
             try:
                 with conn2.cursor() as cursor2:
+                    ids = [row["memory_id"]] + split_ids
                     cursor2.execute(
-                        "SELECT * FROM memory WHERE id IN (%s, %s) AND project_id = %s",
-                        (row["memory_id"], row["_split_new_memory_id"], project_id),
+                        "SELECT * FROM memory WHERE id IN ({}) AND project_id = %s".format(
+                            ",".join(["%s"] * len(ids))
+                        ),
+                        ids + [project_id],
                     )
                     upsert_memory_vectors(cursor2.fetchall())
             finally:
