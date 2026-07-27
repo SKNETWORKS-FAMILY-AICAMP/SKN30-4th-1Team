@@ -875,6 +875,26 @@ async function readProjectMemberPermissionSnapshot(send) {
         !request.call.includes('/api/v1/auth/login') &&
         !request.call.includes('/api/v1/auth/signup')
       );
+      const rect = (element) => {
+        if (!element) return null;
+        const box = element.getBoundingClientRect();
+        return {
+          bottom: box.bottom,
+          height: box.height,
+          left: box.left,
+          right: box.right,
+          top: box.top,
+          width: box.width,
+        };
+      };
+      const membersPage = document.querySelector('.members-page');
+      const membersHeader = document.querySelector('.members-page-header');
+      const membersBackButton = membersHeader?.querySelector('.settings-back-button');
+      const membersHeadingCopy = membersHeader?.querySelector('.settings-header-copy');
+      const membersHeading = membersHeader?.querySelector('h1');
+      const closedHeaderPopovers = Array.from(
+        membersHeader?.querySelectorAll('[popover]:not(:popover-open)') || [],
+      );
       return {
         addForm: Boolean(document.querySelector('.project-members-add-form')),
         permissionNote: Boolean(document.querySelector('.project-members-permission-note')),
@@ -882,6 +902,26 @@ async function readProjectMemberPermissionSnapshot(send) {
         roleSelects: document.querySelectorAll('.project-members-role-select').length,
         roles: Array.from(document.querySelectorAll('.project-members-role[data-role]'))
           .map((element) => element.getAttribute('data-role')),
+        memberHeader: {
+          backButton: rect(membersBackButton),
+          closedPopoverCount: closedHeaderPopovers.length,
+          closedPopoverLeakCount: closedHeaderPopovers.filter((popover) => {
+            const box = popover.getBoundingClientRect();
+            return getComputedStyle(popover).display !== 'none' ||
+              box.width > 0 ||
+              box.height > 0;
+          }).length,
+          documentScrollWidth: document.documentElement.scrollWidth,
+          header: rect(membersHeader),
+          heading: rect(membersHeading),
+          headingCopy: rect(membersHeadingCopy),
+          headingFocused: document.activeElement === membersHeading,
+          innerWidth: window.innerWidth,
+          pageClientWidth: membersPage?.clientWidth ?? 0,
+          pageOverflowX: membersPage ? getComputedStyle(membersPage).overflowX : '',
+          pageOverflowY: membersPage ? getComputedStyle(membersPage).overflowY : '',
+          pageScrollWidth: membersPage?.scrollWidth ?? 0,
+        },
         authMeBearer: requests.some((request) =>
           request.call === 'GET /api/v1/auth/me' &&
           request.authorization === ${JSON.stringify(`Bearer ${SMOKE_ACCESS_TOKEN}`)}
@@ -1005,6 +1045,27 @@ async function verifyAuthAndMemberPermissions(send) {
       !value.owner?.roles.includes("owner") ||
       !value.owner?.roles.includes("member")) {
     failures.push("project Owner should be able to add, update, and remove members");
+  }
+  const ownerHeader = value.owner?.memberHeader;
+  if (!ownerHeader?.header ||
+      !ownerHeader?.backButton ||
+      !ownerHeader?.heading ||
+      !ownerHeader?.headingCopy ||
+      ownerHeader.closedPopoverCount < 1 ||
+      ownerHeader.closedPopoverLeakCount !== 0 ||
+      ownerHeader.pageOverflowX !== "hidden" ||
+      ownerHeader.pageOverflowY !== "auto" ||
+      ownerHeader.pageScrollWidth > ownerHeader.pageClientWidth + 1 ||
+      ownerHeader.documentScrollWidth > ownerHeader.innerWidth ||
+      !ownerHeader.headingFocused ||
+      Math.abs(ownerHeader.backButton.left - ownerHeader.header.left) > 0.5 ||
+      ownerHeader.heading.left < ownerHeader.backButton.right + 7 ||
+      ownerHeader.heading.width >= ownerHeader.headingCopy.width - 16 ||
+      Math.abs(
+        ownerHeader.backButton.top + ownerHeader.backButton.height / 2 -
+        (ownerHeader.headingCopy.top + ownerHeader.headingCopy.height / 2)
+      ) > 2) {
+    failures.push("member management should share the non-overlapping page header layout");
   }
   if (value.member?.addForm ||
       !value.member?.permissionNote ||
@@ -2329,6 +2390,112 @@ async function measureScenario(send, scenario) {
   return { scenario, value, failures };
 }
 
+// 앱 확대/축소는 100% 아래에서도 5% 단위로 움직이고 양 끝에서 안정적으로 멈춘다.
+async function verifyZoomShortcutGranularity(send) {
+  await send("Emulation.setDeviceMetricsOverride", {
+    width: 1280,
+    height: 820,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await setAuthScenario(send, "owner");
+  await send("Runtime.evaluate", {
+    expression: `localStorage.removeItem(${JSON.stringify(ZOOM_STORAGE_KEY)})`,
+  });
+  await openAppWithProject(send);
+  await sleep(180);
+
+  const result = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const readZoom = () => ({
+        mode: document.documentElement.dataset.pageZoomMode || '',
+        rendered: document.documentElement.style
+          .getPropertyValue('--page-zoom-render-scale')
+          .trim(),
+        stored: localStorage.getItem(${JSON.stringify(ZOOM_STORAGE_KEY)}),
+      });
+      const pressZoomKey = (key) => {
+        const event = new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          ctrlKey: true,
+          key,
+          metaKey: true,
+        });
+        window.dispatchEvent(event);
+        return event.defaultPrevented;
+      };
+
+      const initial = readZoom();
+      const firstOutPrevented = pressZoomKey('-');
+      const firstOut = readZoom();
+
+      for (let index = 0; index < 20; index += 1) {
+        pressZoomKey('-');
+      }
+      const minimum = readZoom();
+      const minimumClampPrevented = pressZoomKey('-');
+      const clampedMinimum = readZoom();
+
+      const firstInPrevented = pressZoomKey('=');
+      const firstIn = readZoom();
+      const resetPrevented = pressZoomKey('0');
+      const reset = readZoom();
+
+      return {
+        clampedMinimum,
+        firstIn,
+        firstInPrevented,
+        firstOut,
+        firstOutPrevented,
+        initial,
+        minimum,
+        minimumClampPrevented,
+        reset,
+        resetPrevented,
+      };
+    })()`,
+  });
+  const value = result.result.value;
+  const failures = [];
+
+  if (value.initial.mode !== "css" ||
+      value.initial.stored !== "1" ||
+      value.initial.rendered !== "1") {
+    failures.push("zoom shortcut test should start at the 100% CSS fallback scale");
+  }
+
+  if (!value.firstOutPrevented ||
+      value.firstOut.stored !== "0.95" ||
+      value.firstOut.rendered !== "0.95") {
+    failures.push("Cmd/Ctrl+- should reduce zoom from 100% to 95%");
+  }
+
+  if (!value.minimumClampPrevented ||
+      value.minimum.stored !== "0.5" ||
+      value.minimum.rendered !== "0.5" ||
+      value.clampedMinimum.stored !== "0.5" ||
+      value.clampedMinimum.rendered !== "0.5") {
+    failures.push("zoom out should stop at the 50% minimum");
+  }
+
+  if (!value.firstInPrevented ||
+      value.firstIn.stored !== "0.55" ||
+      value.firstIn.rendered !== "0.55") {
+    failures.push("Cmd/Ctrl++ should increase zoom from 50% to 55%");
+  }
+
+  if (!value.resetPrevented ||
+      value.reset.stored !== "1" ||
+      value.reset.rendered !== "1") {
+    failures.push("Cmd/Ctrl+0 should restore the 100% default");
+  }
+
+  debugLayout("zoom shortcut granularity", value);
+  return { value, failures };
+}
+
 // 960px 창을 200%로 본 것과 같은 480 CSS px에서도 overlay가 rail과 viewport 안에 붙는다.
 async function verifyZoomedOverlayPanelBounds(send) {
   await send("Emulation.setDeviceMetricsOverride", {
@@ -2787,6 +2954,19 @@ async function verifySidebarBrandTypography(send) {
         const element = document.querySelector(selector);
         return element ? Number.parseFloat(getComputedStyle(element).fontSize) : null;
       };
+      const typography = (selector) => {
+        const element = document.querySelector(selector);
+        if (!element) {
+          return null;
+        }
+        const style = getComputedStyle(element);
+        return {
+          family: style.fontFamily,
+          size: style.fontSize,
+          weight: style.fontWeight,
+          lineHeight: style.lineHeight,
+        };
+      };
       const sidebar = box('.sidebar');
       const panel = box('.sidebar-panel');
       const sideNav = document.querySelector('.sidebar-panel');
@@ -2800,7 +2980,10 @@ async function verifySidebarBrandTypography(send) {
 
       return {
         rootFont: getComputedStyle(document.documentElement).fontFamily,
+        bodyFont: getComputedStyle(document.body).fontFamily,
         codeFont: getComputedStyle(document.documentElement).getPropertyValue('--code-font-family'),
+        startHeadingTypography: typography('.project-start-copy h1'),
+        startButtonTypography: typography('.project-start-button'),
         hasSidebarBrand: Boolean(document.querySelector('.sidebar-brand')),
         hasPrompt: Boolean(document.querySelector('.prompt')),
         hasMessage: Boolean(document.querySelector('.message')),
@@ -2839,8 +3022,26 @@ async function verifySidebarBrandTypography(send) {
   const value = result.result.value;
   const failures = [];
 
-  if (!/^\s*-apple-system\b/.test(value.rootFont)) {
-    failures.push(`the macOS system UI font should be the first configured app font: ${value.rootFont}`);
+  if (!/^\s*(?:"SUIT Variable"|SUIT Variable)(?:,|$)/.test(value.rootFont) ||
+      !/^\s*(?:"SUIT Variable"|SUIT Variable)(?:,|$)/.test(value.bodyFont)) {
+    failures.push(`SUIT should be the first configured app font: ${value.rootFont} / ${value.bodyFont}`);
+  }
+
+  if (!/^\s*(?:"SUITE Variable"|SUITE Variable)(?:,|$)/.test(
+    value.startHeadingTypography?.family || "",
+  )) {
+    failures.push(`SUITE should be the first configured heading font: ${value.startHeadingTypography?.family}`);
+  }
+
+  if (value.startButtonTypography?.size !== "14px" ||
+      value.startButtonTypography?.weight !== "500" ||
+      Math.abs(Number.parseFloat(value.startButtonTypography?.lineHeight || "0") - 20) > 0.1 ||
+      !/^\s*(?:"SUIT Variable"|SUIT Variable)(?:,|$)/.test(
+        value.startButtonTypography?.family || "",
+      )) {
+    failures.push(
+      `Astryx Button typography should remain 14/500/20 SUIT: ${JSON.stringify(value.startButtonTypography)}`,
+    );
   }
 
   if (!/^\s*["']?SFMono-Regular["']?\b/.test(value.codeFont)) {
@@ -2914,6 +3115,10 @@ async function verifySidebarBrandTypography(send) {
       const projectHomeActions = Array.from(
         document.querySelectorAll('.project-home-actions button'),
       );
+      const projectName = document.querySelector('.project-name');
+      const projectNameStyle = projectName ? getComputedStyle(projectName) : null;
+      const analysisButton = document.querySelector('.project-home-primary');
+      const analysisButtonStyle = analysisButton ? getComputedStyle(analysisButton) : null;
       return {
         projectCount: savedState.projects?.length ?? 0,
         activeProjectName: document.querySelector('.project-item[data-active="true"]')?.getAttribute('data-project-name') || "",
@@ -2926,6 +3131,9 @@ async function verifySidebarBrandTypography(send) {
         hasProjectHome: Boolean(document.querySelector('.project-home')),
         uploadText: document.querySelector('.project-home-canvas-empty')?.textContent.trim() || "",
         analysisDisabled: Boolean(document.querySelector('.project-home-primary')?.disabled),
+        analysisCursor: analysisButtonStyle?.cursor || "",
+        projectNameFontSize: projectNameStyle?.fontSize || "",
+        projectNameFontWeight: projectNameStyle?.fontWeight || "",
         panelMenuTexts: Array.from(document.querySelectorAll('.project-panel-menu button'))
           .map((button) => button.textContent.trim()),
         hasProjectOverview: Boolean(document.querySelector('.project-overview')),
@@ -2980,7 +3188,10 @@ async function verifySidebarBrandTypography(send) {
       !value.afterStart.projectCreateText.includes("새 프로젝트") ||
       value.afterStart.sidebarCollapsed !== "false" ||
       value.afterStart.sidebarPanelWidth <= 0 ||
-      value.afterStart.sidebarCollapseButtonCount !== 1) {
+      value.afterStart.sidebarCollapseButtonCount !== 1 ||
+      value.afterStart.analysisCursor !== "not-allowed" ||
+      value.afterStart.projectNameFontSize !== "13px" ||
+      value.afterStart.projectNameFontWeight !== "500") {
     failures.push("start project button should create the first project and enter project home");
   }
 
@@ -3145,10 +3356,26 @@ async function verifyCopyFeedback(send) {
     returnByValue: true,
     expression: `(() => {
       const copiedButton = document.querySelector('.copy-button[data-copied="true"]');
+      const projectName = document.querySelector('.project-name');
+      const historyTitle = document.querySelector('.history-title');
+      const projectNameStyle = projectName ? getComputedStyle(projectName) : null;
+      const historyTitleStyle = historyTitle ? getComputedStyle(historyTitle) : null;
       return {
         hasCopiedState: Boolean(copiedButton),
         copiedLabel: copiedButton?.getAttribute('aria-label') || "",
         copiedText: window.__paimCopiedText || "",
+        projectNameTypography: projectNameStyle ? {
+          family: projectNameStyle.fontFamily,
+          size: projectNameStyle.fontSize,
+          weight: projectNameStyle.fontWeight,
+          lineHeight: projectNameStyle.lineHeight,
+        } : null,
+        historyTitleTypography: historyTitleStyle ? {
+          family: historyTitleStyle.fontFamily,
+          size: historyTitleStyle.fontSize,
+          weight: historyTitleStyle.fontWeight,
+          lineHeight: historyTitleStyle.lineHeight,
+        } : null,
       };
     })()`,
   });
@@ -3165,6 +3392,24 @@ async function verifyCopyFeedback(send) {
 
   if (!value.copiedText.includes("저장된 응답입니다.")) {
     failures.push("copy action should write the assistant response text");
+  }
+
+  if (value.projectNameTypography?.size !== "13px" ||
+      value.projectNameTypography?.weight !== "500" ||
+      value.historyTitleTypography?.size !== "13px" ||
+      value.historyTitleTypography?.weight !== "500" ||
+      !/^\s*(?:"SUIT Variable"|SUIT Variable)(?:,|$)/.test(
+        value.projectNameTypography?.family || "",
+      ) ||
+      !/^\s*(?:"SUIT Variable"|SUIT Variable)(?:,|$)/.test(
+        value.historyTitleTypography?.family || "",
+      )) {
+    failures.push(
+      `project and history labels should share 13/500 SUIT typography: ${JSON.stringify({
+        project: value.projectNameTypography,
+        history: value.historyTitleTypography,
+      })}`,
+    );
   }
 
   return { value, failures };
@@ -8894,6 +9139,16 @@ try {
     appShellResult.failures.forEach((failure) => console.log(`  - ${failure}`));
   } else {
     console.log("PASS Astryx AppShell owns the edge-to-edge PaiM frame");
+  }
+
+  const zoomShortcutResult = await verifyZoomShortcutGranularity(send);
+
+  if (zoomShortcutResult.failures.length > 0) {
+    hasFailures = true;
+    console.log("FAIL zoom shortcut granularity");
+    zoomShortcutResult.failures.forEach((failure) => console.log(`  - ${failure}`));
+  } else {
+    console.log("PASS zoom shortcuts use 5% steps from the 50% minimum");
   }
 
   const zoomedOverlayResult = await verifyZoomedOverlayPanelBounds(send);

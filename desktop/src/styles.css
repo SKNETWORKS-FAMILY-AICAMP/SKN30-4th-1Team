@@ -2,15 +2,34 @@
 @import "@fontsource/geist-mono/latin-500.css";
 @import "@fontsource/geist-mono/latin-600.css";
 
+@font-face {
+  font-family: "SUIT Variable";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("./assets/fonts/SUIT-Variable.woff2") format("woff2-variations");
+}
+
+@font-face {
+  font-family: "SUITE Variable";
+  font-style: normal;
+  font-weight: 300 900;
+  font-display: swap;
+  src: url("./assets/fonts/SUITE-Variable.woff2") format("woff2-variations");
+}
+
 :root {
   --app-font-family:
-    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Apple SD Gothic Neo", "Segoe UI",
-    "Malgun Gothic", system-ui, sans-serif;
+    "SUIT Variable", "SUIT", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo",
+    "Segoe UI", "Malgun Gothic", system-ui, sans-serif;
+  --headline-font-family:
+    "SUITE Variable", "SUITE", "SUIT Variable", "SUIT", -apple-system, BlinkMacSystemFont,
+    "Apple SD Gothic Neo", "Segoe UI", "Malgun Gothic", system-ui, sans-serif;
   --code-font-family:
     "SFMono-Regular", "Geist Mono", ui-monospace, Menlo, "Cascadia Code", Consolas,
     monospace;
   --font-family-body: var(--app-font-family);
-  --font-family-heading: var(--app-font-family);
+  --font-family-heading: var(--headline-font-family);
   --font-family-code: var(--code-font-family);
   font-family:
     var(--app-font-family);
@@ -23,6 +42,16 @@
   font-optical-sizing: auto;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
+}
+
+/*
+ * Astryx Neutral redeclares its typography tokens on the Theme wrapper.
+ * Keep the packaged SUIT/SUITE families authoritative inside that scope.
+ */
+[data-astryx-theme="neutral"] {
+  --font-family-body: var(--app-font-family);
+  --font-family-heading: var(--headline-font-family);
+  --font-family-code: var(--code-font-family);
 }
 
 /* The packaged Neutral theme declares `light dark` in a higher cascade layer.
@@ -61,10 +90,19 @@ body {
   background: transparent;
 }
 
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: var(--font-family-heading);
+}
+
 button,
 input,
 textarea {
-  font: inherit;
+  font-family: inherit;
 }
 
 code,
@@ -74,7 +112,7 @@ samp {
   font-family: var(--code-font-family);
 }
 
-button {
+button:not(:disabled):not([aria-disabled="true"]) {
   cursor: pointer;
 }
 
@@ -527,6 +565,17 @@ button {
   -webkit-backdrop-filter: blur(14px) saturate(140%);
 }
 
+/* Keep closed Astryx layers out of layout even if a surrounding page style
+   accidentally targets their popover element. Do not use !important here:
+   Astryx's legacy WebKit fallback opens the layer with an inline display. */
+.paim-app-shell .astryx-tooltip[role="tooltip"][popover] {
+  display: none;
+}
+
+.paim-app-shell .astryx-tooltip[role="tooltip"][popover]:popover-open {
+  display: block;
+}
+
 .app-shell[data-sidebar-collapsed="true"] .sidebar {
   z-index: 30;
   width: var(--sidebar-width, 52px);
@@ -892,8 +941,8 @@ button {
 }
 
 .project-name {
-  font-size: 12px;
-  font-weight: 550;
+  font-size: 13px;
+  font-weight: 500;
 }
 
 .project-rename-editor,
@@ -1105,7 +1154,7 @@ button {
   padding: 6px 8px;
   overflow: hidden;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
   text-align: left;
 }
@@ -1141,7 +1190,7 @@ button {
 
 .history-row[data-active="true"] .history-title {
   color: var(--text);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .history-row[data-active="true"] .history-item svg {
@@ -1389,12 +1438,20 @@ button {
   background: var(--faint);
 }
 
+.settings-page,
+.profile-page,
 .members-page {
   position: relative;
   min-width: 0;
   min-height: 0;
-  overflow: auto;
-  padding: 58px 56px 72px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding: 58px 56px;
+}
+
+.members-page {
+  padding-bottom: 72px;
 }
 
 .members-page-content {
@@ -1402,11 +1459,6 @@ button {
   gap: 22px;
   width: min(880px, 100%);
   margin: 0 auto;
-}
-
-.members-page-header > div {
-  display: grid;
-  gap: 5px;
 }
 
 .project-members-panel,
@@ -1618,17 +1670,6 @@ button {
   white-space: nowrap;
 }
 
-.settings-page,
-.profile-page {
-  position: relative;
-  min-width: 0;
-  min-height: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
-  scrollbar-gutter: stable;
-  padding: 58px 56px;
-}
-
 .settings-content,
 .profile-content {
   display: grid;
@@ -1654,9 +1695,11 @@ button {
   height: 32px;
 }
 
-.settings-header > :is(h1, div) {
+.settings-header-copy {
+  display: grid;
   grid-column: 2;
   grid-row: 1;
+  gap: 5px;
   min-width: 0;
 }
 
@@ -1671,17 +1714,20 @@ button {
 }
 
 .settings-header h1 {
+  justify-self: start;
   margin: 0;
+  max-width: 100%;
   color: var(--text);
   font-size: 28px;
   letter-spacing: -0.025em;
   line-height: 1.15;
 }
 
-.settings-header h1:focus-visible {
-  border-radius: 4px;
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 5px;
+.settings-header h1:focus,
+.project-start-copy h1:focus {
+  border-radius: 3px;
+  outline: none;
+  box-shadow: 0 0 0 1px rgb(148 163 184 / 38%);
 }
 
 .project-members-heading :is(h1, h2):focus {
@@ -2009,12 +2055,6 @@ button {
   text-wrap: balance;
 }
 
-.project-start-copy h1:focus {
-  border-radius: 4px;
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 5px;
-}
-
 .project-start-copy p {
   max-width: 48ch;
   color: var(--muted);
@@ -2231,11 +2271,12 @@ button {
 .project-home-canvas-filled {
   display: flex;
   flex-direction: column;
-  overflow: auto;
+  overflow: hidden;
   padding: 14px;
 }
 
 .project-home-upload-summary {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -2243,6 +2284,18 @@ button {
   color: var(--faint);
   font-size: 10.5px;
   font-weight: 700;
+}
+
+.project-home-source-list {
+  min-height: 0;
+}
+
+.project-home-canvas-filled[data-expanded="true"] .project-home-source-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
 }
 
 .project-home-summary-item {
@@ -2382,7 +2435,7 @@ button {
 
 .project-home-source-more {
   align-self: center;
-  margin-top: 4px;
+  margin-top: auto;
   padding: 5px 9px;
   font-size: 10.5px;
   font-weight: 700;
@@ -4542,7 +4595,7 @@ button {
   box-shadow: none;
 }
 
-.message[data-briefing="true"] .assistant {
+.message[data-briefing="true"] .paim-assistant-content {
   gap: 16px;
 }
 
@@ -4558,7 +4611,7 @@ button {
   font-weight: 800;
 }
 
-.message[data-briefing="true"] .md > p:first-child {
+.message[data-briefing="true"] .paim-message-markdown > p:first-child {
   border-bottom: 1px solid var(--border);
   padding-bottom: 16px;
   font-size: 15px;
@@ -4566,13 +4619,13 @@ button {
   line-height: 1.7;
 }
 
-.message[data-briefing="true"] .md > ul {
+.message[data-briefing="true"] .paim-message-markdown > ul {
   display: grid;
   gap: 10px;
   margin-top: 16px;
 }
 
-.message[data-briefing="true"] .md table {
+.message[data-briefing="true"] .paim-message-markdown table {
   margin-top: 16px;
   border-radius: 10px;
   overflow: hidden;
@@ -4581,6 +4634,11 @@ button {
 .message-content p {
   margin: 0 0 14px;
   overflow-wrap: anywhere;
+}
+
+.message-content > p {
+  color: inherit;
+  font: inherit;
 }
 
 .message-content p:last-child {
@@ -4596,12 +4654,12 @@ button {
   font-weight: 700;
 }
 
-.thinking .dots::after {
+.thinking .paim-thinking-dots::after {
   content: "";
   animation: dots 1.4s steps(4) infinite;
 }
 
-.thinking .dots {
+.thinking .paim-thinking-dots {
   display: inline-block;
   width: 1.5em;
   text-align: left;
@@ -4625,7 +4683,7 @@ button {
   }
 }
 
-.assistant {
+.paim-assistant-content {
   display: grid;
   gap: 8px;
   max-width: 100%;
@@ -4646,7 +4704,7 @@ button {
   font-size: 10px;
 }
 
-.md {
+.paim-message-markdown {
   font-size: inherit;
 }
 
@@ -4659,7 +4717,7 @@ button {
   padding-top: 10px;
 }
 
-.sources .label {
+.sources .paim-sources-label {
   margin-right: 2px;
   color: var(--faint);
   font-size: 10.5px;
@@ -4884,7 +4942,7 @@ button {
   grid-row: 1;
 }
 
-.app-shell[data-high-zoom-layout="true"] .settings-header > :is(h1, div) {
+.app-shell[data-high-zoom-layout="true"] .settings-header-copy {
   grid-column: 2;
   grid-row: 1;
 }
@@ -6483,7 +6541,7 @@ button {
     scale: 1;
   }
 
-  .thinking .dots::after {
+  .thinking .paim-thinking-dots::after {
     content: "…";
     animation: none !important;
   }
