@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 # 배포 전 환경변수 조합 검사.
 #
 # Compose 보간(${VAR:?})은 해당 변수 자신의 존재만 검사한다. LLM_PROVIDER 값에
@@ -18,12 +20,18 @@ set -euo pipefail
 ENV_FILE=""
 MODE="local"
 GET_KEY=""   # --get KEY: 문법 검증을 통과한 뒤 KEY의 Compose 해석값만 출력(런북 공용)
+PROFILE=""
+PROJECT=""
+CHECK_NETWORK=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --env-file) ENV_FILE="${2:-}"; shift 2 ;;
     --mode)     MODE="${2:-}";     shift 2 ;;
     --get)      GET_KEY="${2:-}";  shift 2 ;;
+    --profile)  PROFILE="${2:-}";  shift 2 ;;
+    --project)  PROJECT="${2:-}";  shift 2 ;;
+    --check-network) CHECK_NETWORK=1; shift ;;
     *) echo "[preflight] FAIL: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -215,6 +223,54 @@ require PAIM_JWT_SECRET    "backend/api/auth.py — 누락 시 기동 자체가 
 # 아래 둘은 lazy 경로. 누락돼도 기동과 /health는 통과하고 실제 기능에서 터진다.
 require SESSION_MEMORY_KEY "backend/security/session_crypto.py 채팅 암복호화 (lazy)"
 require OPENAI_API_KEY     "backend/db/chroma.py 임베딩 — LLM_PROVIDER와 무관하게 필요 (lazy)"
+require DB_HOST            "backend/db/mysql.py DB 접속"
+require DB_PORT            "backend/db/mysql.py DB 접속"
+require PAIM_AUTH_MODE     "운영 JWT 모드 고정"
+require RATE_LIMIT_SIGNUP  "signup 요청 제한"
+require RATE_LIMIT_LOGIN   "login 요청 제한"
+require RATE_LIMIT_UPLOAD  "upload 요청 제한"
+require RATE_LIMIT_QUERY   "query 요청 제한"
+require RATE_LIMIT_CHAT    "chat 요청 제한"
+require PAIM_PROXY_SUBNET  "프로필 proxy subnet"
+require PAIM_CADDY_PROXY_IP "프로필 Caddy static IP"
+require PAIM_BACKEND_PROXY_IP "프로필 backend static IP"
+require FORWARDED_ALLOW_IPS "신뢰할 Caddy /32"
+require CORS_ORIGINS        "backend CORS allowlist (non-dev 필수)"
+
+CORS_VALUE="$(env_get CORS_ORIGINS)"
+if [[ -n "$CORS_VALUE" ]]; then
+  IFS=',' read -r -a CORS_ITEMS <<< "$CORS_VALUE"
+  declare -A CORS_SEEN=()
+  for origin in "${CORS_ITEMS[@]}"; do
+    if [[ -z "$origin" || "$origin" == *'*'* || "$origin" == *'@'* ||
+          "$origin" == *\\* || "$origin" =~ [[:space:][:cntrl:]] ||
+          "$origin" == *: ||
+          ! "$origin" =~ ^(http|https|tauri)://[^/?#]+$ ]]; then
+      ERRORS+=("CORS_ORIGINS가 유효한 absolute origin allowlist가 아니다")
+      break
+    fi
+    if [[ "$origin" == tauri://* && "$origin" != "tauri://localhost" ]]; then
+      ERRORS+=("CORS_ORIGINS의 Tauri origin은 tauri://localhost만 허용된다")
+      break
+    fi
+    if [[ -n "${CORS_SEEN[$origin]:-}" ]]; then
+      ERRORS+=("CORS_ORIGINS에 중복 origin이 있다")
+      break
+    fi
+    CORS_SEEN[$origin]=1
+  done
+fi
+
+LOG_LEVEL_VALUE="$(env_get LOG_LEVEL)"
+if [[ -n "$LOG_LEVEL_VALUE" && ! "$LOG_LEVEL_VALUE" =~ ^(DEBUG|INFO|WARNING|ERROR|CRITICAL)$ ]]; then
+  ERRORS+=("LOG_LEVEL은 DEBUG|INFO|WARNING|ERROR|CRITICAL 중 하나여야 한다")
+fi
+for quota_key in PROJECT_STORAGE_QUOTA_BYTES USER_STORAGE_QUOTA_BYTES PROJECT_FILE_COUNT_QUOTA; do
+  quota_value="$(env_get "$quota_key")"
+  if [[ -n "$quota_value" && ! "$quota_value" =~ ^[1-9][0-9]*$ ]]; then
+    ERRORS+=("$quota_key 는 양의 정수여야 한다")
+  fi
+done
 
 # ── LLM provider 조건부 ──────────────────────────────────────────────────────
 #
@@ -305,6 +361,26 @@ if [[ ${#ERRORS[@]} -gt 0 ]]; then
     echo "  - $err" >&2
   done
   exit 1
+fi
+
+if [[ -n "$PROFILE" || -n "$PROJECT" ]]; then
+  [[ -n "$PROFILE" && -n "$PROJECT" ]] || {
+    echo "[preflight] FAIL: --profile과 --project는 함께 지정해야 한다" >&2
+    exit 2
+  }
+  NETWORK_ARGS=(
+    --profile "$PROFILE"
+    --project "$PROJECT"
+    --subnet "$(env_get PAIM_PROXY_SUBNET)"
+    --caddy-ip "$(env_get PAIM_CADDY_PROXY_IP)"
+    --backend-ip "$(env_get PAIM_BACKEND_PROXY_IP)"
+  )
+  [[ "$CHECK_NETWORK" -eq 1 ]] || NETWORK_ARGS+=(--validate-only)
+  "$ROOT/deploy/check-proxy-network.py" "${NETWORK_ARGS[@]}"
+  if [[ "$(env_get FORWARDED_ALLOW_IPS)" != "$(env_get PAIM_CADDY_PROXY_IP)/32" ]]; then
+    echo "[preflight] FAIL: FORWARDED_ALLOW_IPS는 프로필 Caddy IP 하나의 /32여야 한다" >&2
+    exit 1
+  fi
 fi
 
 # 진단은 stderr로 보낸다. stdout으로 내보내면 wrapper가 `docker compose config`

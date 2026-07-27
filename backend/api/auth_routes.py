@@ -1,10 +1,11 @@
 import logging
 
 import pymysql
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ..db.mysql import get_connection
+from ..rate_limit import RATE_LIMIT_LOGIN, RATE_LIMIT_SIGNUP, limiter
 from .auth import (
     create_access_token,
     get_current_user_id,
@@ -47,7 +48,8 @@ def _token_response(user_row: dict) -> dict:
 
 
 @router.post("/signup", status_code=201)
-def signup(body: SignupRequest):
+@limiter.limit(RATE_LIMIT_SIGNUP)
+def signup(request: Request, body: SignupRequest):
     email = _normalize_email(body.email)
     password_hash = hash_password(body.password)
 
@@ -78,7 +80,8 @@ def signup(body: SignupRequest):
 
 
 @router.post("/login")
-def login(body: LoginRequest):
+@limiter.limit(RATE_LIMIT_LOGIN)
+def login(request: Request, body: LoginRequest):
     email = _normalize_email(body.email)
 
     conn = get_connection()

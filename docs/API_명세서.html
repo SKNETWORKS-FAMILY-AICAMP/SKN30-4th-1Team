@@ -266,6 +266,7 @@
       <li class="nav-section">General</li>
       <li><a href="#root">GET /</a></li>
       <li><a href="#health">GET /health</a></li>
+      <li><a href="#health-ready">GET /health/ready</a></li>
       <li class="nav-section">Projects</li>
       <li><a href="#projects-create">POST /projects</a></li>
       <li><a href="#projects-list">GET /projects</a></li>
@@ -311,7 +312,7 @@
     <p class="subtitle">
       Base URL (로컬): <code>http://127.0.0.1:8000</code> &nbsp;·&nbsp;
       API Prefix: <code>/api/v1</code> (GitHub App은 <code>/github/app/*</code>, prefix 없음) &nbsp;·&nbsp;
-      에러 형식: <code>{"detail": "..."}</code> &nbsp;·&nbsp;
+      에러 형식: <code>{"detail": "...", "request_id": "&lt;uuid&gt;"}</code> &nbsp;·&nbsp;
       갱신: 2026-07-22 (TASK-010 — 누락 20 operation·인증/권한 최신화)
     </p>
 
@@ -324,7 +325,7 @@
       <code>Authorization: Bearer &lt;token&gt;</code> 필수, 없거나 무효면 401.
       <code>PAIM_JWT_SECRET</code>(≥32바이트, 비플레이스홀더) 미설정 시 기동 거부.
       <code>PAIM_AUTH_MODE=dev</code>는 로컬 전용(<code>DEV_USER_ID</code> 대체, 배포 금지).
-      공개 경로: <code>GET /</code>, <code>GET /health</code>,
+      공개 경로: <code>GET /</code>, <code>GET /health</code>, <code>GET /health/ready</code>,
       <code>POST /api/v1/auth/signup</code>, <code>POST /api/v1/auth/login</code>,
       <code>GET /github/app/callback</code>(state 필수).
     </div>
@@ -410,6 +411,18 @@
       <div class="endpoint-body">
         <div class="res-label"><span class="s200">200</span> OK</div>
         <pre><code>{ "status": "ok" }</code></pre>
+      </div>
+    </div>
+
+    <div class="endpoint" id="health-ready">
+      <div class="endpoint-header">
+        <span class="method GET">GET</span>
+        <span class="path">/health/ready</span>
+      </div>
+      <div class="endpoint-desc">MySQL, schema, ChromaDB, upload 저장소 준비 상태 확인 (공개).</div>
+      <div class="endpoint-body">
+        <div class="res-label"><span class="s200">200</span> Ready · <span class="s503">503</span> Not ready</div>
+        <pre><code>{ "status": "ready", "components": { "mysql": {"status":"ok"}, "schema": {"status":"ok"}, "chroma": {"status":"ok"}, "upload": {"status":"ok"} }, "request_id": "&lt;uuid&gt;" }</code></pre>
       </div>
     </div>
 
@@ -1394,6 +1407,7 @@
       <tr><th>엔드포인트</th><th>상태</th><th>비고</th></tr>
       <tr><td><code>GET /</code></td><td><span class="badge badge-done">✅ 완료</span></td><td>서비스 식별</td></tr>
       <tr><td><code>GET /health</code></td><td><span class="badge badge-done">✅ 완료</span></td><td></td></tr>
+      <tr><td><code>GET /health/ready</code></td><td><span class="badge badge-done">✅ 완료</span></td><td>dependency readiness</td></tr>
       <tr><td><code>POST /api/v1/projects</code></td><td><span class="badge badge-done">✅ 완료</span></td><td>owner 자동 project_members 추가</td></tr>
       <tr><td><code>GET /api/v1/projects</code></td><td><span class="badge badge-done">✅ 완료</span></td><td>DEV user 시 membership JOIN</td></tr>
       <tr><td><code>GET /api/v1/projects/{id}</code></td><td><span class="badge badge-done">✅ 완료</span></td><td></td></tr>

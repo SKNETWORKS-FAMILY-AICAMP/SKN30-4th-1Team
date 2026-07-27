@@ -1,3 +1,4 @@
+# TASK-012A baseline 2b0b7c95f2bf332e62cf3c2d926cddee5535a1f6 v8 schema fixture.
 CREATE TABLE IF NOT EXISTS users (
     id            INT PRIMARY KEY AUTO_INCREMENT,
     email         VARCHAR(255) NOT NULL UNIQUE,
@@ -35,50 +36,8 @@ CREATE TABLE IF NOT EXISTS documents (
     last_error  TEXT         DEFAULT NULL,
     progress_done  INT       DEFAULT NULL,
     progress_total INT       DEFAULT NULL,
-    size_bytes BIGINT UNSIGNED NOT NULL DEFAULT 0,
-    uploaded_by INT NULL,
-    processing_token CHAR(36) NULL,
-    lease_expires_at DATETIME NULL,
     uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (project_id) REFERENCES projects(id),
-    CONSTRAINT fk_documents_uploaded_by FOREIGN KEY (uploaded_by) REFERENCES users(id) ON DELETE SET NULL,
-    INDEX idx_documents_uploaded_by (uploaded_by),
-    INDEX idx_documents_project_status (project_id, status)
-);
-
-CREATE TABLE IF NOT EXISTS upload_quota_reservations (
-    reservation_id CHAR(36) PRIMARY KEY,
-    user_id INT NOT NULL,
-    project_id INT NOT NULL,
-    kind VARCHAR(20) NOT NULL,
-    size_bytes BIGINT UNSIGNED NOT NULL,
-    target_path VARCHAR(500) NULL,
-    temp_path VARCHAR(500) NULL,
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    expires_at DATETIME NOT NULL,
-    CONSTRAINT fk_quota_reservation_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
-    CONSTRAINT fk_quota_reservation_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE RESTRICT,
-    INDEX idx_quota_reservations_user (user_id),
-    INDEX idx_quota_reservations_project (project_id),
-    INDEX idx_quota_reservations_expiry (expires_at)
-);
-
-CREATE TABLE IF NOT EXISTS storage_cleanup_pending (
-    cleanup_id CHAR(36) PRIMARY KEY,
-    source_kind VARCHAR(20) NOT NULL,
-    source_id VARCHAR(64) NOT NULL,
-    user_id INT NULL,
-    project_id INT NOT NULL,
-    document_id INT NULL,
-    file_path VARCHAR(500) NULL,
-    size_bytes BIGINT UNSIGNED NOT NULL,
-    count_units INT UNSIGNED NOT NULL DEFAULT 1,
-    needs_chroma TINYINT(1) NOT NULL DEFAULT 0,
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    last_attempt_at DATETIME NULL,
-    UNIQUE KEY uq_cleanup_source (source_kind, source_id),
-    INDEX idx_cleanup_user (user_id),
-    INDEX idx_cleanup_project (project_id)
+    FOREIGN KEY (project_id) REFERENCES projects(id)
 );
 
 CREATE TABLE IF NOT EXISTS repositories (

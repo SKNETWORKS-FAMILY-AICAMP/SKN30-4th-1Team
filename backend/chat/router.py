@@ -1,7 +1,7 @@
 # backend/chat/router.py
 import logging
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
@@ -14,6 +14,7 @@ from backend.chat.session_store import SessionStore
 from backend.chat.context_builder import ContextBuilder
 from backend.llm.chat_model_factory import get_chat_model
 from backend.api.auth import get_current_user_id, require_project_access
+from backend.rate_limit import RATE_LIMIT_CHAT, authenticated_user_key, limiter
 
 router = APIRouter(prefix="/projects/{project_id}/sessions", tags=["Session Memory API"])
 logger = logging.getLogger(__name__)
@@ -206,8 +207,12 @@ def get_session_message_history(project_id: int, session_id: str, db=Depends(get
 
 
 # --- [6] POST /projects/{project_id}/sessions/{session_id}/query (세션 기반 최종 질의 API) ---
-@router.post("/{session_id}/query")
-def handle_session_query(project_id: int, session_id: str, request: QueryRequest, db=Depends(get_db)):
+def handle_session_query(
+    project_id: int,
+    session_id: str,
+    request: QueryRequest,
+    db=Depends(get_db),
+):
     require_project_access(project_id, min_role="member")
     with db.cursor() as cursor:
         _verify_session_ownership(cursor, project_id, session_id)
@@ -291,8 +296,8 @@ def handle_session_query(project_id: int, session_id: str, request: QueryRequest
     try:
         llm_response = get_chat_model().invoke(_to_langchain_messages(final_prompt_messages))
         llm_response_text = llm_response.content
-    except Exception as e:
-        logger.error("세션 질의 LLM 호출 오류: %s", e, exc_info=True)
+    except Exception:
+        logger.error("session_llm_failed", extra={"code": "SESSION_LLM_FAILED"})
         raise HTTPException(status_code=503, detail="LLM 응답 생성 중 오류가 발생했습니다. 서버 로그를 확인하세요.")
 
     # 2. 생성된 AI 응답을 세션 스토어 및 DB에 기록
@@ -341,3 +346,16 @@ def handle_session_query(project_id: int, session_id: str, request: QueryRequest
         "session_id": session_id,
         "answer": llm_response_text
     }
+
+
+@router.post("/{session_id}/query")
+@limiter.limit(RATE_LIMIT_CHAT, key_func=authenticated_user_key)
+def rate_limited_session_query(
+    request: Request,
+    project_id: int,
+    session_id: str,
+    body: QueryRequest,
+    db=Depends(get_db),
+):
+    """HTTP 경계에서만 요청 제한을 적용하고 기존 핵심 함수 계약은 보존한다."""
+    return handle_session_query(project_id, session_id, body, db=db)

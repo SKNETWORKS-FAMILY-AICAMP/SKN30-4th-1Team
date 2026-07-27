@@ -8,3 +8,15 @@ PAIM_AUTH_MODE를 개별적으로 override해 검증한다.
 import os
 
 os.environ.setdefault("PAIM_AUTH_MODE", "dev")
+
+import pytest
+
+from backend.rate_limit import limiter
+
+
+@pytest.fixture(autouse=True)
+def reset_rate_limiter():
+    """endpoint 호출 순서와 무관하게 각 테스트에 빈 limiter state를 제공한다."""
+    limiter.reset()
+    yield
+    limiter.reset()

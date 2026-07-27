@@ -10,8 +10,8 @@ from typing import Optional
 
 import bcrypt
 from fastapi import HTTPException
-from fastapi.responses import JSONResponse
-
+from starlette.requests import Request
+from .errors import error_response
 from ..db.mysql import get_connection
 
 logger = logging.getLogger(__name__)
@@ -171,6 +171,7 @@ def decode_access_token(token: str) -> int:
 _PUBLIC_PATHS = {
     "/",
     "/health",
+    "/health/ready",
     "/api/v1/auth/signup",
     "/api/v1/auth/login",
 }
@@ -194,18 +195,44 @@ async def auth_middleware(request, call_next):
 
     authorization = request.headers.get("Authorization", "")
     if not authorization.startswith("Bearer "):
-        return JSONResponse(status_code=401, content={"detail": "로그인이 필요합니다."})
+        return error_response(401, "로그인이 필요합니다.")
 
     try:
         user_id = decode_access_token(authorization[len("Bearer "):].strip())
     except HTTPException as exc:
-        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        return error_response(exc.status_code, exc.detail)
 
     reset_token = _current_user_id.set(user_id)
     try:
         return await call_next(request)
     finally:
         _current_user_id.reset(reset_token)
+
+
+class AuthMiddleware:
+    """Pure ASGI auth boundary, avoiding BaseHTTPMiddleware exception deadlocks."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or _auth_mode() == "dev":
+            return await self.app(scope, receive, send)
+        request = Request(scope)
+        if request.method == "OPTIONS" or _is_public_path(request.url.path):
+            return await self.app(scope, receive, send)
+        authorization = request.headers.get("Authorization", "")
+        if not authorization.startswith("Bearer "):
+            return await error_response(401, "로그인이 필요합니다.")(scope, receive, send)
+        try:
+            user_id = decode_access_token(authorization[len("Bearer "):].strip())
+        except HTTPException as exc:
+            return await error_response(exc.status_code, exc.detail)(scope, receive, send)
+        reset_token = _current_user_id.set(user_id)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _current_user_id.reset(reset_token)
 
 
 # ── 현재 사용자 / 권한 검사 ──────────────────────────────────────────────────
@@ -223,9 +250,13 @@ def get_current_user_id() -> Optional[int]:
         raw = os.getenv("DEV_USER_ID", "")
         if raw:
             try:
-                return int(raw)
+                parsed = int(raw)
             except ValueError:
-                logger.warning("DEV_USER_ID 환경변수가 유효한 정수가 아닙니다: %s", raw)
+                logger.warning("invalid_dev_user_id", extra={"code": "DEV_USER_ID_INVALID"})
+            else:
+                if parsed > 0:
+                    return parsed
+                logger.warning("invalid_dev_user_id", extra={"code": "DEV_USER_ID_INVALID"})
     return None
 
 

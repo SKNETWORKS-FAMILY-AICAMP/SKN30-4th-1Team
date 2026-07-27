@@ -172,6 +172,20 @@ def test_backend_pins_single_worker(prod: dict):
     assert str(prod["services"]["backend"]["environment"]["WEB_CONCURRENCY"]) == "1"
 
 
+def test_backend_healthcheck_uses_readiness_with_safe_timeout(prod: dict):
+    health = prod["services"]["backend"]["healthcheck"]
+    command = " ".join(health["test"])
+    assert "/health/ready" in command
+    assert 'b.get("status")=="ready"' in command
+    assert str(health["timeout"]).rstrip("s") and int(str(health["timeout"]).rstrip("s")) >= 7
+
+
+def test_mysql_init_mounts_v9_migration(prod: dict, dev: dict):
+    for stack in (prod, dev):
+        mounts = stack["services"]["db"]["volumes"]
+        assert any("migrate_v9.sql" in mount for mount in mounts)
+
+
 def test_dockerfile_pins_single_worker():
     dockerfile = (_ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert '"--workers", "1"' in dockerfile
@@ -180,6 +194,20 @@ def test_dockerfile_pins_single_worker():
 def test_prod_does_not_override_backend_command(prod: dict):
     """command override가 있으면 Dockerfile의 --workers 1 고정이 무력화된다."""
     assert "command" not in prod["services"]["backend"]
+
+
+# ── MySQL 초기화 완료 ────────────────────────────────────────────────────────
+
+def test_db_health_waits_for_final_mysqld_process(prod: dict):
+    """공식 이미지의 init용 임시 mysqld도 ping에는 응답한다.
+
+    backend 의존성과 빈 restore DB 복구가 초기화 SQL과 경합하지 않으려면 최종
+    mysqld가 entrypoint를 대체해 PID 1이 된 뒤에만 healthy여야 한다.
+    """
+    health = prod["services"]["db"]["healthcheck"]["test"]
+    assert health[0] == "CMD-SHELL"
+    assert "/proc/1/comm" in health[1]
+    assert "mysqladmin ping" in health[1]
 
 
 # ── 재시작·로그 ──────────────────────────────────────────────────────────────

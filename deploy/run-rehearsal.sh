@@ -54,9 +54,21 @@ cat > deploy/.env.rehearsal <<EOF
 DB_USER=root
 DB_PASSWORD=rehearsal_pw
 DB_NAME=paiM
+DB_HOST=db
+DB_PORT=3306
+PAIM_AUTH_MODE=jwt
 PAIM_JWT_SECRET=rehearsal-secret-0123456789012345678901234567890123456789
 SESSION_MEMORY_KEY=aGVsbG93b3JsZGhlbGxvd29ybGRoZWxsb3dvcmxkMTI=
 OPENAI_API_KEY=${OPENAI_API_KEY:-sk-rehearsal-placeholder}
+RATE_LIMIT_SIGNUP=5/minute
+RATE_LIMIT_LOGIN=5/minute
+RATE_LIMIT_UPLOAD=20/minute
+RATE_LIMIT_QUERY=30/minute
+RATE_LIMIT_CHAT=30/minute
+PAIM_PROXY_SUBNET=172.30.13.0/24
+PAIM_CADDY_PROXY_IP=172.30.13.10
+PAIM_BACKEND_PROXY_IP=172.30.13.20
+FORWARDED_ALLOW_IPS=172.30.13.10/32
 LLM_PROVIDER=openai
 PAIM_HTTP_PORT=8080
 PAIM_HTTPS_PORT=8443
@@ -136,7 +148,10 @@ run deploy/stack.sh rehearsal stop backend
 # mysqldump가 SQL 일부를 쓴 뒤 non-zero로 죽어도 파일은 남아 test -s를 통과한다.
 # dump 명령 자체를 run()으로 감싸 종료코드를 FAIL에 반영하고, 완료 marker까지
 # 검증한다(CR4-002).
-run sh -c "deploy/stack.sh rehearsal exec -T db sh -c 'MYSQL_PWD=\"\$MYSQL_ROOT_PASSWORD\" mysqldump -uroot --single-transaction \"\$MYSQL_DATABASE\"' > '$BK/mysql.sql'"
+# restore project도 공식 이미지의 init SQL로 빈 볼륨에 스키마를 먼저 만든다.
+# --add-drop-table을 명시하지 않으면 클라이언트 기본 설정에 따라 dump가 CREATE만
+# 담을 수 있고, 복원 시 "Table already exists"로 중단된다.
+run sh -c "deploy/stack.sh rehearsal exec -T db sh -c 'MYSQL_PWD=\"\$MYSQL_ROOT_PASSWORD\" mysqldump -uroot --single-transaction --add-drop-table \"\$MYSQL_DATABASE\"' > '$BK/mysql.sql'"
 run test -s "$BK/mysql.sql"
 run sh -c "tail -1 '$BK/mysql.sql' | grep -q 'Dump completed'"
 echo "dump: $(wc -c < "$BK/mysql.sql") bytes / $(tail -1 "$BK/mysql.sql" | cut -c1-30)"
@@ -150,7 +165,14 @@ run deploy/stack.sh rehearsal start backend
 
 step "복구 — 빈 project(restore)로"
 cp deploy/.env.rehearsal deploy/.env.restore
-sed -i 's/^PAIM_HTTP_PORT=.*/PAIM_HTTP_PORT=8081/; s/^PAIM_HTTPS_PORT=.*/PAIM_HTTPS_PORT=8444/' deploy/.env.restore
+sed -i '
+  s/^PAIM_HTTP_PORT=.*/PAIM_HTTP_PORT=8081/
+  s/^PAIM_HTTPS_PORT=.*/PAIM_HTTPS_PORT=8444/
+  s#^PAIM_PROXY_SUBNET=.*#PAIM_PROXY_SUBNET=172.30.14.0/24#
+  s/^PAIM_CADDY_PROXY_IP=.*/PAIM_CADDY_PROXY_IP=172.30.14.10/
+  s/^PAIM_BACKEND_PROXY_IP=.*/PAIM_BACKEND_PROXY_IP=172.30.14.20/
+  s#^FORWARDED_ALLOW_IPS=.*#FORWARDED_ALLOW_IPS=172.30.14.10/32#
+' deploy/.env.restore
 run deploy/stack.sh restore up -d db
 echo "restore DB 초기화 대기..."; until [ "$(docker inspect -f '{{.State.Health.Status}}' paim-restore-db-1 2>/dev/null)" = healthy ]; do sleep 3; done
 run sh -c "cd '$BK' && sha256sum -c SHA256SUMS >/dev/null"

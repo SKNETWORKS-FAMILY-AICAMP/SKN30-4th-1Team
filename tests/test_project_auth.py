@@ -114,9 +114,10 @@ def test_update_project_persists_name():
 def test_delete_project_cleans_children_and_external_assets():
     """DELETE /projects/{id} — FK 자식 row와 suggestion, Chroma, 원본 파일을 정리한다."""
     conn, cursor = _make_conn_sequence(
-        fetchone=[{"id": 1}],
+        fetchone=[{"id": 1}, None, None],
         fetchall=[
-            [{"id": 3, "file_path": "data/uploads/1/spec.md"}],
+            [{"id": 3, "file_path": "data/uploads/1/spec.md", "uploaded_by": None, "status": "indexed"}],
+            [],
             [{"id": 4}],
             [{"id": 5}],
         ],
@@ -124,20 +125,25 @@ def test_delete_project_cleans_children_and_external_assets():
     collection = MagicMock()
 
     with patch("backend.api.project.require_project_access"), \
+         patch("backend.api.project._project_upload_users", return_value=set()), \
          patch("backend.api.project.get_connection", return_value=conn), \
          patch("backend.db.chroma.get_collection", return_value=collection), \
-         patch("backend.api.project.delete_file") as delete_file:
+         patch("backend.api.project.delete_managed_file") as delete_file:
         resp = _client.delete("/api/v1/projects/1")
 
     assert resp.status_code == 204
     collection.delete.assert_called_once_with(where={"project_id": 1})
-    delete_file.assert_called_once_with("data/uploads/1/spec.md", strict=True)
+    delete_file.assert_called_once_with("data/uploads/1/spec.md", 1)
 
     sql_calls = [call.args[0] for call in cursor.execute.call_args_list]
 
     def sql_index(fragment: str) -> int:
         return next(i for i, sql in enumerate(sql_calls) if fragment in sql)
 
+    processing_probe = next(
+        sql for sql in sql_calls if "status='processing'" in sql and "SELECT 1" in sql
+    )
+    assert "FOR UPDATE" not in processing_probe
     assert any("DELETE FROM memory_suggestions" in sql for sql in sql_calls)
     assert any("DELETE ms FROM memory_sources" in sql for sql in sql_calls)
     assert any("DELETE FROM chat_messages" in sql for sql in sql_calls)
@@ -202,3 +208,15 @@ def test_ensure_dev_user_noop_when_no_dev_user_id():
         from backend.api.auth import ensure_dev_user
         result = ensure_dev_user()
     assert result is None
+
+
+@pytest.mark.parametrize("dev_user_id", ["0", "-1", "invalid"])
+def test_invalid_dev_user_id_is_unset_and_never_upserted(monkeypatch, dev_user_id):
+    monkeypatch.setenv("PAIM_AUTH_MODE", "dev")
+    monkeypatch.setenv("DEV_USER_ID", dev_user_id)
+    from backend.api.auth import ensure_dev_user, get_current_user_id
+
+    with patch("backend.api.auth.get_connection") as get_connection:
+        assert get_current_user_id() is None
+        assert ensure_dev_user() is None
+    get_connection.assert_not_called()
