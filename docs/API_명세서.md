@@ -56,6 +56,7 @@ prefix). CORS `OPTIONS` 프리플라이트도 통과.
 |-----------|------|-----------|
 | `POST /api/v1/auth/signup`·`/auth/login` | 공개 | — |
 | `GET /api/v1/auth/me` | 인증 | (프로젝트 무관) |
+| `GET /api/v1/capabilities` | 인증 | (프로젝트 무관) |
 | `GET·POST /api/v1/projects` | 인증 | (프로젝트 무관) |
 | `GET /api/v1/projects/{id}` | 인증 | viewer |
 | `PATCH /api/v1/projects/{id}` | 인증 | member |
@@ -121,6 +122,28 @@ MySQL, schema, ChromaDB, upload 저장소의 준비 상태를 확인한다. 인�
     "upload": {"status": "ok"}
   },
   "request_id": "<uuid>"
+}
+```
+
+---
+
+### `GET /api/v1/capabilities`
+
+데스크톱 앱이 사용할 문서 형식과 업로드 크기 제한을 조회한다. 인증이 필요하다.
+
+**응답 `200`**
+```json
+{
+  "schema_version": 1,
+  "project_documents": {
+    "extensions": ["docx", "md", "pdf", "txt"],
+    "max_file_bytes": 10485760
+  },
+  "query_attachments": {
+    "extensions": ["docx", "md", "pdf", "txt"],
+    "max_file_bytes": 8388608,
+    "max_total_bytes": 8388608
+  }
 }
 ```
 
@@ -309,8 +332,11 @@ MySQL, schema, ChromaDB, upload 저장소의 준비 상태를 확인한다. 인�
 
 | 필드 | 타입 | 필수 | 설명 |
 |------|------|------|------|
-| `file` | File | ✅ | `.md` / `.txt` / `.pdf` (최대 10 MB) |
+| `file` | File | ✅ | `.md` / `.markdown` / `.txt` / `.docx` / `.pdf` (최대 10 MB) |
 | `date` | string | - | 문서 날짜 `YYYY-MM-DD` |
+
+> **멀티포맷 지원 (2026-07-25)**: `.docx`와 텍스트 기반 PDF를 지원합니다. 스캔 이미지 PDF(OCR)는
+> 지원하지 않으며 `no_text_layer` 오류로 거절됩니다. 전처리 규칙은 [문서 전처리 정책서](DOCUMENT_INGESTION_POLICY.md) 참고.
 
 > **`doc_type` 변경 (2026-07-02)**: 프론트에서 전송하지 않습니다. 서버가 파일명 기반으로 자동 추론합니다.
 > - `회의`, `meeting`, `minutes` 포함 → `meeting`
@@ -321,14 +347,109 @@ MySQL, schema, ChromaDB, upload 저장소의 준비 상태를 확인한다. 인�
 ```json
 {
   "doc_id": 12,
-  "status": "processing"
+  "status": "processing",
+  "format": "pdf",
+  "blocks": 87,
+  "pages": 12,
+  "warnings": [
+    { "code": "table_flattened",
+      "message": "표를 행 단위 텍스트로 변환했습니다. 열 구조는 보존되지 않습니다.",
+      "location": "table 2" }
+  ]
 }
 ```
 
-**응답 `400`**
+| 필드 | 타입 | 설명 |
+|------|------|------|
+| `format` | string | `docx` / `pdf` / `text` |
+| `blocks` | int | 추출된 문단·표행 수 |
+| `pages` | int\|null | PDF 페이지 수. DOCX·평문은 `null` |
+| `warnings` | array | 변환 경고 목록(비치명적 손실). 없으면 `[]` |
+
+`warnings[]` 원소는 `{ code, message, location }`입니다. **`location`은 `null`일 수 있습니다.**
+
+| `code` | 의미 | `location` |
+|--------|------|-----------|
+| `page_no_text` | 해당 페이지에서 텍스트를 추출하지 못함 | `page N` |
+| `page_extract_failed` | 해당 페이지 파싱 실패 | `page N` |
+| `table_flattened` | 표를 행 단위 텍스트로 평탄화(열 구조 유실) | `table N` |
+| `unsupported_element` | 이미지·도형·텍스트 상자 등 비텍스트 요소 유실 | `null` |
+| `unsupported_element` | 중첩 깊이 상한(5단) 초과 표의 내용 유실 | `table N` |
+| `repeated_line_dropped` | 머리말·꼬리말로 판단해 제거(개수 요약 1건) | `null` |
+| `duplicate_block_dropped` | 중복 문단 제거(**개수 요약 1건**) | `null` |
+| `decode_fallback` | UTF-8 실패로 다른 인코딩 사용 | `null` |
+
+> **변환 경고**: 변환은 요청 경로에서 수행되므로 폴링 없이 즉시 확인할 수 있습니다.
+> `duplicate_block_dropped`와 `repeated_line_dropped`는 블록마다 발생해도 **개수만
+> 요약한 1건**으로 반환됩니다(`location` 없음). 나머지는 위치마다 별도 항목입니다.
+> 각 규칙의 판정 기준은 [문서 전처리 정책서](DOCUMENT_INGESTION_POLICY.md) 참고.
+
+**응답 `400`** — 미지원 확장자
 ```json
-{ "detail": "지원하지 않는 파일 형식입니다. (.md / .txt / .pdf)" }
+{ "detail": "지원하지 않는 파일 형식입니다. (.docx / .markdown / .md / .pdf / .txt)",
+  "code": "unsupported_format" }
 ```
+
+**응답 `400`** — 변환 실패
+```json
+{
+  "detail": "PDF에서 텍스트를 추출하지 못했습니다. 스캔 이미지 PDF는 지원하지 않습니다.",
+  "code": "no_text_layer"
+}
+```
+
+`detail`은 **문자열**(사람이 읽는 사유), `code`는 응답 **최상위**의 기계 판독용 식별자입니다.
+`code`는 아래 중 하나입니다.
+
+| `code` | 의미 | 사용자 조치 |
+|--------|------|-------------|
+| `unsupported_format` | 등록되지 않은 확장자 | 지원 포맷으로 변환 후 재업로드 |
+| `missing_dependency` | 서버에 변환 라이브러리 미설치 | 운영자 문의 |
+| `corrupt_file` | 파일을 열 수 없음, 암호 보호 PDF | 원본 확인 / 암호 해제 |
+| `empty_document` | 추출된 텍스트가 0건 | 내용이 있는 문서인지 확인 |
+| `no_text_layer` | PDF 전 페이지에 텍스트 레이어 없음 | 스캔본 대신 원본 PDF 사용 |
+| `file_too_large` | 구조는 정상이나 안전 처리 한도 초과 | 문서를 나누거나 내용을 줄여 재업로드 |
+
+> `file_too_large`는 `corrupt_file`과 **구분해서 표시**해야 합니다. 파일이 손상된 것이
+> 아니라 크기·압축률 한도를 넘은 것이므로, "손상"으로 안내하면 사용자가 복구·재다운로드
+> 같은 불필요한 조치를 하게 됩니다. HTTP 상태는 다른 변환 실패와 동일하게 `400`입니다
+> (`413`은 업로드 원본이 10 MB를 넘는 경우 전용).
+
+**응답 `415`** — 입력 경계 위반 (형식·내용 불일치)
+```json
+{
+  "detail": { "code": "INVALID_DOCUMENT_CONTENT",
+              "message": "PDF 확장자와 실제 파일 형식이 일치하지 않습니다." },
+  "request_id": "<uuid>"
+}
+```
+
+`400`(변환 실패)과 **성격이 다릅니다.** `415`는 파일을 파서에 넘기기 **전에** 걸러낸
+경우입니다.
+
+| 상황 | 예 |
+|------|-----|
+| 확장자와 실제 형식 불일치 | `.pdf`인데 `%PDF-`로 시작하지 않음, `.docx`인데 ZIP이 아님 |
+| 지원하지 않는 문자 인코딩 | `.txt`/`.md`가 UTF-8·CP949 어느 쪽으로도 디코딩되지 않음 |
+| 바이너리·과다 제어 문자 | NUL 포함, 제어 문자 비율 2% 초과 |
+
+`415`의 `detail`은 **객체**(`{code, message}`)이고 `400`의 `detail`은 **문자열**입니다.
+두 형식이 다른 것은 의도된 것이며, 데스크톱 클라이언트(`desktop/src/paimApi.ts`)는
+양쪽을 모두 읽습니다.
+
+**구분 기준**: 매직 바이트 검사를 통과했는지가 경계입니다.
+
+| 입력 | 결과 |
+|------|------|
+| `%PDF-`로 시작하지 않는 `.pdf` | `415` |
+| `%PDF-`는 맞으나 내부 파싱 실패 | `400 corrupt_file` |
+| `PK\x03\x04`로 시작하지 않는 `.docx` | `415` |
+| ZIP은 맞으나 DOCX 구조 손상 | `400 corrupt_file` |
+| ZIP은 맞으나 압축 해제 한도 초과 | `400 file_too_large` |
+
+> **`detail`을 객체로 바꾸지 마세요.** 데스크톱 클라이언트(`desktop/src/paimApi.ts`)는
+> `detail`이 문자열이 아니면 사유를 버리고 `"PaiM API 요청 실패"`만 표시합니다.
+> 구조화 정보가 필요하면 최상위 필드로 추가하세요.
 
 **응답 `404`**
 ```json
@@ -1143,7 +1264,7 @@ Git 로그 텍스트를 동기 처리해 메모리로 추출·적재한다. (최
 |------|------|------|------|
 | `question` | string | ✅ | 질문 |
 | `history` | array | - | `{role, content}` 대화 이력 |
-| `attachments` | array | - | 첨부 자료 `{filename, content_base64}`. `.md`/`.txt`/`.pdf`, 파일당 최대 10 MB |
+| `attachments` | array | - | 첨부 자료 `{filename, content_base64}`. `.md`/`.markdown`/`.txt`/`.docx`/`.pdf`, **파일당 최대 8 MB · 전체 합계 8 MB** |
 
 > **`attachments`**: 첨부가 있으면 라우터를 우회해 항상 `route: "semantic"`으로
 > 처리된다. 형식 미지원 시 **400**, 10 MB 초과 시 **413**.

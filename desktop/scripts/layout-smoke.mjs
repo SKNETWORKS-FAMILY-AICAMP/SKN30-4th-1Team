@@ -278,6 +278,21 @@ function createPaimApiMockScript() {
           return json(smokeUser);
         }
 
+        if (url.pathname === "/api/v1/capabilities" && method === "GET") {
+          return json({
+            schema_version: 1,
+            project_documents: {
+              extensions: ["docx", "md", "pdf", "txt"],
+              max_file_bytes: 10 * 1024 * 1024,
+            },
+            query_attachments: {
+              extensions: ["docx", "md", "pdf", "txt"],
+              max_file_bytes: 8 * 1024 * 1024,
+              max_total_bytes: 8 * 1024 * 1024,
+            },
+          });
+        }
+
         if (url.pathname === "/api/v1/projects") {
           if (method === "GET") {
             return json(readStoredServerProjects());
@@ -4113,9 +4128,9 @@ async function verifyProjectHomeDroppedPdfUpload(send) {
         value.upload.documentControl?.resolved !== 1 ||
         !lastFile ||
         lastFile.name !== "drop.pdf" ||
-        lastFile.type !== "application/pdf" ||
+        lastFile.type !== "application/octet-stream" ||
         lastFile.size <= 0) {
-      failures.push("native PDF drop should send one non-empty application/pdf multipart file");
+      failures.push("native PDF drop should send one non-empty generic binary multipart file");
     }
 
     if (value.upload.documentControl?.deleted !== 0 ||
@@ -4405,7 +4420,7 @@ async function verifyProjectHomeDroppedPdfCancellation(send) {
         value.settled.documentControl?.resolved !== 1 ||
         !lastFile ||
         lastFile.name !== "cancel-drop.pdf" ||
-        lastFile.type !== "application/pdf" ||
+        lastFile.type !== "application/octet-stream" ||
         lastFile.size <= 0) {
       failures.push("the cancelled native drop should still receive exactly one delayed PDF POST response");
     }

@@ -21,6 +21,7 @@ dependencies = [
     "python-dotenv",
     "streamlit>=1.58.0",
     "pypdf>=6.14.2",
+    "python-docx>=1.1.2",
     "tiktoken",
     "rank-bm25>=0.2.2",
     "kiwipiepy>=0.23.2",

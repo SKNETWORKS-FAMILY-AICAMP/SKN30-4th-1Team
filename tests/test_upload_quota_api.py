@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from backend.api.query import GitLogUpload, upload_git_log
 from backend.api.upload import _process_upload_locked, upload_document
+from backend.pipeline.converters import convert
 from backend import quota as quota_module
 from backend.graph import store_node
 from backend.main import app
@@ -134,7 +135,9 @@ def test_positive_dev_user_failure_precedes_access_and_payload_side_effects(
     ) as multipart_access, patch(
         "backend.api.query.require_project_access"
     ) as git_access, patch(
-        "backend.api.upload.extract_document_text"
+        # payload 처리의 최전방. 사용자 확인이 이보다 먼저 실패해야 한다는 것이
+        # 이 테스트의 계약이므로, 변환(_convert_upload)이 아니라 검증 진입점을 잡는다.
+        "backend.api.upload.validate_document_bytes"
     ) as multipart_extract, patch(
         "backend.api.upload.reserve_document"
     ) as multipart_reserve, patch(
@@ -265,7 +268,9 @@ def test_multipart_post_finalize_cancellation_compensates_document(cancel_stage)
                 project_id=1,
                 doc_id=41,
                 old_doc_ids=[],
-                content="payload",
+                # 변환 계층 도입으로 인자가 평문 content에서 ConvertedDocument로 바뀌었다.
+                # 이 테스트의 관심사는 취소 보상이므로 최소 구조만 만들어 넘긴다.
+                document=convert("cancel.txt", b"payload"),
                 filename="cancel.txt",
                 date="",
                 doc_type="meeting",

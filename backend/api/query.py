@@ -9,7 +9,14 @@ from typing import List, Dict
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from ..db.mysql import get_connection
-from ..document_content import DocumentContentError, extract_document_text
+from ..document_content import (
+    ALLOWED_SUFFIXES,
+    QUERY_ATTACHMENT_MAX_FILE_BYTES,
+    QUERY_ATTACHMENT_MAX_TOTAL_BYTES,
+    DocumentContentError,
+    supported_formats_label,
+    validate_document_bytes,
+)
 from ..pipeline.extractor import extract
 from ..pipeline.ingestor import ingest
 from ..graph import update_project_memory, run_qa
@@ -21,7 +28,7 @@ from ..retriever.query_intent import (
     answer_overview,
     classify_question,
 )
-from .upload import _ALLOWED_SUFFIXES, _MAX_FILE_BYTES
+from ..pipeline.converters import ConversionError, ErrorCode, convert
 from .auth import require_project_access
 from ..rate_limit import RATE_LIMIT_QUERY, authenticated_user_key, limiter
 from ..quota import (
@@ -66,31 +73,56 @@ def _prepare_attachment_context(attachments: List[QueryAttachment]) -> tuple[str
     sections = []
     sources: List[str] = []
     used_chars = 0
+    used_bytes = 0
 
     for attachment in attachments:
         filename = Path(attachment.filename).name
-        if Path(filename).suffix.lower() not in _ALLOWED_SUFFIXES:
-            raise HTTPException(status_code=400, detail="지원하지 않는 첨부 파일 형식입니다. (.md / .txt / .pdf)")
+        if Path(filename).suffix.lower() not in ALLOWED_SUFFIXES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"지원하지 않는 첨부 파일 형식입니다. ({supported_formats_label()})",
+            )
 
         try:
             data = base64.b64decode(attachment.content_base64, validate=True)
         except (binascii.Error, ValueError):
             raise HTTPException(status_code=400, detail="첨부 파일을 읽을 수 없습니다.")
 
-        if len(data) > _MAX_FILE_BYTES:
-            raise HTTPException(status_code=413, detail="첨부 파일 크기는 10 MB를 초과할 수 없습니다.")
+        if len(data) > QUERY_ATTACHMENT_MAX_FILE_BYTES:
+            raise HTTPException(status_code=413, detail="첨부 파일 크기가 허용 한도를 초과했습니다.")
+        used_bytes += len(data)
+        if used_bytes > QUERY_ATTACHMENT_MAX_TOTAL_BYTES:
+            raise HTTPException(status_code=413, detail="전체 첨부 파일 크기가 허용 한도를 초과했습니다.")
 
         remaining = _ATTACHMENT_MAX_CHARS_TOTAL - used_chars
         if remaining <= 0:
-            break
+            continue
 
+        # 안전성 검증 실패(MIME·인코딩·제어문자)는 질의를 중단시킨다 — 415.
+        # 관대한 정책은 "검증을 통과한 파일의 변환 실패"에만 적용된다. 모든 실패를
+        # 삼키면 main의 입력 경계 계약이 무력화된다.
         try:
-            text = extract_document_text(filename, data).strip()
+            validate_document_bytes(filename, data)
         except DocumentContentError as exc:
             raise HTTPException(
                 status_code=415,
                 detail={"code": exc.code, "message": exc.message},
             ) from exc
+
+        # 변환 실패는 질의 전체를 막지 않는다 — 나머지 첨부와 프로젝트 기억만으로도
+        # 답할 수 있어야 하므로, 실패 사유를 본문에 남기고 계속 진행한다.
+        try:
+            text = convert(filename, data).text.strip()
+        except ConversionError as exc:
+            # 추출 내용의 입력 경계 위반은 변환 실패가 아니라 검증 실패다.
+            # 관대한 placeholder 정책 대상이 아니며 415로 중단한다.
+            if exc.code == ErrorCode.INVALID_CONTENT:
+                raise HTTPException(
+                    status_code=415,
+                    detail={"code": exc.code, "message": exc.message},
+                ) from exc
+            logger.info("첨부 변환 실패 filename=%s code=%s", filename, exc.code)
+            text = ""
         text = text or "(텍스트를 추출할 수 없습니다.)"
         text = _clip_attachment_text(text, _ATTACHMENT_MAX_CHARS_PER_FILE, "첨부 내용 잘림")
         text = _clip_attachment_text(text, remaining, "전체 첨부 한도 초과로 잘림")

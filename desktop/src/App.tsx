@@ -112,6 +112,13 @@ import {
   isPaimApiError,
 } from "./paimApi";
 import {
+  fetchPaimCapabilities,
+  formatBytesAsMiB,
+  formatExtensions,
+  supportsExtension,
+  type PaimCapabilities,
+} from "./capabilities";
+import {
   clampProjectFileTreeWidth,
   countProjectFileEntries,
   createProjectFileEntry,
@@ -1102,31 +1109,9 @@ function normalizeDialogPaths(selectedPaths: string | string[] | null) {
   return (Array.isArray(selectedPaths) ? selectedPaths : [selectedPaths]).filter(Boolean);
 }
 
-function getFileExtension(name: string) {
-  return name.includes(".") ? name.split(".").pop()?.toLowerCase() ?? "" : "";
-}
-
-function isSupportedProjectDocument(name: string) {
-  return ["md", "txt", "pdf", "docx"].includes(getFileExtension(name));
-}
-
 function getBase64ByteLength(encoded: string) {
   const padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
   return Math.floor((encoded.length * 3) / 4) - padding;
-}
-
-function getUploadMimeType(name: string) {
-  const extension = getFileExtension(name);
-
-  if (extension === "pdf") {
-    return "application/pdf";
-  }
-
-  if (extension === "docx") {
-    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-  }
-
-  return "text/plain";
 }
 
 function base64ToBytes(encoded: string) {
@@ -1941,6 +1926,9 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   const [serverStatus, setServerStatus] = useState<ServerStatus>(
     initialServerOffline ? "offline" : "online",
   );
+  const [capabilities, setCapabilities] = useState<PaimCapabilities | null>(null);
+  const [capabilitiesError, setCapabilitiesError] = useState("");
+  const [capabilitiesRevision, setCapabilitiesRevision] = useState(0);
   const serverUrlSyncRef = useRef(settings.serverUrl);
   const projectPanelReopenModeRef = useRef<VisibleProjectPanelMode>("open");
   const sidebarResizeRef = useRef<{
@@ -2000,6 +1988,23 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   );
   const projectHomeNameBeforeEditRef = useRef<string | null>(null);
   const zoomScaleRef = useRef(zoomScale);
+  const projectDocumentExtensions = capabilities?.project_documents.extensions ?? [];
+  const queryAttachmentExtensions = capabilities?.query_attachments.extensions ?? [];
+  const supportedDocumentLabel = capabilities
+    ? formatExtensions(capabilities.project_documents.extensions)
+    : "";
+  const projectDocumentCapabilityLabel = capabilities
+    ? `${supportedDocumentLabel} · 파일당 최대 ${formatBytesAsMiB(capabilities.project_documents.max_file_bytes)}`
+    : "";
+  const queryAttachmentCapabilityLabel = capabilities
+    ? `${formatExtensions(queryAttachmentExtensions)} · 파일당 최대 ${formatBytesAsMiB(
+        capabilities.query_attachments.max_file_bytes,
+      )} · 전체 최대 ${formatBytesAsMiB(capabilities.query_attachments.max_total_bytes)}`
+    : "";
+
+  function retryCapabilities() {
+    setCapabilitiesRevision((revision) => revision + 1);
+  }
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
@@ -2947,6 +2952,37 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
     return () => window.clearTimeout(timeoutId);
   }, [settings.serverUrl]);
+
+  useEffect(() => {
+    setCapabilities(null);
+    setCapabilitiesError("");
+
+    if (serverStatus !== "online") {
+      setCapabilitiesError("서버 연결 후 지원 파일 정보를 불러올 수 있습니다");
+      return;
+    }
+
+    const controller = new AbortController();
+    void fetchPaimCapabilities(controller.signal)
+      .then((response) => {
+        if (
+          response.schema_version !== 1 ||
+          response.project_documents.extensions.length === 0 ||
+          response.query_attachments.extensions.length === 0
+        ) {
+          throw new Error("지원 파일 정보 응답이 올바르지 않습니다");
+        }
+        setCapabilities(response);
+        setCapabilitiesError("");
+      })
+      .catch((error) => {
+        if (!(error instanceof DOMException && error.name === "AbortError")) {
+          setCapabilitiesError(getErrorMessage(error, "지원 파일 정보를 불러올 수 없습니다"));
+        }
+      });
+
+    return () => controller.abort();
+  }, [authUser?.id, capabilitiesRevision, serverStatus, settings.serverUrl]);
 
   useEffect(() => {
     void getVersion()
@@ -4298,16 +4334,35 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
   // 서버 업로드는 로컬 파일을 base64로 읽어 브라우저 FormData 파일로 감싼다.
   async function readUploadFile(entry: Attachment) {
+    if (!capabilities) {
+      throw new Error(capabilitiesError || "지원 파일 정보를 먼저 불러와야 합니다");
+    }
     const encoded = await invoke<string>("read_file_base64", { path: entry.path });
     const bytes = base64ToBytes(encoded);
+    if (bytes.byteLength > capabilities.project_documents.max_file_bytes) {
+      throw new Error(
+        t("{name}은 {limit}를 초과해 업로드할 수 없습니다", {
+          name: entry.name,
+          limit: formatBytesAsMiB(capabilities.project_documents.max_file_bytes),
+        }),
+      );
+    }
 
-    return new File([bytes], entry.name, { type: getUploadMimeType(entry.name) });
+    return new File([bytes], entry.name, { type: "application/octet-stream" });
   }
 
   async function readQueryAttachment(entry: Attachment): Promise<ApiQueryAttachment> {
+    if (!capabilities) {
+      throw new Error(capabilitiesError || "지원 파일 정보를 먼저 불러와야 합니다");
+    }
     const encoded = await invoke<string>("read_file_base64", { path: entry.path });
-    if (getBase64ByteLength(encoded) > 10 * 1024 * 1024) {
-      throw new Error(t("{name}은 10 MB를 초과해 첨부할 수 없습니다", { name: entry.name }));
+    if (getBase64ByteLength(encoded) > capabilities.query_attachments.max_file_bytes) {
+      throw new Error(
+        t("{name}은 {limit}를 초과해 첨부할 수 없습니다", {
+          name: entry.name,
+          limit: formatBytesAsMiB(capabilities.query_attachments.max_file_bytes),
+        }),
+      );
     }
     return { filename: entry.name, content_base64: encoded };
   }
@@ -4409,7 +4464,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       (entry) =>
         !entry.serverOnly &&
         typeof entry.docId !== "number" &&
-        isSupportedProjectDocument(entry.name),
+        supportsExtension(entry.name, projectDocumentExtensions),
     );
 
     if (supportedFiles.length === 0) {
@@ -5226,6 +5281,14 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     if (!targetProject || shouldSkipProjectPermission(targetProject)) {
       return;
     }
+    if (!capabilities) {
+      setDemoStatus({
+        ok: false,
+        message: capabilitiesError || "지원 파일 정보를 불러오는 중입니다",
+        scope: "overview",
+      });
+      return;
+    }
 
     if (!canUseTauriDialog()) {
       setDemoStatus({
@@ -5239,7 +5302,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     try {
       const selectedPaths = await open({
         directory: false,
-        filters: [{ name: t("지원 문서"), extensions: ["md", "txt", "pdf", "docx"] }],
+        filters: [{ name: t("지원 문서"), extensions: projectDocumentExtensions }],
         multiple: true,
         title: t("프로젝트 자료 추가"),
       });
@@ -7023,11 +7086,19 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     if (!selectedProject || !selectedSession) {
       return;
     }
+    if (!capabilities) {
+      setDemoStatus({
+        ok: false,
+        message: capabilitiesError || "지원 파일 정보를 불러오는 중입니다",
+        scope: "overview",
+      });
+      return;
+    }
 
     const selectedPaths = await open({
       multiple: true,
       directory: false,
-      filters: [{ name: t("지원 문서"), extensions: ["md", "txt", "pdf", "docx"] }],
+      filters: [{ name: t("지원 문서"), extensions: queryAttachmentExtensions }],
       title: t("PaiM에 첨부할 파일 선택"),
     });
 
@@ -7045,15 +7116,26 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       return;
     }
 
-    const supportedPaths = paths.filter((path) => isSupportedProjectDocument(getFileName(path)));
+    if (!capabilities) {
+      setDemoStatus({
+        ok: false,
+        message: capabilitiesError || "지원 파일 정보를 불러오는 중입니다",
+        scope: "overview",
+      });
+      return;
+    }
+    const supportedPaths = paths.filter((path) =>
+      supportsExtension(getFileName(path), queryAttachmentExtensions),
+    );
     const skippedCount = paths.length - supportedPaths.length;
     if (supportedPaths.length !== paths.length) {
       setDemoStatus({
         kind: "warning",
         ok: false,
-        message: t("{added}개 추가 · {skipped}개 제외 — 채팅 첨부는 md/txt/pdf를 지원합니다", {
+        message: t("{added}개 추가 · {skipped}개 제외 — 지원 형식: {formats}", {
           added: supportedPaths.length,
           skipped: skippedCount,
+          formats: formatExtensions(queryAttachmentExtensions),
         }),
         scope: "overview",
       });
@@ -7209,6 +7291,20 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       if (messageAttachments.length > 0) {
         if (canUseTauriDialog()) {
           queryAttachments = await Promise.all(messageAttachments.map(readQueryAttachment));
+          const totalBytes = queryAttachments.reduce(
+            (total, attachment) => total + getBase64ByteLength(attachment.content_base64),
+            0,
+          );
+          if (
+            capabilities &&
+            totalBytes > capabilities.query_attachments.max_total_bytes
+          ) {
+            throw new Error(
+              `전체 첨부 파일은 ${formatBytesAsMiB(
+                capabilities.query_attachments.max_total_bytes,
+              )}를 초과할 수 없습니다`,
+            );
+          }
           if (controller.signal.aborted) {
             throw new DOMException("Query cancelled", "AbortError");
           }
@@ -8611,13 +8707,37 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                   />
                 </div>
               ) : null}
+              <div className="attachment-scope-note">
+                {capabilities ? (
+                  <span>{t("지원 형식 및 제한: {details}", { details: queryAttachmentCapabilityLabel })}</span>
+                ) : (
+                  <>
+                    <span>{capabilitiesError || t("지원 파일 정보를 불러오는 중입니다")}</span>
+                    {capabilitiesError ? (
+                      <Button
+                        label={t("지원 파일 정보 다시 불러오기")}
+                        onClick={retryCapabilities}
+                        size="sm"
+                        variant="secondary"
+                      >
+                        {t("다시 시도")}
+                      </Button>
+                    ) : null}
+                  </>
+                )}
+              </div>
               <div className="prompt-actions">
                 <IconButton
                   icon={<Plus size={17} />}
-                  isDisabled={!canMutateSelectedProject}
+                  isDisabled={!canMutateSelectedProject || !capabilities}
                   label={t("파일 추가")}
                   onClick={() => void handlePickFiles()}
-                  tooltip={selectedProjectReadOnlyReason ?? t("파일 추가")}
+                  tooltip={
+                    selectedProjectReadOnlyReason ??
+                    (capabilities
+                      ? t("파일 추가 · {details}", { details: queryAttachmentCapabilityLabel })
+                      : capabilitiesError || t("지원 파일 정보를 불러오는 중입니다"))
+                  }
                   variant="ghost"
                 />
                 {isCurrentSessionSending ? (
@@ -8765,7 +8885,13 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                   <section className="project-home-section project-home-context-section">
                     <header className="project-home-section-header">
                       <h2>{t("프로젝트 맥락 추가")}</h2>
-                      <p>{t("회의록, README, PDF, 스펙 문서 등 관련 자료를 추가해 주세요.")}</p>
+                      <p>
+                        {capabilities
+                          ? t("지원 형식 및 제한: {details}", {
+                              details: projectDocumentCapabilityLabel,
+                            })
+                          : capabilitiesError || t("지원 파일 정보를 불러오는 중입니다")}
+                      </p>
                     </header>
                     <div
                       className="project-home-canvas"
