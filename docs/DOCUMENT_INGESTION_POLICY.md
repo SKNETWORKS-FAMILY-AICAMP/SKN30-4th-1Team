@@ -1,5 +1,7 @@
 # 문서 전처리 정책서
 
+> 실제 문서로 검증한 결과는 [문서 적재 E2E 검증 보고서](DOCUMENT_INGESTION_E2E_REPORT.md) 참고.
+
 - 담당: C (멀티모달·Project Memory)
 - 최초 작성일: 2026-07-25
 - 대상 코드: `backend/pipeline/converters/`, `backend/pipeline/ingestor.py`
