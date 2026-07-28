@@ -12,6 +12,7 @@ import pytest
 import chromadb
 from fastapi import HTTPException
 
+from backend.pipeline.converters import Block, ConvertedDocument
 from backend.pipeline.ingestor import ingest
 from backend.pipeline.models import MemoryItem
 from backend.pipeline import ingestor as ingestor_module
@@ -807,7 +808,7 @@ def test_post_finalize_cancel_at_first_memory_insert_releases_lock_and_accountin
         return CancellingConnection(real_get_connection())
 
     item = MemoryItem(category="issue", content="cancel at mysql insert")
-    with patch("backend.api.upload.extract", return_value=[item]), patch.object(
+    with patch("backend.api.upload.extract", return_value=([item], [])), patch.object(
         ingestor_module, "get_connection", side_effect=controlled_connection
     ):
         with pytest.raises(asyncio.CancelledError):
@@ -815,7 +816,11 @@ def test_post_finalize_cancel_at_first_memory_insert_releases_lock_and_accountin
                 project_id=1,
                 doc_id=document["doc_id"],
                 old_doc_ids=[],
-                content="cancelled physical upload",
+                document=ConvertedDocument(
+                    source="cancel-insert.txt", format="text",
+                    blocks=[Block(order=0, kind="paragraph",
+                                  text="cancelled physical upload")],
+                ),
                 filename="cancel-insert.txt",
                 date="",
                 doc_type="meeting",
@@ -846,7 +851,7 @@ def test_post_finalize_cancel_after_actual_chroma_write_removes_partial_vectors(
     collection = CancelAfterAddCollection(base_collection.collection)
     item = MemoryItem(category="issue", content="cancel after chroma write")
 
-    with patch("backend.api.upload.extract", return_value=[item]), patch(
+    with patch("backend.api.upload.extract", return_value=([item], [])), patch(
         "backend.pipeline.ingestor.get_collection", return_value=collection
     ), patch("backend.retriever.memory_vector.get_collection", return_value=collection):
         with pytest.raises(asyncio.CancelledError):
@@ -854,7 +859,11 @@ def test_post_finalize_cancel_after_actual_chroma_write_removes_partial_vectors(
                 project_id=1,
                 doc_id=document["doc_id"],
                 old_doc_ids=[],
-                content="actual chroma cancellation",
+                document=ConvertedDocument(
+                    source="cancel-chroma.txt", format="text",
+                    blocks=[Block(order=0, kind="paragraph",
+                                  text="actual chroma cancellation")],
+                ),
                 filename="cancel-chroma.txt",
                 date="",
                 doc_type="meeting",

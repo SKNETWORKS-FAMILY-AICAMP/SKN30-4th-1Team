@@ -896,7 +896,7 @@ def test_upload_accepts_docx_and_passes_structure_to_ingest():
          patch("backend.api.upload.reserve_document", return_value=reservation), \
          patch("backend.api.upload.write_reserved_file"), \
          patch("backend.api.upload.finalize_document", return_value=finalized), \
-         patch("backend.api.upload.extract", return_value=[]), \
+         patch("backend.api.upload.extract", return_value=([], [])), \
          patch("backend.api.upload.ingest") as mock_ingest, \
          patch("backend.api.upload.update_project_memory"), \
          patch("backend.api.upload._set_doc_status"):

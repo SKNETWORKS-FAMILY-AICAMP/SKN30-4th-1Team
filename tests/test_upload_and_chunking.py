@@ -4,6 +4,7 @@ from unittest.mock import patch, MagicMock, call, ANY
 from fastapi.testclient import TestClient
 
 from backend.main import app
+from backend.pipeline.converters import Block, ConvertedDocument
 
 _client = TestClient(app, raise_server_exceptions=False)
 
@@ -330,7 +331,11 @@ def test_completion_suggestion_failure_does_not_destroy_indexed_document():
          patch("backend.api.upload.update_project_memory"), \
          patch("backend.api.upload.fail_document") as mock_fail:
         upload._process_upload_locked(
-            project_id=1, doc_id=5, old_doc_ids=[], content="본문",
+            project_id=1, doc_id=5, old_doc_ids=[],
+            document=ConvertedDocument(
+                source="2026-04-13.md", format="text",
+                blocks=[Block(order=0, kind="paragraph", text="본문")],
+            ),
             filename="2026-04-13.md", date="2026-04-13", doc_type="meeting",
             file_path="/tmp/x", processing_token="tok",
         )
@@ -508,9 +513,13 @@ def test_process_upload_wires_capped_open_actions_through_to_ingest():
         mock_extract.return_value = ([], completions)
 
         upload._process_upload_locked(
-            project_id=1, doc_id=5, old_doc_ids=[], content="",  # 빈 원문 → 청크 없음 →
-            filename="2026-04-13.md", date="2026-04-13", doc_type="meeting",  # Chroma
-            file_path="/tmp/x",  # 임베딩 호출 자체가 생략됨(이 테스트의 관심사가 아님)
+            project_id=1, doc_id=5, old_doc_ids=[],
+            # blocks=[] → ConvertedDocument.text 가 "" → 청크 없음 → Chroma 임베딩 호출
+            # 자체가 생략된다(이 테스트의 관심사가 아님). 정상 변환기는 빈 blocks 문서를
+            # 만들지 않으므로 이것은 운영 입력을 대표하지 않는 인공 fixture 다.
+            document=ConvertedDocument(source="2026-04-13.md", format="text", blocks=[]),
+            filename="2026-04-13.md", date="2026-04-13", doc_type="meeting",
+            file_path="/tmp/x",
         )
 
         extract_open_actions = mock_extract.call_args.kwargs["open_actions"]
