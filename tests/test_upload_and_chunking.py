@@ -1,4 +1,5 @@
 """_split_text() chunk size 불변식 및 upload_document 비동기 경로 테스트."""
+import pytest
 from unittest.mock import patch, MagicMock, call, ANY
 
 from fastapi.testclient import TestClient
@@ -763,3 +764,139 @@ def test_tool_schema_still_declares_completions():
     schema = ExtractionResult.model_json_schema()
     assert "completions" in schema["properties"]
     assert "items" in schema["properties"]
+
+
+# ─── main 동기화 경계 회귀 (N1~N3) ──────────────────────────────────────────
+# origin/main 의 ConvertedDocument·구조 청킹과 이 브랜치의 완료 판정이 upload→ingest
+# 경계에서 자동 병합됐다. git 이 서로 다른 줄이라 합쳐준 것뿐이라, 결합이 의미상
+# 맞는지는 별도로 고정해야 한다.
+
+
+def test_upload_passes_document_text_and_same_objects_to_extract_and_ingest():
+    """N1: upload→extract→ingest 배선을 값과 '객체 동일성'으로 고정한다.
+
+    _process_upload_locked 는 main 이 넘긴 ConvertedDocument 를 `content = document.text`
+    로 풀어 extract 에 주고, 같은 document 를 converted= 로 ingest 에 넘긴다. 그 다리 줄이
+    사라지거나 다른 문자열로 바뀌어도 **라인 커버리지는 그대로다**(실행은 되므로).
+    값·동일성 단언이 없으면 검출되지 않는 종류라 다섯 축을 한 테스트에 묶는다.
+    """
+    from backend.api import upload
+    from backend.pipeline.models import CompletionReport
+
+    document = ConvertedDocument(
+        source="회의록.md", format="text",
+        blocks=[
+            Block(order=0, kind="paragraph", text="첫 문단"),
+            Block(order=1, kind="paragraph", text="둘째 문단"),
+        ],
+    )
+    # 블록이 2개라 document.text 는 "첫 문단\n\n둘째 문단" — 앞 블록만 넘기는 배선 버그도 잡힌다.
+    capped = [{"id": 1, "content": "액션 1"}]
+    completions = [CompletionReport(action_id=1, evidence="완료", fully_complete=True)]
+
+    with patch.object(upload, "_fetch_open_actions", return_value=[{"id": 1, "content": "액션 1"}]), \
+         patch.object(upload, "cap_open_actions", return_value=capped), \
+         patch.object(upload, "processing_owned", return_value=True), \
+         patch.object(upload, "extract", return_value=([], completions)) as mock_extract, \
+         patch.object(upload, "ingest") as mock_ingest:
+        upload._process_upload_locked(
+            project_id=1, doc_id=5, old_doc_ids=[],
+            document=document,
+            filename="회의록.md", date="2026-04-13", doc_type="meeting",
+            file_path="/tmp/x", processing_token="tok",
+        )
+
+    assert mock_extract.call_args.args[0] == document.text            # A1
+    assert mock_ingest.call_args.kwargs["raw_text"] == document.text  # A2
+    assert mock_ingest.call_args.kwargs["converted"] is document      # A3
+    # A4 — 절단된 목록이 양쪽에 "같은 객체"로. 한쪽만 원본을 넘기는 배선 버그 차단.
+    assert mock_extract.call_args.kwargs["open_actions"] is capped
+    assert mock_ingest.call_args.kwargs["open_actions"] is capped
+    # A5 — extract 가 돌려준 completions 가 그대로 ingest 로.
+    assert mock_ingest.call_args.kwargs["completions"] is completions
+
+
+def test_chunk_source_coordinates_reach_chroma_metadata():
+    """N2: 구조 청킹의 출처 좌표가 실제 collection.add 까지 도달하는지 '값'으로 확인한다.
+
+    source_format 은 _build_chunks() 가 아니라 ingest() 가 collection.add 직전에 붙이므로
+    청커 단위 테스트로는 덮이지 않는다. 그리고 평문 폴백 경로도 같은 키를 갖기 때문에
+    (_UNKNOWN_CHUNK_META) **키 존재만 검사하면 구조 경로가 죽어도 통과한다.** 그래서
+    -1/"" 이 아닌 실제 좌표값을 대조한다.
+    """
+    from backend.pipeline import ingestor
+
+    document = ConvertedDocument(
+        source="보고서.pdf", format="pdf",
+        blocks=[Block(order=7, kind="paragraph", text="본문 조각", page=3)],
+    )
+    collection = MagicMock()
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = MagicMock()
+    conn.cursor.return_value.__exit__.return_value = False
+
+    with patch.object(ingestor, "get_connection", return_value=conn), \
+         patch.object(ingestor, "upsert_memory_vectors"), \
+         patch.object(ingestor, "get_collection", return_value=collection):
+        ingestor.ingest(
+            project_id=1, doc_id=5, items=[], raw_text=document.text,
+            source="보고서.pdf", date="2026-04-13", doc_type="meeting",
+            source_metadata={"source_kind": "document"},
+            converted=document,
+        )
+
+    meta = collection.add.call_args.kwargs["metadatas"][0]
+    assert meta["source_format"] == "pdf"   # ingest 가 converted.format 에서 붙이는 값
+    assert meta["page_start"] == 3          # Block.page → chunk_document → to_metadata
+    assert meta["block_start"] == 7         # Block.order 에서 온 실제 좌표
+
+
+@pytest.mark.parametrize("failing_step", ["upsert_memory_vectors", "chunk_add"])
+def test_vector_write_failure_rolls_back_and_leaves_document_unindexed(failing_step):
+    """N3: 벡터 쓰기 두 지점의 실패가 각각 rollback 되고 indexed 로 넘어가지 않는다.
+
+    upsert_memory_vectors(memory 벡터)와 collection.add(문서 청크)는 실패 시점과 남을 수
+    있는 Chroma 기록이 달라 한쪽만 검증하면 다른 쪽 회귀를 놓친다. 기존
+    test_ingest_failure_sets_failed_status 는 ingest 전체를 mock 으로 실패시켜 이 내부
+    두 지점을 구분하지 못하고, test_ingest_skips_supersede_when_chunk_add_fails 는
+    예외 전파와 supersede 미호출만 본다.
+    """
+    from backend.pipeline import ingestor
+
+    document = ConvertedDocument(
+        source="보고서.pdf", format="pdf",
+        blocks=[Block(order=0, kind="paragraph", text="본문 조각", page=1)],
+    )
+    cursor = MagicMock()
+    cursor.fetchone.return_value = {"status": "processing", "processing_token": "tok"}
+    cursor.fetchall.return_value = []
+    cursor.rowcount = 1
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cursor
+    conn.cursor.return_value.__exit__.return_value = False
+
+    collection = MagicMock()
+    boom = RuntimeError("벡터 저장소 장애")
+    upsert_patch = {"side_effect": boom} if failing_step == "upsert_memory_vectors" else {}
+    if failing_step == "chunk_add":
+        collection.add.side_effect = boom
+
+    with patch.object(ingestor, "get_connection", return_value=conn), \
+         patch.object(ingestor, "get_collection", return_value=collection), \
+         patch.object(ingestor, "upsert_memory_vectors", **upsert_patch):
+        with pytest.raises(RuntimeError, match="벡터 저장소 장애"):
+            ingestor.ingest(
+                project_id=1, doc_id=5, items=[], raw_text=document.text,
+                source="보고서.pdf", date="2026-04-13", doc_type="meeting",
+                source_metadata={"source_kind": "document"},
+                converted=document, processing_token="tok",
+            )
+
+    # 예외가 ingest 밖으로 전파됐고(위 raises), 트랜잭션은 되돌려졌다
+    assert conn.rollback.called, "실패 시 rollback 이 호출돼야 한다"
+    # 문서가 indexed 로 확정되지 않았다 — 이게 없으면 벡터 없는 문서가 색인 완료로 남는다
+    indexed_updates = [
+        c for c in cursor.execute.call_args_list
+        if c.args and "status='indexed'" in str(c.args[0])
+    ]
+    assert not indexed_updates, "실패 경로에서 indexed UPDATE 가 실행되면 안 된다"
