@@ -56,6 +56,7 @@ prefix). CORS `OPTIONS` 프리플라이트도 통과.
 |-----------|------|-----------|
 | `POST /api/v1/auth/signup`·`/auth/login` | 공개 | — |
 | `GET /api/v1/auth/me` | 인증 | (프로젝트 무관) |
+| `GET /api/v1/capabilities` | 인증 | (프로젝트 무관) |
 | `GET·POST /api/v1/projects` | 인증 | (프로젝트 무관) |
 | `GET /api/v1/projects/{id}` | 인증 | viewer |
 | `PATCH /api/v1/projects/{id}` | 인증 | member |
@@ -121,6 +122,28 @@ MySQL, schema, ChromaDB, upload 저장소의 준비 상태를 확인한다. 인�
     "upload": {"status": "ok"}
   },
   "request_id": "<uuid>"
+}
+```
+
+---
+
+### `GET /api/v1/capabilities`
+
+데스크톱 앱이 사용할 문서 형식과 업로드 크기 제한을 조회한다. 인증이 필요하다.
+
+**응답 `200`**
+```json
+{
+  "schema_version": 1,
+  "project_documents": {
+    "extensions": ["docx", "md", "pdf", "txt"],
+    "max_file_bytes": 10485760
+  },
+  "query_attachments": {
+    "extensions": ["docx", "md", "pdf", "txt"],
+    "max_file_bytes": 8388608,
+    "max_total_bytes": 8388608
+  }
 }
 ```
 

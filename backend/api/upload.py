@@ -9,9 +9,10 @@ from pydantic import BaseModel
 from ..db.mysql import get_connection
 from ..document_content import (
     ALLOWED_SUFFIXES as _ALLOWED_SUFFIXES,
-    MAX_FILE_BYTES as _MAX_FILE_BYTES,
+    PROJECT_DOCUMENT_MAX_FILE_BYTES as _MAX_FILE_BYTES,
     DocumentContentError,
     extract_document_text,
+    supported_formats_label,
 )
 from ..pipeline.extractor import extract
 from ..pipeline.ingestor import ingest
@@ -258,7 +259,10 @@ async def upload_document(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid filename")
     if Path(filename).suffix.lower() not in _ALLOWED_SUFFIXES:
-        raise HTTPException(status_code=400, detail="지원하지 않는 파일 형식입니다. (.md / .txt / .pdf)")
+        raise HTTPException(
+            status_code=400,
+            detail=f"지원하지 않는 파일 형식입니다. ({supported_formats_label()})",
+        )
     doc_type = _infer_doc_type(filename)
 
     data = await file.read()

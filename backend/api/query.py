@@ -9,7 +9,14 @@ from typing import List, Dict
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from ..db.mysql import get_connection
-from ..document_content import DocumentContentError, extract_document_text
+from ..document_content import (
+    ALLOWED_SUFFIXES,
+    QUERY_ATTACHMENT_MAX_FILE_BYTES,
+    QUERY_ATTACHMENT_MAX_TOTAL_BYTES,
+    DocumentContentError,
+    extract_document_text,
+    supported_formats_label,
+)
 from ..pipeline.extractor import extract
 from ..pipeline.ingestor import ingest
 from ..graph import update_project_memory, run_qa
@@ -21,7 +28,6 @@ from ..retriever.query_intent import (
     answer_overview,
     classify_question,
 )
-from .upload import _ALLOWED_SUFFIXES, _MAX_FILE_BYTES
 from .auth import require_project_access
 from ..rate_limit import RATE_LIMIT_QUERY, authenticated_user_key, limiter
 from ..quota import (
@@ -66,23 +72,30 @@ def _prepare_attachment_context(attachments: List[QueryAttachment]) -> tuple[str
     sections = []
     sources: List[str] = []
     used_chars = 0
+    used_bytes = 0
 
     for attachment in attachments:
         filename = Path(attachment.filename).name
-        if Path(filename).suffix.lower() not in _ALLOWED_SUFFIXES:
-            raise HTTPException(status_code=400, detail="지원하지 않는 첨부 파일 형식입니다. (.md / .txt / .pdf)")
+        if Path(filename).suffix.lower() not in ALLOWED_SUFFIXES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"지원하지 않는 첨부 파일 형식입니다. ({supported_formats_label()})",
+            )
 
         try:
             data = base64.b64decode(attachment.content_base64, validate=True)
         except (binascii.Error, ValueError):
             raise HTTPException(status_code=400, detail="첨부 파일을 읽을 수 없습니다.")
 
-        if len(data) > _MAX_FILE_BYTES:
-            raise HTTPException(status_code=413, detail="첨부 파일 크기는 10 MB를 초과할 수 없습니다.")
+        if len(data) > QUERY_ATTACHMENT_MAX_FILE_BYTES:
+            raise HTTPException(status_code=413, detail="첨부 파일 크기가 허용 한도를 초과했습니다.")
+        used_bytes += len(data)
+        if used_bytes > QUERY_ATTACHMENT_MAX_TOTAL_BYTES:
+            raise HTTPException(status_code=413, detail="전체 첨부 파일 크기가 허용 한도를 초과했습니다.")
 
         remaining = _ATTACHMENT_MAX_CHARS_TOTAL - used_chars
         if remaining <= 0:
-            break
+            continue
 
         try:
             text = extract_document_text(filename, data).strip()

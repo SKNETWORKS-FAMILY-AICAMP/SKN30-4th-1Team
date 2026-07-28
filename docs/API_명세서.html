@@ -426,6 +426,18 @@
       </div>
     </div>
 
+    <div class="endpoint" id="capabilities">
+      <div class="endpoint-header">
+        <span class="method GET">GET</span>
+        <span class="path">/api/v1/capabilities</span>
+      </div>
+      <div class="endpoint-desc">데스크톱 앱이 사용할 문서 형식과 업로드 크기 제한 조회 (인증 필요).</div>
+      <div class="endpoint-body">
+        <div class="res-label"><span class="s200">200</span> OK</div>
+        <pre><code>{ "schema_version": 1, "project_documents": { "extensions": ["docx","md","pdf","txt"], "max_file_bytes": 10485760 }, "query_attachments": { "extensions": ["docx","md","pdf","txt"], "max_file_bytes": 8388608, "max_total_bytes": 8388608 } }</code></pre>
+      </div>
+    </div>
+
     <!-- ── Projects ───────────────────────────────────────────── -->
     <h2 id="projects-create">프로젝트</h2>
 

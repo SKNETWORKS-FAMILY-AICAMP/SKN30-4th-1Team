@@ -3,7 +3,9 @@
 import io
 import logging
 import unicodedata
+import zipfile
 from pathlib import Path
+from typing import Callable
 
 from pypdf import PdfReader
 
@@ -19,8 +21,11 @@ _pypdf_logger.setLevel(logging.CRITICAL + 1)
 _pypdf_logger.propagate = False
 
 
-ALLOWED_SUFFIXES = {".md", ".txt", ".pdf"}
-MAX_FILE_BYTES = 10 * 1024 * 1024
+PROJECT_DOCUMENT_MAX_FILE_BYTES = 10 * 1024 * 1024
+QUERY_ATTACHMENT_MAX_FILE_BYTES = 8 * 1024 * 1024
+QUERY_ATTACHMENT_MAX_TOTAL_BYTES = 8 * 1024 * 1024
+# 기존 호출부와 테스트가 사용하는 이름을 유지한다.
+MAX_FILE_BYTES = PROJECT_DOCUMENT_MAX_FILE_BYTES
 INVALID_DOCUMENT_CODE = "INVALID_DOCUMENT_CONTENT"
 
 
@@ -55,21 +60,111 @@ def _decode_text(data: bytes) -> str:
     raise DocumentContentError("지원하는 문자 인코딩(UTF-8/CP949)이 아닙니다.")
 
 
+def _read_pdf(data: bytes) -> str:
+    if not data.startswith(b"%PDF-"):
+        raise DocumentContentError("PDF 확장자와 실제 파일 형식이 일치하지 않습니다.")
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        return _validate_text_shape(
+            "\n".join(page.extract_text() or "" for page in reader.pages)
+        )
+    except DocumentContentError:
+        raise
+    except Exception as exc:
+        raise DocumentContentError("올바른 PDF 문서가 아닙니다.") from exc
+
+
+_DOCX_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
+_DOCX_MAX_ENTRY_BYTES = 100 * 1024 * 1024
+_DOCX_MAX_COMPRESSION_RATIO = 120
+
+
+def _guard_docx_archive(data: bytes) -> None:
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            entries = archive.infolist()
+    except (
+        zipfile.BadZipFile,
+        zipfile.LargeZipFile,
+        NotImplementedError,
+        UnicodeError,
+        ValueError,
+        OSError,
+    ) as exc:
+        raise DocumentContentError("올바른 DOCX 문서가 아닙니다.") from exc
+
+    total = 0
+    for entry in entries:
+        if entry.file_size > _DOCX_MAX_ENTRY_BYTES:
+            raise DocumentContentError("DOCX 내부 항목이 안전한 처리 한도를 초과했습니다.")
+        total += entry.file_size
+    if total > _DOCX_MAX_UNCOMPRESSED_BYTES or (
+        data and total / len(data) > _DOCX_MAX_COMPRESSION_RATIO
+    ):
+        raise DocumentContentError("DOCX 압축 해제 크기가 안전한 처리 한도를 초과했습니다.")
+
+
+def _read_docx(data: bytes) -> str:
+    _guard_docx_archive(data)
+    try:
+        import docx
+        from docx.oxml.ns import qn
+        from docx.table import Table
+        from docx.text.paragraph import Paragraph
+
+        document = docx.Document(io.BytesIO(data))
+        parts: list[str] = []
+        for child in document.element.body.iterchildren():
+            if child.tag == qn("w:p"):
+                text = Paragraph(child, document).text.strip()
+                if text:
+                    parts.append(text)
+            elif child.tag == qn("w:tbl"):
+                table = Table(child, document)
+                for row in table.rows:
+                    cells: list[str] = []
+                    previous_cell = None
+                    for cell in row.cells:
+                        if cell._tc is previous_cell:
+                            continue
+                        previous_cell = cell._tc
+                        text = " ".join(
+                            line.strip() for line in cell.text.splitlines() if line.strip()
+                        )
+                        if text:
+                            cells.append(text)
+                    if cells:
+                        parts.append(" | ".join(cells))
+        return _validate_text_shape("\n".join(parts))
+    except DocumentContentError:
+        raise
+    except Exception as exc:
+        raise DocumentContentError("올바른 DOCX 문서가 아닙니다.") from exc
+
+
+DocumentParser = Callable[[bytes], str]
+DOCUMENT_PARSERS: dict[str, DocumentParser] = {
+    ".md": _decode_text,
+    ".txt": _decode_text,
+    ".pdf": _read_pdf,
+    ".docx": _read_docx,
+}
+ALLOWED_SUFFIXES = set(DOCUMENT_PARSERS)
+
+
+def supported_extensions() -> list[str]:
+    return sorted(suffix.removeprefix(".") for suffix in DOCUMENT_PARSERS)
+
+
+def supported_formats_label() -> str:
+    return " / ".join(f".{extension}" for extension in supported_extensions())
+
+
 def extract_document_text(filename: str, data: bytes) -> str:
     """확장자에 맞는 실제 내용인지 확인한 뒤 텍스트를 반환한다."""
-    suffix = Path(filename).suffix.lower()
-    if suffix == ".pdf":
-        if not data.startswith(b"%PDF-"):
-            raise DocumentContentError("PDF 확장자와 실제 파일 형식이 일치하지 않습니다.")
-        try:
-            reader = PdfReader(io.BytesIO(data))
-            return _validate_text_shape(
-                "\n".join(page.extract_text() or "" for page in reader.pages)
-            )
-        except DocumentContentError:
-            raise
-        except Exception as exc:
-            raise DocumentContentError("올바른 PDF 문서가 아닙니다.") from exc
-    if suffix in {".md", ".txt"}:
-        return _decode_text(data)
-    raise DocumentContentError("지원하지 않는 문서 형식입니다.")
+    parser = DOCUMENT_PARSERS.get(Path(filename).suffix.lower())
+    if parser is None:
+        raise DocumentContentError(
+            f"지원하지 않는 문서 형식입니다. ({supported_formats_label()})"
+        )
+    return parser(data)

@@ -8,7 +8,16 @@ const DIST_INDEX = resolve("dist/index.html");
 const DIST_ASSETS = resolve("dist/assets");
 const DIST_LICENSES = resolve("dist/licenses");
 const MACOS_TAURI_CONFIG = resolve("src-tauri/tauri.macos.conf.json");
-const PROJECT_STORAGE_KEY = `paim.projects.v8.server.${encodeURIComponent("http://127.0.0.1:7272")}`;
+const PRODUCTION_ENV = resolve(".env.production");
+const releaseServerUrl = readFileSync(PRODUCTION_ENV, "utf8")
+  .match(/^VITE_PAIM_API_BASE_URL=(.+)$/m)?.[1]
+  .trim();
+
+if (!releaseServerUrl) {
+  throw new Error("VITE_PAIM_API_BASE_URL is missing from .env.production");
+}
+
+const PROJECT_STORAGE_KEY = `paim.projects.v8.server.${encodeURIComponent(releaseServerUrl)}`;
 const PROJECT_PANEL_COLLAPSED_STORAGE_KEY = "paim.projectPanelCollapsed.v2";
 const CDP_REQUEST_TIMEOUT_MS = 15_000;
 const WEBSOCKET_OPEN_TIMEOUT_MS = 5_000;
