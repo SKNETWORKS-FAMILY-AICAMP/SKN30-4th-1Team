@@ -147,12 +147,13 @@ def test_extractor_adds_repo_readme_rules_without_changing_document_prompt(monke
     doc_client = _FakeExtractorClient()
     monkeypatch.setattr("backend.pipeline.extractor.get_llm_client", lambda provider=None: doc_client)
     extract("설치: npm install", default_source="meeting.md")
-    assert "Do not extract installation steps" not in doc_client.system
+    assert "README 규칙" not in doc_client.system
 
     readme_client = _FakeExtractorClient()
     monkeypatch.setattr("backend.pipeline.extractor.get_llm_client", lambda provider=None: readme_client)
     extract("설치: npm install", default_source="README.md", source_kind="repo_readme")
-    assert "Do not extract installation steps" in readme_client.system
+    assert "README 규칙" in readme_client.system
+    assert "설치 절차" in readme_client.system
 
 
 def test_extractor_repo_commits_prompt_marks_actions_completed(monkeypatch):
@@ -160,7 +161,7 @@ def test_extractor_repo_commits_prompt_marks_actions_completed(monkeypatch):
     client = _FakeExtractorClient()
     monkeypatch.setattr("backend.pipeline.extractor.get_llm_client", lambda provider=None: client)
     extract("[abc1234] 2026-07-02: implement settings", default_source="commits.txt", source_kind="repo_commits")
-    assert "completed must be true" in client.system
+    assert "completed는 true" in client.system
 
 
 def test_extractor_filters_readme_setup_actions(monkeypatch):

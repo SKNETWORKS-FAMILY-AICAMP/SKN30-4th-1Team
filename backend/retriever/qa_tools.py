@@ -80,17 +80,37 @@ def _compact_retrieval_debug(debug: dict) -> dict:
 
 @tool(response_format="content_and_artifact")
 def search_project_evidence(
-    query: str,
+    query: Annotated[
+        str,
+        (
+            "질문이 지목한 대상과 요구 속성을 모두 보존한 기본 검색어입니다. "
+            "주변 작업·상위 개념으로 임의 확장하지 않습니다."
+        ),
+    ],
     project_id: Annotated[int, InjectedState("project_id")],
-    alternate_queries: Optional[list[str]] = None,
-    include_history: bool = False,
+    alternate_queries: Annotated[
+        Optional[list[str]],
+        (
+            "기본 검색어와 같은 의미의 표기 변형을 최대 3개 전달합니다. "
+            "대상·역할·시점·수치 단위를 바꾸거나 개수를 채우기 위한 변형은 금지합니다."
+        ),
+    ] = None,
+    include_history: Annotated[
+        bool,
+        (
+            "사용자가 변화 과정, 이전 상태, 번복·대체 관계를 묻는 경우에만 true입니다. "
+            "단순 이유·현재 상태 질문만으로 true를 추측하지 않습니다."
+        ),
+    ] = False,
 ) -> tuple[str, dict]:
-    """Search project records for a specific fact, metric, owner, date, reason, or change history.
+    """현재 프로젝트에 수집된 기록에서 특정 대상의 근거를 검색합니다.
 
-    Use this for target-to-attribute questions such as "SDK 연동은 누가 담당했나?",
-    for percentages and other measured values, and for comparisons across meetings.
-    ``alternate_queries`` may contain at most three faithful rewrites of the user's
-    question. Set ``include_history`` when the question asks how a decision changed.
+    사용자가 대상을 지목했지만 담당자·수치·날짜·상태·이유·배경 같은 속성을
+    모를 때 사용합니다. 이미 주어진 조건으로 목록이나 정확한 개수를 구하는 요청,
+    프로젝트 전반의 조망 요청에는 사용하지 않습니다.
+
+    반환된 내용은 최종 답변이 아니라 검토할 근거입니다. 조회 성공 0건과 오류,
+    부분 결과를 구분하고, 프로젝트 메모리 요약만으로 구체 사실을 확정하지 않습니다.
     """
     context, sources, debug = qa_engine._build_context(
         project_id,
@@ -114,45 +134,61 @@ def search_project_evidence(
 
 @tool(response_format="content_and_artifact")
 def query_structured_memory(
-    operation: MemoryOperation,
-    text_query: str,
+    operation: Annotated[
+        MemoryOperation,
+        "사용자가 요구한 결과 형태를 그대로 선택합니다. list는 목록, count는 개수입니다.",
+    ],
+    text_query: Annotated[
+        str,
+        (
+            "목록의 관련도 정렬에 사용할 구체 대상 문구입니다. "
+            "구조화 필터만으로 대상 집합이 완전히 정의되면(전체 집합 count 포함) 빈 문자열입니다."
+        ),
+    ],
     project_id: Annotated[int, InjectedState("project_id")],
     category: Annotated[
         MemoryCategory,
         (
-            "Required category scope. decision: an explicitly agreed or confirmed "
-            "choice, policy, or direction; action: concrete work to be performed; "
-            "issue: a current problem or blocker that needs resolution; risk: a "
-            "potential future problem or uncertainty; all: use only when the request "
-            "intentionally spans categories or names no category."
+            "질문에 명시된 분류 범위입니다. decision: 합의·확정된 선택이나 방침, "
+            "action: 수행할 구체 작업, issue: 해결이 필요한 현재 문제, "
+            "risk: 미래의 위협·불확실성, "
+            "all: 여러 분류를 의도적으로 함께 묻거나 분류 조건이 전혀 없을 때만 사용."
         ),
     ],
-    owner: Optional[str] = None,
+    owner: Annotated[
+        Optional[str],
+        (
+            "질문에 조건으로 이미 주어진 담당자만 넣습니다. "
+            "사용자가 묻고 있는 미지의 담당자를 추측해 넣지 않습니다."
+        ),
+    ] = None,
     completion_status: Annotated[
         Optional[CompletionStatus],
         (
-            "Optional action-only status filter. open: explicitly assigned, pending, "
-            "in progress, or not done; completed: explicitly done, finished, or "
-            "delivered; unknown: the evidence does not establish whether the action "
-            "is complete. Never infer open from a missing completed_at value."
+            "action 전용 상태 필터입니다. open: 배정·대기·진행 중이거나 끝나지 않음, "
+            "completed: 완료·전달이 명시됨, unknown: 완료 여부를 근거로 확정할 수 없음. "
+            "completed_at이 비었다는 이유로 open으로 간주하지 않습니다."
         ),
     ] = None,
-    due_within_days: Optional[int] = None,
-    overdue: Optional[bool] = None,
-    limit: int = 8,
+    due_within_days: Annotated[
+        Optional[int],
+        "사용자가 명시한 N일 이내 마감 조건입니다.",
+    ] = None,
+    overdue: Annotated[
+        Optional[bool],
+        "사용자가 기한 초과 조건을 요구할 때만 true입니다.",
+    ] = None,
+    limit: Annotated[
+        int,
+        "목록 표시 희망 상한이며 서버 최대값을 넘을 수 없습니다.",
+    ] = 8,
 ) -> tuple[str, dict]:
-    """List or count project memory using explicit structured conditions.
+    """질문에 이미 명시된 구조화 조건으로 프로젝트 기록을 목록 조회하거나 개수 집계합니다.
 
-    Use this only for true list/count requests. ``owner`` is a condition already
-    present in the question, never the person the user is asking you to discover.
-    ``category`` is required; use ``all`` only when the request intentionally
-    spans categories or names no category.
-    ``completion_status`` is ``open``, ``completed``, or ``unknown``; do not
-    turn an unknown status into open.
-    Put a concrete target phrase in ``text_query`` so list records can be ranked
-    and count records can be restricted by that phrase. Leave it empty when the
-    structured filters define the complete target set, including an all-record count.
-    Raw SQL is not supported, and list output is always capped at ten rows.
+    사용자가 모르는 담당자·상태·수치·이유를 발견하는 용도가 아닙니다.
+    그 경우 search_project_evidence를 사용합니다. 정확한 count는 구조화 필터가
+    정의한 집합에만 사용하고, 자연어의 의미 유사도를 SQL 부분문자열 개수로 바꾸지 않습니다.
+    원시 SQL은 지원하지 않으며 목록 결과에는 서버 상한이 적용됩니다.
     """
     text_query = str(text_query or "").strip()
     limit = max(1, min(int(limit), MEMORY_TOOL_MAX_ROWS))
@@ -243,15 +279,21 @@ def query_structured_memory(
 def get_project_overview(
     project_id: Annotated[int, InjectedState("project_id")],
 ) -> tuple[str, dict]:
-    """Return the current project overview summary and complete active Action Plan.
+    """현재 프로젝트 전체를 폭넓게 조망할 때 저장된 요약, 분류별 집계와
+    유효한 Action Plan을 반환합니다.
 
-    Use only when the user explicitly asks for a briefing or overall project status.
-    A phrase such as "전체 정답률" is a specific metric and must use evidence search.
-    The Action Plan is reference data: select only what the question needs, and list
-    every item only when the user explicitly asks for the complete list.
-    Treat ``completion_status`` as the only status evidence. ``unknown`` means the
-    status is unconfirmed, never open, unfinished, or in progress. ``status_counts``
-    is the authoritative aggregate when summary wording conflicts with action rows.
+    프로젝트 브리핑·전반 현황·전체 위험과 다음 할 일을 묻는 요청에만 사용합니다.
+    범위 단어가 포함돼도 요구 결과가 하나의 지표·수치·대상 속성이면
+    search_project_evidence를 사용합니다. 표면 단어가 아니라 결과 범위로 선택합니다.
+
+    결과 해석:
+    - status_counts는 Action Plan 상태 집계의 권위 있는 값입니다.
+    - completion_status가 unknown이면 완료 여부 미확인으로 유지합니다.
+      open·미완료·진행 중으로 바꾸지 않습니다.
+    - 요약과 구체 행이 충돌하면 구체 행을 우선합니다.
+    - 일반 브리핑에서는 핵심 항목만 선택하고, 사용자가 전체 목록을 명시했을 때만
+      모두 나열합니다.
+    - 저장된 overview는 운영 DB 전체나 외부 시스템의 실시간 상태가 아닙니다.
     """
     context = _fetch_overview_context(project_id)
     rows = list((context.get("action_plan") or {}).get("items") or [])

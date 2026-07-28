@@ -93,11 +93,11 @@ def test_overview_tool_returns_complete_action_plan(monkeypatch):
 def test_overview_prompt_contract_is_selective_and_preserves_unknown():
     description = qa_tools.get_project_overview.description
 
-    assert "complete active Action Plan" in description
-    assert "only when the user explicitly asks for the complete list" in description
-    assert "completion_status`` as the only status evidence" in description
-    assert "status_counts" in description and "authoritative aggregate" in description
-    assert "필요한 핵심 액션만 선택" in ORCHESTRATOR_SYSTEM_PROMPT
+    assert "유효한 Action Plan" in description
+    assert "사용자가 전체 목록을 명시했을 때만" in description
+    assert "completion_status가 unknown이면 완료 여부 미확인" in description
+    assert "status_counts" in description and "권위 있는 값" in description
+    assert "핵심 액션만 선택" in ORCHESTRATOR_SYSTEM_PROMPT
     assert "현재 상태는" in ORCHESTRATOR_SYSTEM_PROMPT
     assert "completion_status만 근거" in ORCHESTRATOR_SYSTEM_PROMPT
     assert "status_counts가 현재 상태의 권위 있는 집계" in ORCHESTRATOR_SYSTEM_PROMPT
@@ -122,7 +122,7 @@ def test_memory_tool_requires_explicit_category_scope():
         f"{status}:" in status_description
         for status in ("open", "completed", "unknown")
     )
-    assert "Never infer open" in status_description
+    assert "completed_at이 비었다는 이유로 open으로 간주하지 않습니다" in status_description
 
 
 def test_memory_tool_rejects_completely_empty_selector(monkeypatch):

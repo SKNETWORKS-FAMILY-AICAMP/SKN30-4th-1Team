@@ -49,9 +49,19 @@ def test_structured_row_line_repo_marker():
 
 
 def test_system_qa_has_citation_rule():
+    """본문 출처 인용 규칙이 유지돼야 한다.
+
+    골든셋의 citation_grounding(run_eval.py)은 답변 **본문**의 `(출처: …)` 마커를
+    실제 검색된 출처 라벨과 대조해 **환각 인용을 잡아낸다**. 본문 인용을 없애면
+    검증할 대상이 사라지고, sources 필드로 대체하면 그 값이 항상 검색 결과에서
+    오므로 언제나 만점이 되는 무의미한 지표가 된다.
+    본문 출처 제거는 SourceRef·used_source_ids 계약(S01)이 갖춰진 뒤에만 안전하다.
+    """
     assert "출처 인용" in qa_engine.SYSTEM_QA
     # 유형 라벨을 출처로 쓰지 말라는 지시가 있어야 한다.
     assert "유형 이름을" in qa_engine.SYSTEM_QA
+    # 환각 인용 금지가 명시돼야 한다.
+    assert "지어내지 않습니다" in qa_engine.SYSTEM_QA
 
 
 # ── 원문 청크 컨텍스트에 출처 마커가 실리는지 (_build_context 수준) ────────────
