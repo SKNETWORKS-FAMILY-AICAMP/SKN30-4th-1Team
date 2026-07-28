@@ -740,6 +740,8 @@ async def test_lifespan_collects_watchdog_before_executor_shutdown(monkeypatch):
         startup_module, "ensure_runtime_schema"
     ), patch.object(startup_module, "ensure_schema_v8"), patch.object(
         startup_module, "ensure_schema_v9"
+    ), patch.object(startup_module, "ensure_schema_v10"), patch.object(
+        startup_module, "recover_interrupted_repository_syncs"
     ), patch.object(startup_module, "recover_quota_tasks"), patch.object(
         startup_module, "recover_stale_tasks"
     ), patch.object(startup_module, "backfill_dev_user_membership"), patch.object(

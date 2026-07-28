@@ -107,7 +107,7 @@ async def lifespan(app: FastAPI):
     from concurrent.futures import ThreadPoolExecutor
     from .api.auth import _auth_mode, validate_jwt_config
     from .config import validate_runtime_config
-    from .startup import ensure_runtime_schema, ensure_schema_v8, ensure_schema_v9, recover_quota_tasks, recover_stale_tasks, backfill_dev_user_membership, stale_watchdog
+    from .startup import ensure_runtime_schema, ensure_schema_v8, ensure_schema_v9, ensure_schema_v10, recover_interrupted_repository_syncs, cleanup_stale_repository_generations, recover_quota_tasks, recover_stale_tasks, backfill_dev_user_membership, stale_watchdog
     from .retriever.memory_vector import backfill_memory_vectors
     from .storage import ensure_upload_root_safe
     if _auth_mode() == "dev":
@@ -119,12 +119,15 @@ async def lifespan(app: FastAPI):
         # 서버는 뜨지만 로그인 503 / 보호 API 401로 인증 불능 상태가 된다.
         validate_runtime_config()
         validate_jwt_config()
-    # 스키마 보증을 다른 DB 작업보다 먼저 실행 — 기존 볼륨에서는 initdb.d가
-    # 재실행되지 않으므로 기반 테이블·컬럼(runtime) → v8(FK·active_memory 뷰) 순.
+    # 스키마 보증을 다른 DB 작업보다 먼저 실행. v10은 generation 컬럼을 추가한 뒤
+    # published_memory/active_memory를 최종 정의하므로 가장 마지막에 실행한다.
     ensure_upload_root_safe(scan_tree=True)
     ensure_runtime_schema()
     ensure_schema_v8()
     ensure_schema_v9()
+    ensure_schema_v10()
+    recover_interrupted_repository_syncs()
+    cleanup_stale_repository_generations()
     recover_quota_tasks()
     recover_stale_tasks()
     backfill_dev_user_membership()

@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 from langchain_core.runnables import RunnableLambda
 
 from backend.retriever import query_intent
+from backend.retriever.index_scope import ProjectIndexScope
 from backend.retriever.mysql_search import search
 
 
@@ -147,7 +148,12 @@ def test_memory_search_completion_status_filter_sql():
     conn, cursor = _make_conn()
 
     with patch("backend.retriever.mysql_search.get_connection", return_value=conn):
-        search(project_id=1, category="action", completion_status="unknown")
+        search(
+            project_id=1,
+            category="action",
+            completion_status="unknown",
+            index_scope=ProjectIndexScope(1),
+        )
 
     sql, params = cursor.execute.call_args.args
     assert "m.category = %s" in sql

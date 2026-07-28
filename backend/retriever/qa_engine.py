@@ -22,6 +22,11 @@ from pydantic import BaseModel, Field
 from rank_bm25 import BM25Okapi
 
 from . import history_intent, mysql_search
+from .index_scope import (
+    ProjectIndexScope,
+    chroma_visibility_filter,
+    load_project_index_scope,
+)
 from .memory_vector import memory_vector_id
 from ..db.chroma import get_collection
 from ..llm.chat_model_factory import get_chat_model
@@ -252,17 +257,25 @@ def _generate_multi_queries(question: str) -> List[str]:
     return queries
 
 
-def _memory_vector_rank_lists(project_id: int, queries: List[str], rows: List[Dict]) -> tuple[List[List[int]], List[Dict]]:
+def _memory_vector_rank_lists(
+    project_id: int,
+    queries: List[str],
+    rows: List[Dict],
+    index_scope: ProjectIndexScope | None = None,
+) -> tuple[List[List[int]], List[Dict]]:
     """ChromaDB memory 벡터 검색 결과를 rows 인덱스 rank list로 변환한다."""
     if not rows:
         return [], []
 
+    scope = index_scope or load_project_index_scope(project_id)
     id_to_idx = {memory_vector_id(row["id"]): idx for idx, row in enumerate(rows)}
     try:
         result = get_collection().query(
             query_texts=queries,
             n_results=min(max(MYSQL_TOP_N, 1), len(rows)),
-            where={"$and": [{"project_id": project_id}, {"item_type": "memory"}]},
+            where=chroma_visibility_filter(
+                scope, {"item_type": "memory"}
+            ),
         )
     except Exception:
         return [], []
@@ -292,7 +305,13 @@ def _memory_vector_rank_lists(project_id: int, queries: List[str], rows: List[Di
     return rank_lists, hits
 
 
-def _rank_mysql_rows(project_id: int, rows: List[Dict], queries: List[str], limit: int) -> tuple[List[Dict], List[Dict]]:
+def _rank_mysql_rows(
+    project_id: int,
+    rows: List[Dict],
+    queries: List[str],
+    limit: int,
+    index_scope: ProjectIndexScope | None = None,
+) -> tuple[List[Dict], List[Dict]]:
     """BM25와 memory vector rank를 RRF로 합쳐 MySQL memory rows를 선별한다."""
     if not rows:
         return [], []
@@ -306,7 +325,9 @@ def _rank_mysql_rows(project_id: int, rows: List[Dict], queries: List[str], limi
             rank_lists.append(sorted(range(len(rows)), key=lambda i: -scores[i]))
             weights.append(BM25_WEIGHT)
 
-    vector_rank_lists, vector_hits = _memory_vector_rank_lists(project_id, queries, rows)
+    vector_rank_lists, vector_hits = _memory_vector_rank_lists(
+        project_id, queries, rows, index_scope
+    )
     rank_lists.extend(vector_rank_lists)
     weights.extend([1.0 - BM25_WEIGHT] * len(vector_rank_lists))
 
@@ -446,6 +467,7 @@ def _build_history_sections(
     slot_rows: List[Dict],
     history_scope: Optional[str],
     topic_tokens: Set[str],
+    index_scope: ProjectIndexScope,
 ) -> Tuple[Dict[int, str], List[Tuple[Dict, str]], Dict]:
     """이력 모드 체인 수집: 관계 그래프 조회 → 연결 컴포넌트 → 정렬 → 예산 → 주석.
 
@@ -461,7 +483,9 @@ def _build_history_sections(
         "chains_added": 0,
         "history_truncated": False,
     }
-    graph_rows = mysql_search.fetch_supersede_graph(project_id)
+    graph_rows = mysql_search.fetch_supersede_graph(
+        project_id, index_scope=index_scope
+    )
     if not graph_rows:
         return {}, [], debug
 
@@ -620,6 +644,11 @@ def _build_context(
         history_topic_tokens = sorted(tokens)
         history_scope = "topical" if tokens else "global"
 
+    # Capture the published generation once. Every MySQL and Chroma read in
+    # this hybrid request uses the same snapshot even if sync publishes while
+    # the request is running.
+    index_scope = load_project_index_scope(project_id)
+
     sources: List[str] = []
     debug: dict = {"mysql_rows": [], "chroma_chunks": [], "history_mode": bool(history_mode)}
     if query_variants is None:
@@ -649,21 +678,27 @@ def _build_context(
     #    - category 미매칭: 전체에서 BM25 유관 상위 MYSQL_TOP_N
     category = _extract_category(question)
     debug["filters"] = {"category": category}
-    rows = mysql_search.search(project_id)
+    rows = mysql_search.search(project_id, index_scope=index_scope)
     memory_vector_hits: List[Dict] = []
     if category is not None:
         matched = [r for r in rows if r["category"] == category]
         others = [r for r in rows if r["category"] != category]
         supplement = []
         if others:
-            supplement, hits = _rank_mysql_rows(project_id, others, multi_queries, MYSQL_SUPPLEMENT)
+            supplement, hits = _rank_mysql_rows(
+                project_id, others, multi_queries, MYSQL_SUPPLEMENT, index_scope
+            )
             memory_vector_hits.extend(hits)
         matched_limit = max(1, QA_MYSQL_ROWS_LIMIT - len(supplement))
-        matched, hits = _rank_mysql_rows(project_id, matched, multi_queries, matched_limit)
+        matched, hits = _rank_mysql_rows(
+            project_id, matched, multi_queries, matched_limit, index_scope
+        )
         memory_vector_hits.extend(hits)
         rows = matched + supplement
     elif len(rows) > MYSQL_TOP_N:
-        rows, memory_vector_hits = _rank_mysql_rows(project_id, rows, multi_queries, MYSQL_TOP_N)
+        rows, memory_vector_hits = _rank_mysql_rows(
+            project_id, rows, multi_queries, MYSQL_TOP_N, index_scope
+        )
     rows = rows[:QA_MYSQL_ROWS_LIMIT]
 
     # 이력 모드: supersede 체인 수집 — 관계 참여 슬롯 행은 주석 포맷으로 교체하고,
@@ -673,7 +708,11 @@ def _build_context(
     chain_entries: List[Tuple[Dict, str]] = []
     if history_mode:
         slot_annotations, chain_entries, hist_debug = _build_history_sections(
-            project_id, rows, history_scope, set(history_topic_tokens or [])
+            project_id,
+            rows,
+            history_scope,
+            set(history_topic_tokens or []),
+            index_scope,
         )
         debug.update(hist_debug)
 
@@ -722,7 +761,8 @@ def _build_context(
     # 2) 원문 맥락 — 하이브리드: dense(의미) 0.4 + BM25(키워드) 0.4 + recency(최신) 0.2 를
     #    축별 정규화 RRF로 융합해 상위 N 청크. 회의록은 고유명사·용어·날짜가 많아 BM25가
     #    dense를 보완하고, recency 축은 번복 관계가 없는 유효 항목 간 최신 우선 신호를 준다.
-    raw = get_collection().get(where={"project_id": project_id})
+    chroma_where = chroma_visibility_filter(index_scope)
+    raw = get_collection().get(where=chroma_where)
     raw_texts = raw.get("documents") or []
     raw_metas = raw.get("metadatas") or []
     raw_ids = raw.get("ids") or []
@@ -753,7 +793,9 @@ def _build_context(
         for query in multi_queries:
             # a. dense 순위 — 벡터 검색 상위 K를 코퍼스 인덱스로 매핑
             scored = _get_vectorstore().similarity_search_with_score(
-                query, k=min(CHROMA_K * 2, len(raw_texts)), filter={"project_id": project_id}
+                query,
+                k=min(CHROMA_K * 2, len(raw_texts)),
+                filter=chroma_where,
             )
             dense_ranks = []
             for doc, _score in scored:

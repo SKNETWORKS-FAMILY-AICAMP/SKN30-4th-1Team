@@ -52,7 +52,7 @@ def db_name(corpus: str) -> str:
 
 
 # 스키마 파일은 DB명 비종속(순수 CREATE TABLE) — 각 코퍼스 스키마에 순서대로 적용.
-INITDB_FILES = ["schema.sql"] + [f"migrate_v{i}.sql" for i in range(2, 9)]
+INITDB_FILES = ["schema.sql"] + [f"migrate_v{i}.sql" for i in range(2, 11)]
 
 # judge는 dev·final 모두 gpt-4.1-mini로 통일(사용자 결정 2026-07-20):
 #  (1) gpt-4o-mini는 429 재시도 폭풍으로 일일 요청(RPD 10K) 버킷이 소진돼 교체.

@@ -452,6 +452,56 @@ const en: Record<string, string> = {
   "아직 불러온 repo가 없습니다.": "No repositories have been loaded yet.",
   "GitHub 동기화": "GitHub sync",
   "동기화 중": "Syncing",
+  "상태 재확인 중": "Rechecking status",
+  "시작 시간 확인 중": "Checking start time",
+  "동기화 필요": "Sync required",
+  "동기화 완료": "Synced",
+  "저장소만 연결된 상태입니다": "Repository connected, but not synced",
+  "저장소 데이터가 반영되었습니다": "Repository data is up to date",
+  "최신 상태": "Up to date",
+  "최신화 필요": "Update required",
+  "최신 상태 확인 중": "Checking latest status",
+  "최신 상태 확인 실패": "Could not check latest status",
+  "최신 상태 확인 필요": "Latest status needs checking",
+  "검색 인덱싱 완료": "Search indexing complete",
+  "새 GitHub 변경사항이 있습니다": "New GitHub changes are available",
+  "새 GitHub 코드 변경사항이 있습니다": "New GitHub code changes are available",
+  "GitHub 연결 만료": "GitHub connection expired",
+  "확인 실패": "Check failed",
+  "확인 필요": "Check required",
+  "GitHub 인증을 다시 연결해 주세요": "Reconnect GitHub authentication",
+  "최신 상태를 확인하지 못했습니다": "Could not check the latest status",
+  "검색 인덱스는 유지됩니다. 다시 인증하면 코드 최신 여부를 확인합니다.":
+    "The search index is preserved. Reauthenticate to check whether the code is current.",
+  "마지막 성공 결과로 최신 상태를 표시하지 않습니다.":
+    "An old successful check is not shown as current.",
+  "다시 인증": "Reauthenticate",
+  "다시 확인": "Check again",
+  "최신 커밋을 검색과 프로젝트 메모리에 반영해 주세요.": "Sync the latest commit into search and project memory.",
+  "커밋·이슈·PR을 사용하려면 첫 동기화를 실행해 주세요.": "Run the first sync to use commits, issues, and PRs.",
+  "{count}개 파일이 검색에 반영되었습니다.": "{count} files are available in search.",
+  "지금 동기화": "Sync now",
+  "프로젝트 컨텍스트": "Project context",
+  "AI 답변에 반영되는 프로젝트 요약과 관련 기억":
+    "Project summary and related memories used in AI answers",
+  "활성 기억 {count}개": "{count} active memories",
+  "관리": "Manage",
+  "프로젝트 요약": "Project summary",
+  "프로젝트의 핵심 방향과 현재 상태를 응축한 요약":
+    "A concise summary of the project's direction and current state",
+  "탐색형 답변의 관점과 방향에 우선 반영됩니다":
+    "Used as the default perspective for semantic answers",
+  "답변 기본 컨텍스트": "Default answer context",
+  "관련 기억": "Related memories",
+  "질문과 관련된 항목만 검색됩니다": "Only memories related to the question are retrieved",
+  "관련 질문에 우선 참고": "Prioritized for related questions",
+  "그 외 활성 기억 {count}개 보기": "View {count} more active memories",
+  "{branch} 브랜치 기준 · 대체된 결정 제외":
+    "Based on {branch} · Superseded decisions excluded",
+  "!! 파일 최대 용량은 {limit}입니다{file}": "!! Maximum file size is {limit}{file}",
+  "!! 전체 첨부 최대 용량은 {limit}입니다": "!! Maximum total attachment size is {limit}",
+  "!! 파일을 읽을 수 없습니다 · {name}": "!! Could not read file · {name}",
+  "!! 기존 첨부 파일의 용량을 확인할 수 없습니다": "!! Could not check the size of existing attachments",
   "repo 변경": "Repository changes",
   "해제 확인": "Confirm disconnect",
   "연결 해제": "Disconnect",
@@ -466,6 +516,25 @@ const en: Record<string, string> = {
   "커밋·이슈·PR 수집·분석 중": "Collecting and analyzing commits, issues, and PRs",
   "{elapsed} 경과": "{elapsed} elapsed",
   "GitHub repo 동기화 실패": "GitHub repository sync failed",
+  "서버 재시작으로 동기화가 중단되었습니다. 다시 시도해 주세요.":
+    "The sync was interrupted by a server restart. Please try again.",
+  "저장소 데이터를 검색에 반영하지 못했습니다. 기존 데이터는 유지됩니다.":
+    "The repository data could not be indexed. Existing data is still available.",
+  "저장소에서 검색에 반영할 내용을 찾지 못했습니다.":
+    "No indexable content was found in the repository.",
+  "GitHub 접근 권한을 확인한 뒤 다시 시도해 주세요.":
+    "Check the GitHub access permissions and try again.",
+  "GitHub 저장소 주소가 올바르지 않습니다. 연결 정보를 확인해 주세요.":
+    "The GitHub repository URL is invalid. Check the connection details.",
+  "저장소 동기화 상태를 확인할 권한이 없습니다.":
+    "You do not have permission to check the repository sync status.",
+  "저장소 동기화 상태를 확인하지 못했습니다. 다시 시도해 주세요.":
+    "The repository sync status could not be checked. Please try again.",
+  "GitHub 저장소 데이터를 가져오지 못했습니다. 잠시 후 다시 시도해 주세요.":
+    "GitHub repository data could not be loaded. Please try again shortly.",
+  "저장소 내용을 읽지 못했습니다.": "The repository content could not be read.",
+  "읽은 저장소 내용을 검색에 반영하지 못했습니다.":
+    "The repository content could not be added to search.",
   "재시도 중...": "Retrying...",
   "재시도": "Retry",
   "{source} 수집 실패: {reason}": "Failed to sync {source}: {reason}",

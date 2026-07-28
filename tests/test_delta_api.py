@@ -53,6 +53,11 @@ def test_delta_counts_since_boundary_and_due_buckets():
     assert any("DATE_ADD(CURDATE(), INTERVAL %s DAY)" in sql for sql in sql_calls)
     assert any(call.args[1] == (1, 7) for call in cursor.execute.call_args_list)
     assert any("due_date < CURDATE()" in sql for sql in sql_calls)
+    suggestion_sql = next(
+        sql for sql in sql_calls if "FROM memory_suggestions s" in sql
+    )
+    assert "JOIN active_memory target" in suggestion_sql
+    assert "LEFT JOIN active_memory superseding" in suggestion_sql
 
 
 def test_delta_supersede_only_pending_is_zero_for_legacy_field():

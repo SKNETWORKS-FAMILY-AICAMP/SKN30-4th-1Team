@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -5110,14 +5110,27 @@ async function verifyInterruptibleBackgroundQuery(send) {
 
   const immediateResult = await send("Runtime.evaluate", {
     returnByValue: true,
-    expression: `(() => ({
-      assistantCount: document.querySelectorAll('.message[data-role="assistant"]').length,
-      promptValue: document.querySelector('.prompt textarea')?.value ?? null,
-      query: window.__paimLayoutReadQueryControl(),
-      stopVisible: Boolean(document.querySelector('button[aria-label="응답 중지"]')),
-      thinkingVisible: Boolean(document.querySelector('.thinking')),
-      userText: document.querySelector('.message[data-role="user"]')?.textContent.trim() || "",
-    }))()`,
+    expression: `(() => {
+      const thinking = document.querySelector('.thinking');
+      const thinkingRect = thinking?.getBoundingClientRect();
+      const userBubble = document.querySelector('.message[data-role="user"] .message-content');
+      const userBubbleStyle = userBubble ? getComputedStyle(userBubble) : null;
+      const chatStyle = getComputedStyle(document.querySelector('.chat'));
+      return {
+        assistantCount: document.querySelectorAll('.message[data-role="assistant"]').length,
+        promptValue: document.querySelector('.prompt textarea')?.value ?? null,
+        query: window.__paimLayoutReadQueryControl(),
+        stopVisible: Boolean(document.querySelector('button[aria-label="응답 중지"]')),
+        thinkingVisible: Boolean(thinking),
+        thinkingText: thinking?.textContent.replace(/\\s+/g, ' ').trim() || "",
+        thinkingIsSingleLine: Boolean(thinkingRect && thinkingRect.height < 32),
+        userBubbleHasBorder: userBubbleStyle?.borderTopWidth === '1px',
+        userBubbleHasContrast: Boolean(
+          userBubbleStyle && userBubbleStyle.backgroundColor !== chatStyle.backgroundColor
+        ),
+        userText: document.querySelector('.message[data-role="user"]')?.textContent.trim() || "",
+      };
+    })()`,
   });
 
   await send("Runtime.evaluate", {
@@ -5170,6 +5183,10 @@ async function verifyInterruptibleBackgroundQuery(send) {
       value.immediate.promptValue !== "" ||
       !value.immediate.stopVisible ||
       !value.immediate.thinkingVisible ||
+      !value.immediate.thinkingText.includes("생각 중") ||
+      !value.immediate.thinkingIsSingleLine ||
+      !value.immediate.userBubbleHasBorder ||
+      !value.immediate.userBubbleHasContrast ||
       value.immediate.assistantCount !== 1 ||
       value.immediate.query.resolved !== 0) {
     failures.push("delayed query should show the user message, clear the draft, and expose Stop before the response resolves");
@@ -7005,6 +7022,8 @@ async function verifyGithubTimelineState(send) {
       },
     ],
     "session-github-unlinked",
+    [],
+    { apiProjectId: 1 },
   );
 
   await send("Emulation.setDeviceMetricsOverride", {
@@ -7101,13 +7120,31 @@ async function verifyGithubTimelineState(send) {
 
   const authingResult = await send("Runtime.evaluate", {
     returnByValue: true,
-    expression: `(() => ({
-      stateText: document.querySelector('.project-panel-header-status-label')?.textContent.replace('·', '').trim() || "",
-      openedUrl: window.__paimOpenedUrl || "",
-      hasAuthCard: Boolean(document.querySelector('.overview-github-auth-card')),
-      hasWaitingText: document.body.textContent.includes('브라우저에서 GitHub 연결을 완료해 주세요'),
-      hasCheckButton: Boolean(Array.from(document.querySelectorAll('.overview-github-auth-card button')).find((button) => button.textContent.includes('로그인 완료했어요'))),
-    }))()`,
+    expression: `(() => {
+      const card = document.querySelector('.overview-github-auth-card');
+      const cardRect = card?.getBoundingClientRect();
+      const descendants = card
+        ? Array.from(card.querySelectorAll(
+            ':scope > p, :scope > small, .overview-github-code, .overview-github-code-copy, .overview-github-loader, .overview-github-action-buttons',
+          ))
+        : [];
+      const overflowingDescendants = cardRect
+        ? descendants.filter((element) => {
+            const rect = element.getBoundingClientRect();
+            return rect.right > cardRect.right + 1 || rect.left < cardRect.left - 1;
+          }).length
+        : -1;
+      return {
+        stateText: document.querySelector('.project-panel-header-status-label')?.textContent.replace('·', '').trim() || "",
+        openedUrl: window.__paimOpenedUrl || "",
+        hasAuthCard: Boolean(card),
+        hasWaitingText: document.body.textContent.includes('브라우저에서 GitHub 연결을 완료해 주세요'),
+        hasCheckButton: Boolean(Array.from(document.querySelectorAll('.overview-github-auth-card button')).find((button) => button.textContent.includes('로그인 완료했어요'))),
+        cardFitsPanel: Boolean(cardRect && cardRect.right <= document.querySelector('.project-panel')?.getBoundingClientRect().right + 1),
+        hasHorizontalOverflow: Boolean(card && card.scrollWidth > card.clientWidth + 1),
+        overflowingDescendants,
+      };
+    })()`,
   });
 
   await send("Runtime.evaluate", {
@@ -7298,8 +7335,68 @@ async function verifyGithubTimelineState(send) {
       )).length,
       hasConnectedCard: Boolean(document.querySelector('.overview-github-connected-card')),
       hasSyncButton: Boolean(document.querySelector('button[aria-label="GitHub 동기화"]')),
+      hasSyncRequired: document.querySelector('.overview-github-sync-summary')?.textContent.includes('동기화 필요') ?? false,
+      hasSyncNowButton: Boolean(Array.from(document.querySelectorAll('.overview-github-sync-summary button')).find((button) => button.textContent.includes('지금 동기화'))),
+      contextTitle: document.querySelector('.overview-github-context-title')?.textContent.trim() || "",
+      activeMemoryText: document.querySelector('.overview-github-active-memory-count')?.textContent.trim() || "",
+      hasDefaultContext: document.querySelector('.overview-github-context-summary')?.textContent.includes('답변 기본 컨텍스트') ?? false,
+      relatedMemoryCount: document.querySelectorAll('.overview-github-memory-link-card').length,
+      relatedMemoryStates: Array.from(document.querySelectorAll('.overview-github-memory-link-card small')).map((item) => item.textContent.trim()),
+      contextHasHorizontalOverflow: (() => {
+        const column = document.querySelector('.overview-github-sync-column');
+        return Boolean(column && column.scrollWidth > column.clientWidth + 1);
+      })(),
+      hasMemoryManageButton: Boolean(Array.from(document.querySelectorAll('.overview-github-context-actions button')).find((button) => button.textContent.includes('관리'))),
       hasChangeButton: Boolean(Array.from(document.querySelectorAll('[role="menuitem"]')).find((item) => item.textContent.includes('repo 변경'))),
       hasDisconnectButton: Boolean(Array.from(document.querySelectorAll('[role="menuitem"]')).find((item) => item.textContent.includes('연결 해제'))),
+    }))()`,
+  });
+
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector('.overview-github-more-menu')?.click()`,
+  });
+  await sleep(80);
+
+  const githubCaptureDir = process.env.PAIM_CAPTURE_GITHUB_DIR;
+  if (githubCaptureDir) {
+    mkdirSync(githubCaptureDir, { recursive: true });
+    const compactCapture = await send("Page.captureScreenshot", {
+      format: "png",
+      fromSurface: true,
+    });
+    writeFileSync(
+      join(githubCaptureDir, "github-project-context-compact.png"),
+      Buffer.from(compactCapture.data, "base64"),
+    );
+
+    await send("Runtime.evaluate", {
+      expression: `document.querySelector('button[aria-label="GitHub 패널 최대화"]')?.click()`,
+    });
+    await sleep(160);
+    const maximizedCapture = await send("Page.captureScreenshot", {
+      format: "png",
+      fromSurface: true,
+    });
+    writeFileSync(
+      join(githubCaptureDir, "github-project-context-maximized.png"),
+      Buffer.from(maximizedCapture.data, "base64"),
+    );
+    await send("Runtime.evaluate", {
+      expression: `document.querySelector('button[aria-label="GitHub 패널 축소"]')?.click()`,
+    });
+    await sleep(120);
+  }
+
+  await send("Runtime.evaluate", {
+    expression: `Array.from(document.querySelectorAll('.overview-github-context-actions button'))
+      .find((button) => button.textContent.includes('관리'))?.click()`,
+  });
+  await waitForSelector(send, ".project-panel .project-memory");
+  const memoryManageResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => ({
+      hasMemoryPanel: Boolean(document.querySelector('.project-panel .project-memory')),
+      activeTab: document.querySelector('.project-panel-tab[data-active="true"] > span')?.textContent.trim() || "",
     }))()`,
   });
 
@@ -7309,6 +7406,7 @@ async function verifyGithubTimelineState(send) {
     authing: authingResult.result.value,
     repos: reposResult.result.value,
     linked: linkedResult.result.value,
+    memoryManage: memoryManageResult.result.value,
   };
   const failures = [];
 
@@ -7334,7 +7432,10 @@ async function verifyGithubTimelineState(send) {
       !value.authing.openedUrl.includes("github.com/login/device") ||
       !value.authing.hasAuthCard ||
       !value.authing.hasWaitingText ||
-      !value.authing.hasCheckButton) {
+      !value.authing.hasCheckButton ||
+      !value.authing.cardFitsPanel ||
+      value.authing.hasHorizontalOverflow ||
+      value.authing.overflowingDescendants !== 0) {
     failures.push("GitHub authing state should render the browser login waiting card");
   }
 
@@ -7352,12 +7453,25 @@ async function verifyGithubTimelineState(send) {
 
   if (value.linked.stateText !== "연결됨" ||
       !value.linked.hasConnectedCard ||
+      !value.linked.hasSyncRequired ||
+      !value.linked.hasSyncNowButton ||
+      value.linked.contextTitle !== "프로젝트 컨텍스트" ||
+      !value.linked.activeMemoryText.includes("활성 기억") ||
+      !value.linked.hasDefaultContext ||
+      value.linked.relatedMemoryCount > 3 ||
+      value.linked.relatedMemoryStates.some((state) => state !== "관련 질문에 우선 참고") ||
+      value.linked.contextHasHorizontalOverflow ||
+      !value.linked.hasMemoryManageButton ||
       value.linked.hasChangeButton ||
       !value.linked.hasDisconnectButton ||
       !value.linked.titles.includes("프로젝트 Overview 연결") ||
       !value.linked.titles.includes("파일 목록 스크롤") ||
       !value.linked.titles.includes("feat: project file management")) {
     failures.push("linked GitHub timeline should render issue, PR, and commit events");
+  }
+
+  if (!value.memoryManage.hasMemoryPanel) {
+    failures.push("project context manage should open the project memory panel");
   }
 
   if (!value.linked.labels.includes("PR #18") ||
@@ -7381,6 +7495,425 @@ async function verifyGithubTimelineState(send) {
   }
 
   debugLayout("github timeline", value);
+  return { value, failures };
+}
+
+// GitHub sync 상태는 서버 run과 시작 시각을 따르고 일시적인 통신 오류를 실패로 확정하지 않는다.
+async function verifyGithubSyncPollingState(send) {
+  const now = Date.now();
+  const syncStartedAt = new Date(now - 125_000).toISOString().replace(/Z$/, "");
+  const repositoryUrl = "https://github.com/smoke/PaiM";
+  const indexedSha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const syncState = createProjectStorage(
+    "project-github-sync-poll",
+    "GitHub Sync Poll",
+    [
+      {
+        id: "session-github-sync-poll",
+        title: "GitHub Sync Poll Chat",
+        createdAt: now,
+        messages: [],
+      },
+    ],
+    "session-github-sync-poll",
+    [],
+    {
+      apiProjectId: 77,
+      githubConnected: true,
+      githubRepository: {
+        path: repositoryUrl,
+        name: "PaiM",
+        branch: "main",
+        isDirty: false,
+        remoteRepo: "smoke/PaiM",
+        issuePrStatus: "서버 연결됨",
+        visibility: "public",
+        authProvider: "public",
+        repoId: 91,
+        syncStatus: "syncing",
+        syncRunId: "run-local-stale",
+        syncStartedAt: now - 1000,
+        commitSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        remoteHeadSha: indexedSha,
+      },
+    },
+  );
+
+  await send("Emulation.setDeviceMetricsOverride", {
+    width: 1280,
+    height: 820,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await send("Emulation.setTimezoneOverride", {
+    timezoneId: "Asia/Seoul",
+  });
+  await evaluateAndNavigateToSelector(
+    send,
+    `
+      const settings = JSON.parse(
+        localStorage.getItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}) || '{}',
+      );
+      settings.language = 'ko';
+      settings.serverUrl = ${JSON.stringify(API_SERVER_A)};
+      localStorage.setItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}, JSON.stringify(settings));
+      localStorage.setItem(${JSON.stringify(AUTH_SCENARIO_STORAGE_KEY)}, 'owner');
+      localStorage.setItem(${JSON.stringify(AUTH_STORAGE_KEY)}, ${JSON.stringify(JSON.stringify(AUTH_SESSION))});
+      localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)});
+      localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false');
+      localStorage.setItem(${JSON.stringify(PROJECT_PANEL_WIDTH_STORAGE_KEY)}, '420');
+      localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(syncState)});
+
+      const syncPollingBaseFetch = window.fetch.bind(window);
+      const syncPollingState = {
+        didFail: false,
+        failedStatusCalls: 0,
+        forbiddenStatusCalls: 0,
+        lastStatusAt: null,
+        listEmpty: false,
+        missingStatusCalls: 0,
+        statusMode: 'normal',
+        statusCalls: 0,
+      };
+      window.__paimGithubSyncPolling = syncPollingState;
+      const jsonResponse = (payload, status = 200) => Promise.resolve(new Response(
+        JSON.stringify(payload),
+        { status, headers: { 'Content-Type': 'application/json' } },
+      ));
+      window.fetch = async (input, init = {}) => {
+        const rawUrl = typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+        const url = new URL(rawUrl, location.origin);
+        const method = String(init?.method || 'GET').toUpperCase();
+
+        if (url.pathname === '/api/v1/projects/77/repositories' && method === 'GET') {
+          if (syncPollingState.listEmpty) {
+            return jsonResponse([]);
+          }
+          return jsonResponse([{
+            id: 91,
+            provider: 'github',
+            repository_url: ${JSON.stringify(repositoryUrl)},
+            branch: 'main',
+            status: 'syncing',
+            run_id: 'run-server-a',
+            sync_started_at: ${JSON.stringify(syncStartedAt)},
+            connected_at: ${JSON.stringify(new Date(now - 86_400_000).toISOString())},
+          }]);
+        }
+
+        if (url.pathname === '/api/v1/projects/77/repositories/91/sync' && method === 'POST') {
+          return jsonResponse({
+            repo_id: 91,
+            status: 'syncing',
+            run_id: syncPollingState.statusMode === 'missing'
+              ? 'run-server-missing'
+              : syncPollingState.statusMode === 'mapped-failure'
+                ? 'run-server-mapped'
+                : 'run-server-forbidden',
+            sync_started_at: ${JSON.stringify(syncStartedAt)},
+          }, 202);
+        }
+
+        if (url.pathname === '/api/v1/projects/77/repositories/91/status' && method === 'GET') {
+          syncPollingState.statusCalls += 1;
+          if (syncPollingState.statusMode === 'forbidden') {
+            syncPollingState.forbiddenStatusCalls += 1;
+            return jsonResponse({ detail: 'Forbidden' }, 403);
+          }
+          if (syncPollingState.statusMode === 'missing') {
+            syncPollingState.missingStatusCalls += 1;
+            syncPollingState.listEmpty = true;
+            return jsonResponse({ detail: 'Repository not found' }, 404);
+          }
+          if (syncPollingState.statusMode === 'mapped-failure') {
+            return jsonResponse({
+              repo_id: 91,
+              status: 'failed',
+              provider: 'github',
+              repository_url: ${JSON.stringify(repositoryUrl)},
+              branch: 'main',
+              run_id: 'run-server-mapped',
+              sync_started_at: ${JSON.stringify(syncStartedAt)},
+              commit_sha: ${JSON.stringify(indexedSha)},
+              indexed_files: 4,
+              last_error: 'REPOSITORY_INGEST_FAILED',
+              sync_warning: JSON.stringify([{
+                source_type: 'commits',
+                reason: 'REPOSITORY_EXTRACT_FAILED',
+              }]),
+            });
+          }
+          const requestedAt = Date.now();
+          const shouldFail = !syncPollingState.didFail &&
+            syncPollingState.lastStatusAt !== null &&
+            requestedAt - syncPollingState.lastStatusAt >= 2500;
+          syncPollingState.lastStatusAt = requestedAt;
+          if (shouldFail) {
+            syncPollingState.didFail = true;
+            syncPollingState.failedStatusCalls += 1;
+            throw new TypeError('Load failed');
+          }
+
+          const isComplete = syncPollingState.didFail;
+          return jsonResponse({
+            repo_id: 91,
+            status: isComplete ? 'indexed' : 'syncing',
+            provider: 'github',
+            repository_url: ${JSON.stringify(repositoryUrl)},
+            branch: 'main',
+            run_id: isComplete ? 'run-server-b' : 'run-server-a',
+            sync_started_at: ${JSON.stringify(syncStartedAt)},
+            commit_sha: isComplete ? ${JSON.stringify(indexedSha)} : null,
+            indexed_files: isComplete ? 4 : null,
+            last_error: null,
+            sync_warning: null,
+          });
+        }
+
+        if (url.href.startsWith('https://api.github.com/repos/smoke/PaiM/commits')) {
+          return jsonResponse([{
+            html_url: ${JSON.stringify(`${repositoryUrl}/commit/${indexedSha}`)},
+            sha: ${JSON.stringify(indexedSha)},
+            commit: {
+              author: { date: ${JSON.stringify(new Date(now - 60_000).toISOString())} },
+              message: 'test: complete sync polling',
+            },
+          }]);
+        }
+        if (url.href.startsWith('https://api.github.com/repos/smoke/PaiM/issues') ||
+            url.href.startsWith('https://api.github.com/repos/smoke/PaiM/pulls')) {
+          return jsonResponse([]);
+        }
+        if (url.href === ${JSON.stringify(`https://api.github.com/repos/smoke/PaiM`)}) {
+          return jsonResponse({
+            default_branch: 'main',
+            full_name: 'smoke/PaiM',
+            html_url: ${JSON.stringify(repositoryUrl)},
+            name: 'PaiM',
+            owner: {
+              avatar_url: '',
+              html_url: 'https://github.com/smoke',
+              login: 'smoke',
+            },
+            private: false,
+          });
+        }
+
+        return syncPollingBaseFetch(input, init);
+      };
+    `,
+    APP_URL,
+    ".project-panel-menu",
+  );
+  await send("Runtime.evaluate", {
+    expression: `Array.from(document.querySelectorAll('.project-panel-menu button'))
+      .find((button) => button.textContent.includes('GitHub'))?.click()`,
+  });
+  await waitForSelector(send, ".overview-github-sync-progress");
+  await sleep(250);
+
+  const serverTimeResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => ({
+      progressText: document.querySelector('.overview-github-sync-progress')?.textContent.trim() || "",
+      statusCalls: window.__paimGithubSyncPolling?.statusCalls ?? 0,
+    }))()`,
+  });
+
+  const retryStartedAt = Date.now();
+  while (Date.now() - retryStartedAt < 6000) {
+    const retryReady = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `window.__paimGithubSyncPolling?.failedStatusCalls === 1 &&
+        (document.querySelector('.overview-github-sync-progress')?.textContent || '')
+          .includes('상태 재확인 중')`,
+    });
+    if (retryReady.result.value) {
+      break;
+    }
+    await sleep(50);
+  }
+  const retryingResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => ({
+      failedStatusCalls: window.__paimGithubSyncPolling?.failedStatusCalls ?? 0,
+      hasFailureCard: Boolean(document.querySelector('.overview-github-sync-state[data-status="failed"]')),
+      progressText: document.querySelector('.overview-github-sync-progress')?.textContent.trim() || "",
+      statusCalls: window.__paimGithubSyncPolling?.statusCalls ?? 0,
+    }))()`,
+  });
+
+  const completionStartedAt = Date.now();
+  while (Date.now() - completionStartedAt < 7000) {
+    const completionReady = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `window.__paimGithubSyncPolling?.statusCalls >= 3 &&
+        !document.querySelector('.overview-github-sync-progress')`,
+    });
+    if (completionReady.result.value) {
+      break;
+    }
+    await sleep(50);
+  }
+  await sleep(100);
+  const completedResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const stored = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
+      const repository = stored.projects?.[0]?.githubRepository || {};
+      return {
+        hasFailureCard: Boolean(document.querySelector('.overview-github-sync-state[data-status="failed"]')),
+        hasSyncProgress: Boolean(document.querySelector('.overview-github-sync-progress')),
+        quietStatus: document.querySelector('.overview-github-sync-quiet')?.textContent.trim() || "",
+        statusCalls: window.__paimGithubSyncPolling?.statusCalls ?? 0,
+        storedRunId: repository.syncRunId || null,
+        storedStatus: repository.syncStatus || null,
+      };
+    })()`,
+  });
+
+  await send("Runtime.evaluate", {
+    expression: `window.__paimGithubSyncPolling.statusMode = 'forbidden';
+      document.querySelector('button[aria-label="GitHub 동기화"]')?.click()`,
+  });
+  const forbiddenStartedAt = Date.now();
+  while (Date.now() - forbiddenStartedAt < 6500) {
+    const forbiddenReady = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `Boolean(document.querySelector('.overview-github-sync-state[data-status="delayed"]'))`,
+    });
+    if (forbiddenReady.result.value) {
+      break;
+    }
+    await sleep(50);
+  }
+  await sleep(100);
+  const forbiddenResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const stored = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
+      const repository = stored.projects?.[0]?.githubRepository || {};
+      return {
+        forbiddenStatusCalls: window.__paimGithubSyncPolling?.forbiddenStatusCalls ?? 0,
+        hasSyncProgress: Boolean(document.querySelector('.overview-github-sync-progress')),
+        statusText: document.querySelector('.overview-github-sync-state[data-status="delayed"]')?.textContent.trim() || "",
+        storedStatus: repository.syncStatus || null,
+      };
+    })()`,
+  });
+
+  await send("Runtime.evaluate", {
+    expression: `window.__paimGithubSyncPolling.statusMode = 'mapped-failure';
+      Array.from(document.querySelectorAll('.overview-github-sync-state button'))
+        .find((button) => button.textContent.includes('재시도'))?.click()`,
+  });
+  const mappedFailureStartedAt = Date.now();
+  while (Date.now() - mappedFailureStartedAt < 6500) {
+    const mappedFailureReady = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `Boolean(document.querySelector('.overview-github-sync-state[data-status="failed"]'))`,
+    });
+    if (mappedFailureReady.result.value) {
+      break;
+    }
+    await sleep(50);
+  }
+  await sleep(100);
+  const mappedFailureResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => ({
+      errorText: document.querySelector('.overview-github-sync-state[data-status="failed"]')?.textContent.trim() || "",
+      warningText: document.querySelector('.overview-github-sync-warning')?.textContent.trim() || "",
+    }))()`,
+  });
+
+  await send("Runtime.evaluate", {
+    expression: `window.__paimGithubSyncPolling.statusMode = 'missing';
+      window.__paimGithubSyncPolling.listEmpty = false;
+      Array.from(document.querySelectorAll('.overview-github-sync-state button'))
+        .find((button) => button.textContent.includes('재시도'))?.click()`,
+  });
+  const missingStartedAt = Date.now();
+  while (Date.now() - missingStartedAt < 6500) {
+    const missingReady = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `Boolean(document.querySelector('.overview-github-login-card'))`,
+    });
+    if (missingReady.result.value) {
+      break;
+    }
+    await sleep(50);
+  }
+  await sleep(100);
+  const missingResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const stored = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
+      return {
+        hasConnectedCard: Boolean(document.querySelector('.overview-github-connected-card')),
+        hasLoginCard: Boolean(document.querySelector('.overview-github-login-card')),
+        hasRepository: Boolean(stored.projects?.[0]?.githubRepository),
+        missingStatusCalls: window.__paimGithubSyncPolling?.missingStatusCalls ?? 0,
+      };
+    })()`,
+  });
+
+  const value = {
+    completed: completedResult.result.value,
+    forbidden: forbiddenResult.result.value,
+    mappedFailure: mappedFailureResult.result.value,
+    missing: missingResult.result.value,
+    retrying: retryingResult.result.value,
+    serverTime: serverTimeResult.result.value,
+  };
+  const failures = [];
+
+  if (!value.serverTime.progressText.includes("2분") ||
+      value.serverTime.progressText.includes("0초")) {
+    failures.push("GitHub sync elapsed time should use sync_started_at from the server");
+  }
+
+  if (value.retrying.failedStatusCalls !== 1 ||
+      value.retrying.statusCalls < 2 ||
+      !value.retrying.progressText.includes("상태 재확인 중") ||
+      value.retrying.hasFailureCard) {
+    failures.push("a transient GitHub status error should back off without becoming a failed sync");
+  }
+
+  if (value.completed.statusCalls < 3 ||
+      value.completed.hasFailureCard ||
+      value.completed.hasSyncProgress ||
+      value.completed.storedStatus !== "indexed" ||
+      value.completed.storedRunId !== "run-server-b" ||
+      value.completed.quietStatus !== "최신 상태") {
+    failures.push("GitHub polling should accept the terminal state of the latest server run");
+  }
+
+  if (value.forbidden.forbiddenStatusCalls !== 1 ||
+      value.forbidden.hasSyncProgress ||
+      value.forbidden.storedStatus !== "delayed" ||
+      !value.forbidden.statusText.includes("권한이 없습니다")) {
+    failures.push("a 403 GitHub status response should stop polling and show a permission state");
+  }
+
+  if (!value.mappedFailure.errorText.includes("검색에 반영하지 못했습니다") ||
+      !value.mappedFailure.warningText.includes("저장소 내용을 읽지 못했습니다") ||
+      value.mappedFailure.warningText.includes("REPOSITORY_EXTRACT_FAILED")) {
+    failures.push("GitHub sync failure and warning codes should render localized messages");
+  }
+
+  if (value.missing.missingStatusCalls !== 1 ||
+      value.missing.hasConnectedCard ||
+      !value.missing.hasLoginCard ||
+      value.missing.hasRepository) {
+    failures.push("a 404 GitHub status response should reconcile and remove the missing repository");
+  }
+
+  debugLayout("github sync polling", value);
   return { value, failures };
 }
 
@@ -7680,6 +8213,874 @@ async function verifyGithubOperationOwnership(send) {
   }
 
   debugLayout("github operation ownership", value);
+  return { value, failures };
+}
+
+// 저장소 목록과 활동 조회는 늦은 이전 응답이 새 repo 상태를 덮어쓰지 않아야 한다.
+async function verifyGithubRepositoryReadOwnership(send) {
+  const now = Date.now();
+  const repositoryUrl = "https://github.com/smoke/Ownership";
+  const indexedSha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const staleSha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const activityState = createProjectStorage(
+    "project-github-read-activity",
+    "GitHub Read Activity",
+    [
+      {
+        id: "session-github-read-activity",
+        title: "GitHub Read Activity Chat",
+        createdAt: now,
+        messages: [],
+      },
+    ],
+    "session-github-read-activity",
+    [],
+    {
+      apiProjectId: 88,
+      githubConnected: true,
+      githubRepository: {
+        path: repositoryUrl,
+        name: "Ownership",
+        branch: "release/1.x",
+        isDirty: false,
+        remoteRepo: "smoke/Ownership",
+        issuePrStatus: "서버 연결됨",
+        visibility: "public",
+        authProvider: "public",
+        repoId: 202,
+        syncStatus: "indexed",
+        syncRunId: "run-read-current",
+        commitSha: indexedSha,
+      },
+    },
+  );
+
+  await evaluateAndNavigateToSelector(
+    send,
+    `
+      const settings = JSON.parse(
+        localStorage.getItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}) || '{}',
+      );
+      settings.language = 'ko';
+      settings.serverUrl = ${JSON.stringify(API_SERVER_A)};
+      localStorage.setItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}, JSON.stringify(settings));
+      localStorage.setItem(${JSON.stringify(AUTH_SCENARIO_STORAGE_KEY)}, 'owner');
+      localStorage.setItem(${JSON.stringify(AUTH_STORAGE_KEY)}, ${JSON.stringify(JSON.stringify(AUTH_SESSION))});
+      localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)});
+      localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false');
+      localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(activityState)});
+
+      const readOwnershipBaseFetch = window.fetch.bind(window);
+      const readOwnership = {
+        commitCalls: 0,
+        headCalls: 0,
+        metadataCalls: 0,
+        requestedBranches: [],
+      };
+      window.__paimGithubReadOwnership = readOwnership;
+      const response = (payload, status = 200) => Promise.resolve(new Response(
+        JSON.stringify(payload),
+        { status, headers: { 'Content-Type': 'application/json' } },
+      ));
+      const repoPayload = {
+        default_branch: 'main',
+        full_name: 'smoke/Ownership',
+        html_url: ${JSON.stringify(repositoryUrl)},
+        name: 'Ownership',
+        owner: {
+          avatar_url: '',
+          html_url: 'https://github.com/smoke',
+          login: 'smoke',
+        },
+        private: false,
+      };
+      window.fetch = async (input, init = {}) => {
+        const rawUrl = typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+        const url = new URL(rawUrl, location.origin);
+        const method = String(init?.method || 'GET').toUpperCase();
+
+        if (url.pathname === '/api/v1/projects/88/repositories' && method === 'GET') {
+          return response([{
+            id: 202,
+            provider: 'github',
+            repository_url: ${JSON.stringify(repositoryUrl)},
+            branch: 'release/1.x',
+            status: 'indexed',
+            run_id: 'run-read-current',
+            connected_at: ${JSON.stringify(new Date(now - 86_400_000).toISOString())},
+          }]);
+        }
+        if (url.pathname === '/api/v1/projects/88/repositories/202/status' && method === 'GET') {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          return response({
+            repo_id: 202,
+            status: 'indexed',
+            provider: 'github',
+            repository_url: ${JSON.stringify(repositoryUrl)},
+            branch: 'release/1.x',
+            run_id: 'run-read-current',
+            commit_sha: ${JSON.stringify(indexedSha)},
+            indexed_files: 4,
+            last_error: null,
+            sync_warning: null,
+          });
+        }
+        if (url.href === ${JSON.stringify(repositoryUrl.replace("github.com", "api.github.com/repos"))}) {
+          readOwnership.metadataCalls += 1;
+          if (readOwnership.metadataCalls === 1) {
+            await new Promise((resolve) => setTimeout(resolve, 900));
+          }
+          return response(repoPayload);
+        }
+        if (url.href.startsWith(${JSON.stringify(
+          repositoryUrl.replace("github.com", "api.github.com/repos") + "/commits",
+        )})) {
+          readOwnership.requestedBranches.push(url.searchParams.get('sha'));
+          if (url.searchParams.get('per_page') === '1') {
+            readOwnership.headCalls += 1;
+            return response([{
+              html_url: ${JSON.stringify(`${repositoryUrl}/commit/${indexedSha}`)},
+              sha: ${JSON.stringify(indexedSha)},
+              commit: {
+                author: { date: ${JSON.stringify(new Date(now - 60_000).toISOString())} },
+                message: 'head refresh',
+              },
+            }]);
+          }
+          readOwnership.commitCalls += 1;
+          const isLatestResponse = readOwnership.commitCalls === 1;
+          return response([{
+            html_url: ${JSON.stringify(`${repositoryUrl}/commit/`)} + (isLatestResponse
+              ? ${JSON.stringify(indexedSha)}
+              : ${JSON.stringify(staleSha)}),
+            sha: isLatestResponse ? ${JSON.stringify(indexedSha)} : ${JSON.stringify(staleSha)},
+            commit: {
+              author: { date: ${JSON.stringify(new Date(now - 60_000).toISOString())} },
+              message: isLatestResponse ? 'new activity' : 'stale activity',
+            },
+          }]);
+        }
+        if (url.href.startsWith(${JSON.stringify(
+          repositoryUrl.replace("github.com", "api.github.com/repos") + "/issues",
+        )}) || url.href.startsWith(${JSON.stringify(
+          repositoryUrl.replace("github.com", "api.github.com/repos") + "/pulls",
+        )})) {
+          return response([]);
+        }
+
+        return readOwnershipBaseFetch(input, init);
+      };
+    `,
+    APP_URL,
+    ".project-panel-menu",
+  );
+  await send("Runtime.evaluate", {
+    expression: `Array.from(document.querySelectorAll('.project-panel-menu button'))
+      .find((button) => button.textContent.includes('GitHub'))?.click()`,
+  });
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const firstReadStarted = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `window.__paimGithubReadOwnership?.metadataCalls >= 1`,
+    });
+    if (firstReadStarted.result.value) {
+      break;
+    }
+    await sleep(25);
+  }
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector('button[aria-label*="GitHub 탭 닫기"]')?.click()`,
+  });
+  await waitForSelector(send, ".project-panel-menu");
+  await send("Runtime.evaluate", {
+    expression: `Array.from(document.querySelectorAll('.project-panel-menu button'))
+      .find((button) => button.textContent.includes('GitHub'))?.click()`,
+  });
+  await waitForSelector(send, ".overview-github-connected-card");
+  await sleep(1450);
+  await send("Runtime.evaluate", {
+    expression: `(() => {
+      const originalNow = Date.now;
+      Date.now = () => originalNow() + ${6 * 60 * 1000};
+      window.dispatchEvent(new Event('focus'));
+    })()`,
+  });
+  await sleep(150);
+  const activityResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const stored = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
+      const project = stored.projects?.[0] || {};
+      return {
+        eventTitle: project.githubEvents?.[0]?.title || "",
+        headCalls: window.__paimGithubReadOwnership?.headCalls ?? 0,
+        metadataCalls: window.__paimGithubReadOwnership?.metadataCalls ?? 0,
+        quietStatus: document.querySelector('.overview-github-sync-quiet')?.textContent.trim() || "",
+        remoteCheckedAt: project.githubRepository?.remoteCheckedAt || null,
+        remoteHeadSha: project.githubRepository?.remoteHeadSha || null,
+        repositoryBranch: project.githubRepository?.branch || "",
+        requestedBranches: window.__paimGithubReadOwnership?.requestedBranches ?? [],
+      };
+    })()`,
+  });
+
+  const staleListState = createProjectStorage(
+    "project-github-read-list",
+    "GitHub Read List",
+    [
+      {
+        id: "session-github-read-list",
+        title: "GitHub Read List Chat",
+        createdAt: now,
+        messages: [],
+      },
+    ],
+    "session-github-read-list",
+    [],
+    {
+      apiProjectId: 89,
+      githubConnected: true,
+      githubRepository: {
+        path: repositoryUrl,
+        name: "Ownership",
+        branch: "main",
+        isDirty: false,
+        remoteRepo: "smoke/Ownership",
+        issuePrStatus: "서버 연결됨",
+        visibility: "public",
+        authProvider: "public",
+        repoId: 303,
+        syncStatus: "connected",
+      },
+    },
+  );
+
+  await evaluateAndNavigateToSelector(
+    send,
+    `
+      const settings = JSON.parse(
+        localStorage.getItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}) || '{}',
+      );
+      settings.language = 'ko';
+      settings.serverUrl = ${JSON.stringify(API_SERVER_A)};
+      localStorage.setItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}, JSON.stringify(settings));
+      localStorage.setItem(${JSON.stringify(AUTH_SCENARIO_STORAGE_KEY)}, 'owner');
+      localStorage.setItem(${JSON.stringify(AUTH_STORAGE_KEY)}, ${JSON.stringify(JSON.stringify(AUTH_SESSION))});
+      localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)});
+      localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false');
+      localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(staleListState)});
+
+      const staleListBaseFetch = window.fetch.bind(window);
+      const staleListControl = { deleted: 0, listResolved: 0 };
+      window.__paimGithubStaleList = staleListControl;
+      const response = (payload, status = 200) => Promise.resolve(new Response(
+        status === 204 ? null : JSON.stringify(payload),
+        { status, headers: { 'Content-Type': 'application/json' } },
+      ));
+      window.fetch = async (input, init = {}) => {
+        const rawUrl = typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+        const url = new URL(rawUrl, location.origin);
+        const method = String(init?.method || 'GET').toUpperCase();
+
+        if (url.pathname === '/api/v1/projects/89/repositories' && method === 'GET') {
+          await new Promise((resolve) => setTimeout(resolve, 1100));
+          staleListControl.listResolved += 1;
+          return response([{
+            id: 303,
+            provider: 'github',
+            repository_url: ${JSON.stringify(repositoryUrl)},
+            branch: 'main',
+            status: 'connected',
+          }]);
+        }
+        if (url.pathname === '/api/v1/projects/89/repositories/303' && method === 'DELETE') {
+          staleListControl.deleted += 1;
+          return response(null, 204);
+        }
+        if (url.href.includes('api.github.com/repos/smoke/Ownership')) {
+          if (url.pathname.endsWith('/commits') ||
+              url.pathname.endsWith('/issues') ||
+              url.pathname.endsWith('/pulls')) {
+            return response([]);
+          }
+          return response({
+            default_branch: 'main',
+            full_name: 'smoke/Ownership',
+            html_url: ${JSON.stringify(repositoryUrl)},
+            name: 'Ownership',
+            owner: {
+              avatar_url: '',
+              html_url: 'https://github.com/smoke',
+              login: 'smoke',
+            },
+            private: false,
+          });
+        }
+
+        return staleListBaseFetch(input, init);
+      };
+    `,
+    APP_URL,
+    ".project-panel-menu",
+  );
+  await send("Runtime.evaluate", {
+    expression: `Array.from(document.querySelectorAll('.project-panel-menu button'))
+      .find((button) => button.textContent.includes('GitHub'))?.click()`,
+  });
+  await waitForSelector(send, ".overview-github-connected-card");
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await send("Runtime.evaluate", {
+      expression: `document.querySelector('.overview-github-more-menu')?.click()`,
+    });
+    await waitForSelector(send, '[role="menuitem"]');
+    await send("Runtime.evaluate", {
+      expression: `Array.from(document.querySelectorAll('[role="menuitem"]'))
+        .find((item) => item.textContent.includes('연결 해제'))?.click()`,
+    });
+    await sleep(80);
+  }
+  await sleep(1250);
+  const listResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const stored = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
+      return {
+        deleted: window.__paimGithubStaleList?.deleted ?? 0,
+        hasConnectedCard: Boolean(document.querySelector('.overview-github-connected-card')),
+        hasLoginCard: Boolean(document.querySelector('.overview-github-login-card')),
+        hasRepository: Boolean(stored.projects?.[0]?.githubRepository),
+        listResolved: window.__paimGithubStaleList?.listResolved ?? 0,
+      };
+    })()`,
+  });
+
+  const initialMissingState = createProjectStorage(
+    "project-github-initial-status-missing",
+    "GitHub Initial Status Missing",
+    [
+      {
+        id: "session-github-initial-status-missing",
+        title: "GitHub Initial Status Missing Chat",
+        createdAt: now,
+        messages: [],
+      },
+    ],
+    "session-github-initial-status-missing",
+    [],
+    {
+      apiProjectId: 90,
+      githubConnected: true,
+      githubRepository: {
+        path: repositoryUrl,
+        name: "Ownership",
+        branch: "main",
+        isDirty: false,
+        remoteRepo: "smoke/Ownership",
+        issuePrStatus: "서버 연결됨",
+        visibility: "public",
+        authProvider: "public",
+        repoId: 404,
+        syncStatus: "connected",
+      },
+    },
+  );
+
+  await evaluateAndNavigateToSelector(
+    send,
+    `
+      const settings = JSON.parse(
+        localStorage.getItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}) || '{}',
+      );
+      settings.language = 'ko';
+      settings.serverUrl = ${JSON.stringify(API_SERVER_A)};
+      localStorage.setItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}, JSON.stringify(settings));
+      localStorage.setItem(${JSON.stringify(AUTH_SCENARIO_STORAGE_KEY)}, 'owner');
+      localStorage.setItem(${JSON.stringify(AUTH_STORAGE_KEY)}, ${JSON.stringify(JSON.stringify(AUTH_SESSION))});
+      localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)});
+      localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false');
+      localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(initialMissingState)});
+
+      const initialMissingBaseFetch = window.fetch.bind(window);
+      const initialMissing = { listCalls: 0, statusCalls: 0 };
+      window.__paimGithubInitialMissing = initialMissing;
+      const response = (payload, status = 200) => Promise.resolve(new Response(
+        JSON.stringify(payload),
+        { status, headers: { 'Content-Type': 'application/json' } },
+      ));
+      window.fetch = async (input, init = {}) => {
+        const rawUrl = typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+        const url = new URL(rawUrl, location.origin);
+        const method = String(init?.method || 'GET').toUpperCase();
+
+        if (url.pathname === '/api/v1/projects/90/repositories' && method === 'GET') {
+          initialMissing.listCalls += 1;
+          if (initialMissing.statusCalls > 0) {
+            return response([]);
+          }
+          return response([{
+            id: 404,
+            provider: 'github',
+            repository_url: ${JSON.stringify(repositoryUrl)},
+            branch: 'main',
+            status: 'connected',
+          }]);
+        }
+        if (url.pathname === '/api/v1/projects/90/repositories/404/status' && method === 'GET') {
+          initialMissing.statusCalls += 1;
+          return response({ detail: 'Repository not found' }, 404);
+        }
+
+        return initialMissingBaseFetch(input, init);
+      };
+    `,
+    APP_URL,
+    ".project-panel-menu",
+  );
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const reconciled = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `window.__paimGithubInitialMissing?.listCalls >= 2`,
+    });
+    if (reconciled.result.value) {
+      break;
+    }
+    await sleep(25);
+  }
+  await send("Runtime.evaluate", {
+    expression: `Array.from(document.querySelectorAll('.project-panel-menu button'))
+      .find((button) => button.textContent.includes('GitHub'))?.click()`,
+  });
+  await waitForSelector(send, ".overview-github-login-card");
+  const initialMissingResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const stored = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
+      return {
+        hasRepository: Boolean(stored.projects?.[0]?.githubRepository),
+        listCalls: window.__paimGithubInitialMissing?.listCalls ?? 0,
+        statusCalls: window.__paimGithubInitialMissing?.statusCalls ?? 0,
+      };
+    })()`,
+  });
+
+  const value = {
+    activity: activityResult.result.value,
+    initialMissing: initialMissingResult.result.value,
+    list: listResult.result.value,
+  };
+  const failures = [];
+
+  if (value.activity.metadataCalls !== 2 ||
+      value.activity.headCalls !== 1 ||
+      value.activity.remoteHeadSha !== indexedSha ||
+      value.activity.repositoryBranch !== "release/1.x" ||
+      !value.activity.requestedBranches.every((branch) => branch === "release/1.x") ||
+      !value.activity.remoteCheckedAt ||
+      value.activity.quietStatus !== "최신 상태" ||
+      value.activity.eventTitle !== "new activity") {
+    failures.push(
+      "GitHub reads should keep the connected branch, reject stale activity, persist freshness, and use one lightweight HEAD request on stale focus",
+    );
+  }
+
+  if (value.list.deleted !== 1 ||
+      value.list.listResolved < 1 ||
+      value.list.hasConnectedCard ||
+      !value.list.hasLoginCard ||
+      value.list.hasRepository) {
+    failures.push(
+      `a late repository list response should not restore a disconnected repository: ${JSON.stringify(value.list)}`,
+    );
+  }
+
+  if (value.initialMissing.listCalls < 2 ||
+      value.initialMissing.statusCalls !== 1 ||
+      value.initialMissing.hasRepository) {
+    failures.push(
+      `an initial list-to-status 404 should re-read the repository list and remove the missing row: ${JSON.stringify(value.initialMissing)}`,
+    );
+  }
+
+  debugLayout("github repository read ownership", value);
+  return { value, failures };
+}
+
+// 오래된 성공 결과는 최신으로 표시하지 않고, 조회 실패와 App 인증 만료를 복구 가능한 상태로 보여야 한다.
+async function verifyGithubRemoteFreshnessStates(send) {
+  const now = Date.now();
+  const repositoryUrl = "https://github.com/smoke/Freshness";
+  const indexedSha = "cccccccccccccccccccccccccccccccccccccccc";
+  const staleCheckedAt = now - (10 * 60 * 1000);
+  const stalePublicState = createProjectStorage(
+    "project-github-freshness-error",
+    "GitHub Freshness Error",
+    [
+      {
+        id: "session-github-freshness-error",
+        title: "GitHub Freshness Error Chat",
+        createdAt: now,
+        messages: [],
+      },
+    ],
+    "session-github-freshness-error",
+    [],
+    {
+      apiProjectId: 92,
+      githubConnected: true,
+      githubRepository: {
+        path: repositoryUrl,
+        name: "Freshness",
+        branch: "release/1.x",
+        isDirty: false,
+        remoteRepo: "smoke/Freshness",
+        issuePrStatus: "서버 연결됨",
+        visibility: "public",
+        authProvider: "public",
+        repoId: 505,
+        syncStatus: "indexed",
+        syncRunId: "run-freshness",
+        commitSha: indexedSha,
+        remoteHeadSha: indexedSha,
+        remoteCheckedAt: now,
+        remoteCheckStatus: "current",
+      },
+    },
+  );
+
+  await evaluateAndNavigateToSelector(
+    send,
+    `
+      const settings = JSON.parse(
+        localStorage.getItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}) || '{}',
+      );
+      settings.language = 'ko';
+      settings.serverUrl = ${JSON.stringify(API_SERVER_A)};
+      localStorage.setItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}, JSON.stringify(settings));
+      localStorage.setItem(${JSON.stringify(AUTH_SCENARIO_STORAGE_KEY)}, 'owner');
+      localStorage.setItem(${JSON.stringify(AUTH_STORAGE_KEY)}, ${JSON.stringify(JSON.stringify(AUTH_SESSION))});
+      localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)});
+      localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false');
+      localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(stalePublicState)});
+
+      const freshnessBaseFetch = window.fetch.bind(window);
+      const freshnessBaseSetInterval = window.setInterval.bind(window);
+      const freshness = {
+        fixedHeadIntervalRegistrations: 0,
+        headCalls: 0,
+        metadataCalls: 0,
+        requestedBranches: [],
+      };
+      window.__paimGithubFreshness = freshness;
+      window.setInterval = (callback, delay, ...args) => {
+        if (Number(delay) === ${5 * 60 * 1000}) {
+          freshness.fixedHeadIntervalRegistrations += 1;
+        }
+        return freshnessBaseSetInterval(callback, delay, ...args);
+      };
+      const response = (payload, status = 200) => Promise.resolve(new Response(
+        JSON.stringify(payload),
+        { status, headers: { 'Content-Type': 'application/json' } },
+      ));
+      window.fetch = async (input, init = {}) => {
+        const rawUrl = typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+        const url = new URL(rawUrl, location.origin);
+        const method = String(init?.method || 'GET').toUpperCase();
+
+        if (url.pathname === '/api/v1/projects/92/repositories' && method === 'GET') {
+          return response([{
+            id: 505,
+            provider: 'github',
+            repository_url: ${JSON.stringify(repositoryUrl)},
+            branch: 'release/1.x',
+            status: 'indexed',
+            run_id: 'run-freshness',
+          }]);
+        }
+        if (url.pathname === '/api/v1/projects/92/repositories/505/status' && method === 'GET') {
+          return response({
+            repo_id: 505,
+            status: 'indexed',
+            provider: 'github',
+            repository_url: ${JSON.stringify(repositoryUrl)},
+            branch: 'release/1.x',
+            run_id: 'run-freshness',
+            commit_sha: ${JSON.stringify(indexedSha)},
+            indexed_files: 4,
+            last_error: null,
+            sync_warning: null,
+          });
+        }
+        if (url.href === ${JSON.stringify(repositoryUrl.replace("github.com", "api.github.com/repos"))}) {
+          freshness.metadataCalls += 1;
+          return response({ message: 'temporary upstream failure' }, 503);
+        }
+        if (url.href.startsWith(${JSON.stringify(
+          repositoryUrl.replace("github.com", "api.github.com/repos") + "/commits",
+        )})) {
+          freshness.headCalls += 1;
+          freshness.requestedBranches.push(url.searchParams.get('sha'));
+          if (freshness.headCalls === 1) {
+            return response({ message: 'temporary upstream failure' }, 503);
+          }
+          return response([{
+            html_url: ${JSON.stringify(`${repositoryUrl}/commit/${indexedSha}`)},
+            sha: ${JSON.stringify(indexedSha)},
+            commit: {
+              author: { date: ${JSON.stringify(new Date(now - 60_000).toISOString())} },
+              message: 'freshness retry',
+            },
+          }]);
+        }
+
+        return freshnessBaseFetch(input, init);
+      };
+    `,
+    APP_URL,
+    ".project-panel-menu",
+  );
+  await send("Runtime.evaluate", {
+    expression: `Array.from(document.querySelectorAll('.project-panel-menu button'))
+      .find((button) => button.textContent.includes('GitHub'))?.click()`,
+  });
+  await waitForSelector(send, '.overview-github-sync-quiet[data-verified="true"]');
+  await send("Runtime.evaluate", {
+    expression: `(() => {
+      const originalNow = Date.now;
+      Date.now = () => originalNow() + ${6 * 60 * 1000};
+      window.dispatchEvent(new Event('focus'));
+    })()`,
+  });
+  await waitForSelector(send, '.overview-github-sync-summary[data-status="error"]');
+  const failureResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const stored = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
+      const repository = stored.projects?.[0]?.githubRepository || {};
+      return {
+        cardText: document.querySelector('.overview-github-sync-summary[data-status="error"]')?.textContent.trim() || "",
+        quietStatus: document.querySelector('.overview-github-sync-quiet')?.textContent.trim() || "",
+        remoteCheckError: repository.remoteCheckError || null,
+        remoteCheckStatus: repository.remoteCheckStatus || null,
+      };
+    })()`,
+  });
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector('.overview-github-sync-summary[data-status="error"] button')?.click()`,
+  });
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const refreshed = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `(document.querySelector('.overview-github-sync-quiet')?.textContent || '')
+        .trim() === '최신 상태'`,
+    });
+    if (refreshed.result.value) {
+      break;
+    }
+    await sleep(25);
+  }
+  const recoveredResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const stored = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
+      const repository = stored.projects?.[0]?.githubRepository || {};
+      return {
+        fixedHeadIntervalRegistrations:
+          window.__paimGithubFreshness?.fixedHeadIntervalRegistrations ?? 0,
+        hasFailureCard: Boolean(document.querySelector('.overview-github-sync-summary[data-status="error"]')),
+        headCalls: window.__paimGithubFreshness?.headCalls ?? 0,
+        metadataCalls: window.__paimGithubFreshness?.metadataCalls ?? 0,
+        quietStatus: document.querySelector('.overview-github-sync-quiet')?.textContent.trim() || "",
+        remoteCheckedAt: repository.remoteCheckedAt || null,
+        remoteCheckError: repository.remoteCheckError || null,
+        remoteCheckStatus: repository.remoteCheckStatus || null,
+        requestedBranches: window.__paimGithubFreshness?.requestedBranches ?? [],
+      };
+    })()`,
+  });
+
+  const staleAppState = createProjectStorage(
+    "project-github-freshness-expired",
+    "GitHub Freshness Expired",
+    [
+      {
+        id: "session-github-freshness-expired",
+        title: "GitHub Freshness Expired Chat",
+        createdAt: now,
+        messages: [],
+      },
+    ],
+    "session-github-freshness-expired",
+    [],
+    {
+      apiProjectId: 93,
+      githubConnected: true,
+      githubRepository: {
+        path: repositoryUrl,
+        name: "Freshness",
+        branch: "release/1.x",
+        isDirty: false,
+        remoteRepo: "smoke/Freshness",
+        issuePrStatus: "서버 연결됨",
+        visibility: "private",
+        authProvider: "github_app",
+        repoId: 606,
+        syncStatus: "indexed",
+        syncRunId: "run-freshness-expired",
+        commitSha: indexedSha,
+        remoteHeadSha: indexedSha,
+        remoteCheckedAt: staleCheckedAt,
+        remoteCheckStatus: "current",
+      },
+    },
+  );
+
+  await evaluateAndNavigateToSelector(
+    send,
+    `
+      const settings = JSON.parse(
+        localStorage.getItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}) || '{}',
+      );
+      settings.language = 'ko';
+      settings.serverUrl = ${JSON.stringify(API_SERVER_A)};
+      localStorage.setItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}, JSON.stringify(settings));
+      localStorage.setItem(${JSON.stringify(AUTH_SCENARIO_STORAGE_KEY)}, 'owner');
+      localStorage.setItem(${JSON.stringify(AUTH_STORAGE_KEY)}, ${JSON.stringify(JSON.stringify(AUTH_SESSION))});
+      localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)});
+      localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false');
+      localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(staleAppState)});
+
+      const expiredBaseFetch = window.fetch.bind(window);
+      const response = (payload, status = 200) => Promise.resolve(new Response(
+        JSON.stringify(payload),
+        { status, headers: { 'Content-Type': 'application/json' } },
+      ));
+      window.fetch = async (input, init = {}) => {
+        const rawUrl = typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+        const url = new URL(rawUrl, location.origin);
+        const method = String(init?.method || 'GET').toUpperCase();
+
+        if (url.pathname === '/api/v1/projects/93/repositories' && method === 'GET') {
+          return response([{
+            id: 606,
+            provider: 'github',
+            repository_url: ${JSON.stringify(repositoryUrl)},
+            branch: 'release/1.x',
+            status: 'indexed',
+            run_id: 'run-freshness-expired',
+          }]);
+        }
+        if (url.pathname === '/api/v1/projects/93/repositories/606/status' && method === 'GET') {
+          return response({
+            repo_id: 606,
+            status: 'indexed',
+            provider: 'github',
+            repository_url: ${JSON.stringify(repositoryUrl)},
+            branch: 'release/1.x',
+            run_id: 'run-freshness-expired',
+            commit_sha: ${JSON.stringify(indexedSha)},
+            indexed_files: 4,
+            last_error: null,
+            sync_warning: null,
+          });
+        }
+
+        return expiredBaseFetch(input, init);
+      };
+    `,
+    APP_URL,
+    ".project-panel-menu",
+  );
+  await send("Runtime.evaluate", {
+    expression: `Array.from(document.querySelectorAll('.project-panel-menu button'))
+      .find((button) => button.textContent.includes('GitHub'))?.click()`,
+  });
+  await waitForSelector(send, '.overview-github-sync-summary[data-status="error"]');
+  await sleep(100);
+  const expiredResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const stored = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
+      const repository = stored.projects?.[0]?.githubRepository || {};
+      return {
+        buttonText: document.querySelector('.overview-github-sync-summary[data-status="error"] button')?.textContent.trim() || "",
+        cardText: document.querySelector('.overview-github-sync-summary[data-status="error"]')?.textContent.trim() || "",
+        hasConnectedCard: Boolean(document.querySelector('.overview-github-connected-card')),
+        hasRepository: Boolean(stored.projects?.[0]?.githubRepository),
+        quietStatus: document.querySelector('.overview-github-sync-quiet')?.textContent.trim() || "",
+        remoteCheckError: repository.remoteCheckError || null,
+        remoteCheckStatus: repository.remoteCheckStatus || null,
+        syncDisabled: (() => {
+          const button = document.querySelector('button[aria-label="GitHub 동기화"]');
+          return Boolean(button?.disabled || button?.getAttribute('aria-disabled') === 'true');
+        })(),
+      };
+    })()`,
+  });
+
+  const value = {
+    expired: expiredResult.result.value,
+    failure: failureResult.result.value,
+    recovered: recoveredResult.result.value,
+  };
+  const failures = [];
+
+  if (value.failure.remoteCheckStatus !== "error" ||
+      value.failure.remoteCheckError !== "unavailable" ||
+      !value.failure.cardText.includes("다시 확인") ||
+      value.failure.quietStatus === "최신 상태") {
+    failures.push(
+      "a failed stale HEAD check should stop advertising the previous success and offer a retry",
+    );
+  }
+
+  if (value.recovered.hasFailureCard ||
+      value.recovered.fixedHeadIntervalRegistrations !== 0 ||
+      value.recovered.metadataCalls !== 0 ||
+      value.recovered.headCalls !== 2 ||
+      value.recovered.remoteCheckStatus !== "current" ||
+      value.recovered.remoteCheckError ||
+      value.recovered.remoteCheckedAt <= now ||
+      value.recovered.quietStatus !== "최신 상태" ||
+      !value.recovered.requestedBranches.every((branch) => branch === "release/1.x")) {
+    failures.push(
+      "freshness should avoid fixed polling, retry with one branch HEAD request, and restore a current result",
+    );
+  }
+
+  if (!value.expired.hasConnectedCard ||
+      !value.expired.hasRepository ||
+      value.expired.remoteCheckStatus !== "error" ||
+      value.expired.remoteCheckError !== "session_expired" ||
+      value.expired.buttonText !== "다시 인증" ||
+      !value.expired.cardText.includes("GitHub 연결 만료") ||
+      value.expired.quietStatus === "최신 상태" ||
+      !value.expired.syncDisabled) {
+    failures.push(
+      `an expired GitHub App session should preserve the indexed repository and require reauthentication: ${JSON.stringify(value.expired)}`,
+    );
+  }
+
+  debugLayout("github remote freshness states", value);
   return { value, failures };
 }
 
@@ -9532,6 +10933,16 @@ try {
     console.log("PASS GitHub timeline switches between connect and events");
   }
 
+  const githubSyncPollingResult = await verifyGithubSyncPollingState(send);
+
+  if (githubSyncPollingResult.failures.length > 0) {
+    hasFailures = true;
+    console.log("FAIL GitHub sync polling state");
+    githubSyncPollingResult.failures.forEach((failure) => console.log(`  - ${failure}`));
+  } else {
+    console.log("PASS GitHub sync polling follows server runs and survives transient status errors");
+  }
+
   const githubOperationOwnershipResult = await verifyGithubOperationOwnership(send);
 
   if (githubOperationOwnershipResult.failures.length > 0) {
@@ -9540,6 +10951,26 @@ try {
     githubOperationOwnershipResult.failures.forEach((failure) => console.log(`  - ${failure}`));
   } else {
     console.log("PASS GitHub delayed operations stay cancelled and identify only their target repo");
+  }
+
+  const githubRepositoryReadOwnershipResult = await verifyGithubRepositoryReadOwnership(send);
+
+  if (githubRepositoryReadOwnershipResult.failures.length > 0) {
+    hasFailures = true;
+    console.log("FAIL GitHub repository read ownership");
+    githubRepositoryReadOwnershipResult.failures.forEach((failure) => console.log(`  - ${failure}`));
+  } else {
+    console.log("PASS GitHub repository and activity reads reject stale responses");
+  }
+
+  const githubRemoteFreshnessResult = await verifyGithubRemoteFreshnessStates(send);
+
+  if (githubRemoteFreshnessResult.failures.length > 0) {
+    hasFailures = true;
+    console.log("FAIL GitHub remote freshness states");
+    githubRemoteFreshnessResult.failures.forEach((failure) => console.log(`  - ${failure}`));
+  } else {
+    console.log("PASS GitHub freshness failures and expired sessions stay explicit and recoverable");
   }
 
   const sidebarToggleChromeGeometryResult = await verifySidebarToggleChromeGeometry(send);

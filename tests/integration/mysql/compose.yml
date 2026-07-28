@@ -11,6 +11,7 @@ services:
     volumes:
       - ../../../backend/db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
       - ../../../backend/db/migrate_v9.sql:/docker-entrypoint-initdb.d/09_migrate_v9.sql:ro
+      - ../../../backend/db/migrate_v10.sql:/docker-entrypoint-initdb.d/10_migrate_v10.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "test \"$$(cat /proc/1/comm)\" = mysqld && MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping -h localhost -u root"]
       interval: 2s

@@ -180,10 +180,11 @@ def test_backend_healthcheck_uses_readiness_with_safe_timeout(prod: dict):
     assert str(health["timeout"]).rstrip("s") and int(str(health["timeout"]).rstrip("s")) >= 7
 
 
-def test_mysql_init_mounts_v9_migration(prod: dict, dev: dict):
+def test_mysql_init_mounts_latest_migrations(prod: dict, dev: dict):
     for stack in (prod, dev):
         mounts = stack["services"]["db"]["volumes"]
         assert any("migrate_v9.sql" in mount for mount in mounts)
+        assert any("migrate_v10.sql" in mount for mount in mounts)
 
 
 def test_dockerfile_pins_single_worker():

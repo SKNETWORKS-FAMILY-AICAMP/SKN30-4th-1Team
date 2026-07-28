@@ -142,3 +142,47 @@ def test_ingest_survives_supersede_failure():
 
     # 적재 트랜잭션은 커밋되었다(예외가 전파되지 않음)
     assert conn.commit.called
+
+
+def test_staged_repository_ingest_defers_supersede_detection():
+    """게시 전 generation은 suggestion이나 supersede 관계를 만들지 않는다."""
+    items = [_item("decision", "아직 게시되지 않은 결정")]
+    conn, _ = _make_conn()
+    with patch("backend.pipeline.ingestor.get_connection", return_value=conn), \
+         patch("backend.pipeline.ingestor.upsert_memory_vectors"), \
+         patch("backend.pipeline.ingestor.get_collection") as mock_coll, \
+         patch("backend.reconciler.supersede.detect_supersede") as mock_detect:
+        mock_coll.return_value.add = MagicMock()
+        rows = ingest(
+            project_id=1,
+            doc_id=None,
+            repo_id=7,
+            repo_sync_run_id="staging-run",
+            items=items,
+            raw_text="새 결정 원문",
+            source="README.md",
+            date="",
+            doc_type="repository",
+        )
+
+    mock_detect.assert_not_called()
+    assert rows == [
+        {
+            "id": 10,
+            "project_id": 1,
+            "doc_id": None,
+            "repo_id": 7,
+            "repo_sync_run_id": "staging-run",
+            "category": "decision",
+            "content": "아직 게시되지 않은 결정",
+            "reason": "",
+            "topic": "",
+            "owner": "",
+            "date": None,
+            "due_date": None,
+            "completed_at": None,
+            "completion_status": "unknown",
+            "completion_status_source": None,
+            "source": "README.md",
+        }
+    ]

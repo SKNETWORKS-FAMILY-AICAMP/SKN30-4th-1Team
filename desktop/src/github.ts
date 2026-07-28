@@ -116,6 +116,58 @@ const GITHUB_CLIENT_ID_STORAGE_KEY = "paim.githubClientId.v1";
 const GITHUB_LOGIN_CONFIG_ERROR_MESSAGE =
   "이 앱 빌드에는 GitHub 로그인이 아직 설정되어 있지 않습니다. 개발팀에 문의해 주세요.";
 const GITHUB_LOGIN_SCOPE = "public_repo read:user";
+export const GITHUB_REMOTE_HEAD_TTL_MS = 5 * 60 * 1000;
+
+type GithubRepositoryHead = {
+  branch: string;
+  remoteHeadSha: string | null;
+};
+
+function normalizeGithubCommitSha(value?: string | null) {
+  return value?.trim().toLowerCase() ?? "";
+}
+
+export function githubCommitShasMatch(left?: string | null, right?: string | null) {
+  const normalizedLeft = normalizeGithubCommitSha(left);
+  const normalizedRight = normalizeGithubCommitSha(right);
+
+  return Boolean(
+    normalizedLeft &&
+      normalizedRight &&
+      (normalizedLeft === normalizedRight ||
+        normalizedLeft.startsWith(normalizedRight) ||
+        normalizedRight.startsWith(normalizedLeft)),
+  );
+}
+
+export function getGithubRemoteCheckStatus(
+  repository: GitRepositoryInfo,
+  now = Date.now(),
+) {
+  if (
+    repository.remoteCheckStatus === "checking" ||
+    repository.remoteCheckStatus === "error"
+  ) {
+    return repository.remoteCheckStatus;
+  }
+
+  const checkedAt = repository.remoteCheckedAt;
+  if (
+    typeof checkedAt !== "number" ||
+    !Number.isFinite(checkedAt) ||
+    now - checkedAt >= GITHUB_REMOTE_HEAD_TTL_MS
+  ) {
+    return "unknown" as const;
+  }
+
+  if (!repository.commitSha || !repository.remoteHeadSha) {
+    return "unknown" as const;
+  }
+
+  return githubCommitShasMatch(repository.commitSha, repository.remoteHeadSha)
+    ? "current" as const
+    : "needs_sync" as const;
+}
 
 function canUseTauriRuntime() {
   return "__TAURI_INTERNALS__" in window;
@@ -429,10 +481,29 @@ export async function fetchGithubAppRepositoryPreview(
   repositoryUrl: string,
   state: string,
   signal?: AbortSignal,
+  branch?: string,
 ) {
   return fetchPaimRootJsonPreservingSession<GithubRepositoryPreviewApiResponse>("/github/app/repository-preview", {
     method: "POST",
-    body: JSON.stringify({ repository_url: repositoryUrl, state }),
+    body: JSON.stringify({ repository_url: repositoryUrl, state, branch }),
+    signal,
+  });
+}
+
+export async function fetchGithubAppRepositoryHead(
+  repositoryUrl: string,
+  branch: string,
+  state: string,
+  signal?: AbortSignal,
+) {
+  return fetchPaimRootJsonPreservingSession<GithubRepositoryHead>("/github/app/repository-preview", {
+    method: "POST",
+    body: JSON.stringify({
+      repository_url: repositoryUrl,
+      state,
+      branch,
+      head_only: true,
+    }),
     signal,
   });
 }
@@ -441,6 +512,7 @@ export async function fetchGithubRepository(
   rawUrl: string,
   accessToken?: string | null,
   signal?: AbortSignal,
+  requestedBranch?: string,
 ) {
   const parsedRepo = parseGithubRepositoryUrl(rawUrl);
 
@@ -450,9 +522,10 @@ export async function fetchGithubRepository(
 
   const repoPath = `/repos/${parsedRepo.owner}/${parsedRepo.repo}`;
   const repo = await fetchGithubJson<GitHubRepoApiResponse>(repoPath, accessToken, signal);
+  const branch = requestedBranch?.trim() || repo.default_branch;
   const [commits, issues, pulls] = await Promise.all([
     fetchGithubJson<GitHubCommitApiResponse[]>(
-      `${repoPath}/commits?sha=${encodeURIComponent(repo.default_branch)}&per_page=24`,
+      `${repoPath}/commits?sha=${encodeURIComponent(branch)}&per_page=24`,
       accessToken,
       signal,
     ),
@@ -474,13 +547,43 @@ export async function fetchGithubRepository(
     repository: {
       path: repo.html_url,
       name: repo.name,
-      branch: repo.default_branch,
+      branch,
       isDirty: false,
       remoteRepo: repo.full_name,
       issuePrStatus: `${openIssues.length} open issues · ${pulls.length} open PRs`,
       visibility: repo.private ? "private" as const : "public" as const,
       authProvider: accessToken ? "github_oauth" as const : "public" as const,
+      remoteHeadSha: commits[0]?.sha ?? null,
     } satisfies GitRepositoryInfo,
+  };
+}
+
+export async function fetchGithubRepositoryHead(
+  rawUrl: string,
+  branch: string,
+  accessToken?: string | null,
+  signal?: AbortSignal,
+): Promise<GithubRepositoryHead> {
+  const parsedRepo = parseGithubRepositoryUrl(rawUrl);
+
+  if (!parsedRepo) {
+    throw new Error("GitHub repository URL을 확인할 수 없습니다");
+  }
+
+  const normalizedBranch = branch.trim();
+  if (!normalizedBranch) {
+    throw new Error("GitHub branch를 확인할 수 없습니다");
+  }
+
+  const commits = await fetchGithubJson<GitHubCommitApiResponse[]>(
+    `/repos/${parsedRepo.owner}/${parsedRepo.repo}/commits?sha=${encodeURIComponent(normalizedBranch)}&per_page=1`,
+    accessToken,
+    signal,
+  );
+
+  return {
+    branch: normalizedBranch,
+    remoteHeadSha: commits[0]?.sha ?? null,
   };
 }
 

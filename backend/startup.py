@@ -8,7 +8,7 @@ from .storage import delete_managed_file, validate_managed_file
 logger = logging.getLogger(__name__)
 
 _STALE_DOC_ERROR = "UPLOAD_PROCESSING_STALE"
-_STALE_REPO_ERROR = "Repository sync interrupted or stale after server restart."
+_INTERRUPTED_REPO_ERROR = "REPOSITORY_SYNC_INTERRUPTED"
 
 
 def _column_exists(cursor, table_name: str, column_name: str) -> bool:
@@ -251,6 +251,84 @@ def ensure_schema_v9() -> None:
         conn.close()
 
 
+def ensure_schema_v10() -> None:
+    """Install repository generation pointers and the current-run fence."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            if not _column_exists(cursor, "repositories", "active_sync_run_id"):
+                cursor.execute(
+                    "ALTER TABLE repositories ADD COLUMN active_sync_run_id"
+                    " CHAR(36) NULL AFTER last_reconciled_pr"
+                )
+            if not _column_exists(cursor, "repositories", "current_sync_run_id"):
+                cursor.execute(
+                    "ALTER TABLE repositories ADD COLUMN current_sync_run_id"
+                    " CHAR(36) NULL AFTER active_sync_run_id"
+                )
+            if not _column_exists(cursor, "repositories", "sync_started_at"):
+                cursor.execute(
+                    "ALTER TABLE repositories ADD COLUMN sync_started_at"
+                    " DATETIME(6) NULL AFTER current_sync_run_id"
+                )
+            if not _column_exists(cursor, "memory", "repo_sync_run_id"):
+                cursor.execute(
+                    "ALTER TABLE memory ADD COLUMN repo_sync_run_id"
+                    " CHAR(36) NULL AFTER repo_id"
+                )
+            cursor.execute(
+                "SELECT 1 FROM information_schema.STATISTICS"
+                " WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='repositories'"
+                " AND INDEX_NAME='idx_repositories_active_sync_run'"
+            )
+            if not cursor.fetchone():
+                cursor.execute(
+                    "ALTER TABLE repositories ADD INDEX"
+                    " idx_repositories_active_sync_run (active_sync_run_id)"
+                )
+            cursor.execute(
+                "SELECT 1 FROM information_schema.STATISTICS"
+                " WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='repositories'"
+                " AND INDEX_NAME='idx_repositories_current_sync_run'"
+            )
+            if not cursor.fetchone():
+                cursor.execute(
+                    "ALTER TABLE repositories ADD INDEX"
+                    " idx_repositories_current_sync_run (current_sync_run_id)"
+                )
+            cursor.execute(
+                "SELECT 1 FROM information_schema.STATISTICS"
+                " WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='memory'"
+                " AND INDEX_NAME='idx_memory_repo_sync_run'"
+            )
+            if not cursor.fetchone():
+                cursor.execute(
+                    "ALTER TABLE memory ADD INDEX"
+                    " idx_memory_repo_sync_run (repo_id,repo_sync_run_id)"
+                )
+            cursor.execute(
+                "CREATE OR REPLACE VIEW published_memory AS"
+                " SELECT m.* FROM memory m"
+                " LEFT JOIN repositories r ON r.id=m.repo_id"
+                " WHERE m.repo_id IS NULL"
+                " OR r.active_sync_run_id=m.repo_sync_run_id"
+                " OR (r.active_sync_run_id IS NULL AND m.repo_sync_run_id IS NULL)"
+            )
+            cursor.execute(
+                "CREATE OR REPLACE VIEW active_memory AS"
+                " SELECT pm.* FROM published_memory pm"
+                " LEFT JOIN published_memory successor"
+                " ON successor.id=pm.superseded_by"
+                " WHERE successor.id IS NULL"
+            )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def backfill_dev_user_membership() -> None:
     """DEV_USER_ID가 설정된 경우, project_members row가 없는 기존 프로젝트에 owner 멤버십을 보장.
 
@@ -289,16 +367,102 @@ def backfill_dev_user_membership() -> None:
         logger.error("Dev user membership backfill 실패 — 앱은 계속 기동됩니다", exc_info=True)
 
 
+def recover_interrupted_repository_syncs() -> None:
+    """Fail repository rows left in flight by the previous single worker."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT id,current_sync_run_id FROM repositories"
+                " WHERE status='syncing' OR current_sync_run_id IS NOT NULL"
+                " FOR UPDATE"
+            )
+            interrupted = cursor.fetchall()
+            cursor.execute(
+                "UPDATE repositories"
+                " SET status='failed',last_error=%s,current_sync_run_id=NULL"
+                " WHERE status='syncing' OR current_sync_run_id IS NOT NULL",
+                (_INTERRUPTED_REPO_ERROR,),
+            )
+            repo_count = cursor.rowcount
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    if interrupted:
+        from .api.repository import _cleanup_repo_generation
+
+        for repo in interrupted:
+            if repo.get("current_sync_run_id"):
+                _cleanup_repo_generation(
+                    repo["id"],
+                    repo["current_sync_run_id"],
+                )
+    if repo_count:
+        logger.warning(
+            "Startup recovery: %d interrupted repository row(s) → failed",
+            repo_count,
+        )
+
+
+def cleanup_stale_repository_generations() -> None:
+    """Best-effort retry of generation cleanup before requests are accepted."""
+    repositories = []
+    conn = None
+    try:
+        conn = get_connection()
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT id,active_sync_run_id FROM repositories ORDER BY id"
+            )
+            repositories = cursor.fetchall()
+            for repo in repositories:
+                cursor.execute(
+                    "DELETE FROM memory WHERE repo_id=%s"
+                    " AND NOT (repo_sync_run_id <=> %s)",
+                    (repo["id"], repo.get("active_sync_run_id")),
+                )
+        conn.commit()
+    except Exception:
+        if conn is not None:
+            conn.rollback()
+        logger.warning(
+            "startup_repository_mysql_generation_cleanup_failed",
+            exc_info=True,
+        )
+    finally:
+        if conn is not None:
+            conn.close()
+
+    try:
+        from .db.chroma import get_collection
+
+        collection = get_collection()
+        for repo in repositories:
+            raw = collection.get(where={"repo_id": repo["id"]})
+            active_run_id = repo.get("active_sync_run_id")
+            delete_ids = [
+                vector_id
+                for vector_id, metadata in zip(
+                    raw.get("ids") or [],
+                    raw.get("metadatas") or [],
+                )
+                if ((metadata or {}).get("repo_sync_run_id") or None)
+                != active_run_id
+            ]
+            if delete_ids:
+                collection.delete(ids=delete_ids)
+    except Exception:
+        logger.warning(
+            "startup_repository_chroma_generation_cleanup_failed",
+            exc_info=True,
+        )
+
+
 def recover_stale_tasks() -> None:
-    """서버 재시작 시 stale processing/syncing 작업을 failed로 전환.
-
-    cutoff보다 오래된 in-progress 작업만 대상.
-    최근 등록된 작업은 현재 서버에서 막 시작된 것일 수 있으므로 건드리지 않음.
-
-    BACKGROUND_TASK_STALE_MINUTES <= 0 이면 recovery 비활성화.
-    timestamp 기준: documents.uploaded_at, repositories.connected_at.
-    향후 started_at/updated_at 컬럼 추가 시 이 기준을 교체하면 더 정확해짐.
-    """
+    """Fail expired document processing leases."""
     raw = os.getenv("BACKGROUND_TASK_STALE_MINUTES", "30")
     try:
         stale_minutes = int(raw)
@@ -319,14 +483,6 @@ def recover_stale_tasks() -> None:
                     " AND (lease_expires_at IS NULL OR lease_expires_at<NOW())",
                 )
                 stale_documents = cursor.fetchall()
-
-                cursor.execute(
-                    "UPDATE repositories SET status='failed', last_error=%s"
-                    " WHERE status='syncing'"
-                    " AND connected_at < NOW() - INTERVAL %s MINUTE",
-                    (_STALE_REPO_ERROR, stale_minutes),
-                )
-                repo_count = cursor.rowcount
             conn.commit()
         finally:
             conn.close()
@@ -343,11 +499,10 @@ def recover_stale_tasks() -> None:
                 fail_document(document["id"], _STALE_DOC_ERROR)
         doc_count = len(stale_documents)
 
-        if doc_count or repo_count:
+        if doc_count:
             logger.warning(
-                "Startup recovery: %d document(s), %d repository(ies) stale → failed",
+                "Startup recovery: %d stale document(s) → failed",
                 doc_count,
-                repo_count,
             )
         else:
             logger.info("Startup recovery: stale 작업 없음 (cutoff=%d분)", stale_minutes)

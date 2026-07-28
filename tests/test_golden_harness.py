@@ -488,6 +488,10 @@ def test_db_name_is_per_corpus():
     assert run_eval.db_name("modu") != run_eval.db_name("csbot")
 
 
+def test_eval_applies_latest_repository_generation_migration():
+    assert run_eval.INITDB_FILES[-1] == "migrate_v10.sql"
+
+
 def test_suggestion_target_parsing():
     """P2-E: supersede 제안의 target(new decision) 추출 — dict/JSON/누락/불량."""
     assert run_eval._suggestion_target({"evidence": {"superseding_memory_id": 42}}) == 42

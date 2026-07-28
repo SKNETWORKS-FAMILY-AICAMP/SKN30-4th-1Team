@@ -8,6 +8,7 @@ import types
 from unittest.mock import MagicMock, patch
 
 from backend.retriever import qa_engine
+from backend.retriever.index_scope import ProjectIndexScope
 
 
 # ── 출처 라벨(충돌 없는 식별자) ────────────────────────────────────────────────
@@ -84,6 +85,11 @@ def test_chroma_context_carries_source_marker(monkeypatch):
             "item_type": "document", "source_path": "", "repo_id": -1}
     monkeypatch.setattr(qa_engine, "_generate_multi_queries",
                         lambda q: ["채팅 착수"])
+    monkeypatch.setattr(
+        qa_engine,
+        "load_project_index_scope",
+        lambda project_id: ProjectIndexScope(project_id),
+    )
     monkeypatch.setattr(qa_engine.mysql_search, "search", lambda pid, **kw: [])
     monkeypatch.setattr(qa_engine.mysql_search, "fetch_supersede_graph",
                         lambda pid: [])

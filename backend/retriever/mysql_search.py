@@ -1,11 +1,45 @@
 from typing import Optional, List, Dict
 from ..db.mysql import get_connection
+from .index_scope import (
+    ProjectIndexScope,
+    load_project_index_scope,
+    mysql_visibility_condition,
+)
 
 
 def _literal_like_pattern(value: str) -> str:
     """Wrap a literal substring for LIKE using ``!`` as the escape character."""
     escaped = value.replace("!", "!!").replace("%", "!%").replace("_", "!_")
     return f"%{escaped}%"
+
+
+def _resolve_scope(
+    project_id: int,
+    index_scope: ProjectIndexScope | None,
+) -> ProjectIndexScope:
+    """Use one immutable repository-generation snapshot for the whole query."""
+    scope = index_scope or load_project_index_scope(project_id)
+    if scope.project_id != project_id:
+        raise ValueError("index_scope project_id does not match project_id")
+    return scope
+
+
+def _visible_successor_exists(
+    row_alias: str,
+    successor_alias: str,
+    scope: ProjectIndexScope,
+) -> tuple[str, list]:
+    """Return an EXISTS predicate for a successor visible in ``scope``."""
+    visible_sql, visible_params = mysql_visibility_condition(
+        successor_alias, scope
+    )
+    return (
+        f"EXISTS (SELECT 1 FROM memory {successor_alias}"
+        f" WHERE {successor_alias}.id={row_alias}.superseded_by"
+        f" AND {successor_alias}.project_id={row_alias}.project_id"
+        f" AND {visible_sql})",
+        visible_params,
+    )
 
 
 def search(
@@ -18,6 +52,7 @@ def search(
     overdue: Optional[bool] = None,
     include_superseded: bool = False,
     text_query: Optional[str] = None,
+    index_scope: ProjectIndexScope | None = None,
 ) -> List[Dict]:
     if completed is not None:
         legacy_status = "completed" if completed else "open"
@@ -27,14 +62,22 @@ def search(
     if completion_status not in (None, "open", "completed", "unknown"):
         raise ValueError("completion_status must be open, completed, or unknown")
 
+    scope = _resolve_scope(project_id, index_scope)
     conditions = ["m.project_id = %s"]
     params: list = [project_id]
+    visible_sql, visible_params = mysql_visibility_condition("m", scope)
+    conditions.append(visible_sql)
+    params.extend(visible_params)
 
-    # 번복된(superseded) 항목은 기본적으로 제외해 최신 상태만 조회한다.
-    # "원래 계획은?" 류 이력 질문에서만 include_superseded=True로 체인을 포함한다.
-    # (superseded_by는 계층 2 판별이 채우기 전까지 항상 NULL이라 그 전에는 무동작.)
+    # raw superseded_by가 아니라 같은 게시 스냅샷에서 successor가 보이는지를 본다.
+    # 새 generation이 staging 중일 때 그 row를 가리키더라도 기존 게시 항목은
+    # successor가 실제 게시될 때까지 계속 활성 상태여야 한다.
     if not include_superseded:
-        conditions.append("m.superseded_by IS NULL")
+        successor_exists, successor_params = _visible_successor_exists(
+            "m", "visible_successor", scope
+        )
+        conditions.append(f"NOT {successor_exists}")
+        params.extend(successor_params)
 
     if category:
         conditions.append("m.category = %s")
@@ -94,32 +137,61 @@ def search(
     return result
 
 
-def fetch_supersede_graph(project_id: int) -> List[Dict]:
+def fetch_supersede_graph(
+    project_id: int,
+    index_scope: ProjectIndexScope | None = None,
+) -> List[Dict]:
     """supersede 관계에 참여하는 decision 행만 반환한다 (이력 체인 재구성용).
 
     search()는 LIMIT 없이 전 행 + memory_sources JOIN이라 이력 모드 전수 조회에
     부적합하다. 이 조회는 반환 행 수·전송량이 관계 참여 행 수에 비례한다
     (참여 행 = superseded_by가 채워진 행 + 다른 행이 가리키는 행).
     """
+    scope = _resolve_scope(project_id, index_scope)
+    visible_sql, visible_params = mysql_visibility_condition("m", scope)
+    successor_visible_sql, successor_visible_params = (
+        mysql_visibility_condition("visible_successor", scope)
+    )
+    predecessor_visible_sql, predecessor_visible_params = (
+        mysql_visibility_condition("visible_predecessor", scope)
+    )
     sql = (
         "SELECT m.id, m.project_id, m.category, m.content, m.reason, m.topic,"
         " m.owner, m.date, m.due_date, m.completed_at,"
         " m.completion_status, m.completion_status_source, m.source,"
-        " m.superseded_by, m.superseded_at,"
+        " visible_successor.id AS superseded_by,"
+        " CASE WHEN visible_successor.id IS NULL"
+        " THEN NULL ELSE m.superseded_at END AS superseded_at,"
         " ms.source_kind, ms.doc_id AS ms_doc_id, ms.repo_id AS ms_repo_id,"
         " ms.source_type, ms.source_path, ms.source_ref, ms.source_url"
         " FROM memory m"
+        " LEFT JOIN memory visible_successor"
+        " ON visible_successor.id=m.superseded_by"
+        " AND visible_successor.project_id=m.project_id"
+        f" AND {successor_visible_sql}"
         " LEFT JOIN memory_sources ms ON ms.memory_id = m.id"
-        " WHERE m.project_id = %s AND m.category = 'decision'"
-        " AND (m.superseded_by IS NOT NULL"
-        "      OR m.id IN (SELECT s.superseded_by FROM memory s"
-        "                  WHERE s.project_id = %s AND s.superseded_by IS NOT NULL))"
+        " WHERE m.project_id = %s"
+        f" AND {visible_sql}"
+        " AND m.category = 'decision'"
+        " AND (visible_successor.id IS NOT NULL"
+        " OR EXISTS (SELECT 1 FROM memory visible_predecessor"
+        " WHERE visible_predecessor.project_id=m.project_id"
+        " AND visible_predecessor.superseded_by=m.id"
+        f" AND {predecessor_visible_sql}))"
         " ORDER BY m.id ASC"
     )
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            cursor.execute(sql, [project_id, project_id])
+            cursor.execute(
+                sql,
+                [
+                    *successor_visible_params,
+                    project_id,
+                    *visible_params,
+                    *predecessor_visible_params,
+                ],
+            )
             rows = cursor.fetchall()
     finally:
         conn.close()

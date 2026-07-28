@@ -22,6 +22,7 @@ def test_memory_vector_upsert_and_delete():
         "project_id": 1,
         "doc_id": None,
         "repo_id": 3,
+        "repo_sync_run_id": "published-run",
         "category": "decision",
         "content": "리텐션 전략을 정했다",
         "owner": "박제섭",
@@ -37,4 +38,6 @@ def test_memory_vector_upsert_and_delete():
     assert kwargs["ids"] == ["memory:7"]
     assert kwargs["metadatas"][0]["item_type"] == "memory"
     assert kwargs["metadatas"][0]["repo_id"] == 3
+    assert kwargs["metadatas"][0]["repo_sync_run_id"] == "published-run"
+    assert kwargs["metadatas"][0]["repo_sync_staging"] is True
     collection.delete.assert_called_once_with(ids=["memory:7"])

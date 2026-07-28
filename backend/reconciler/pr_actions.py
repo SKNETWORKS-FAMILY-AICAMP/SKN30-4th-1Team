@@ -195,7 +195,7 @@ def _fetch_open_actions(project_id: int) -> list[dict]:
     try:
         with conn.cursor() as cursor:
             cursor.execute(
-                "SELECT id, content, owner, due_date FROM memory"
+                "SELECT id, content, owner, due_date FROM active_memory"
                 " WHERE project_id = %s AND category = 'action'"
                 " AND completion_status = 'open'"
                 " ORDER BY created_at DESC",
@@ -262,7 +262,13 @@ def _insert_suggestions(
                         (project_id, memory_id, kind, evidence, rationale, confidence, status)
                     SELECT %s, %s, 'complete_action', %s, %s, %s, 'pending'
                     FROM DUAL
-                    WHERE NOT EXISTS (
+                    WHERE EXISTS (
+                        SELECT 1 FROM active_memory
+                        WHERE project_id = %s AND id = %s
+                          AND category = 'action'
+                          AND completion_status = 'open'
+                    )
+                      AND NOT EXISTS (
                         SELECT 1 FROM memory_suggestions
                         WHERE memory_id = %s
                           AND kind = 'complete_action'
@@ -276,6 +282,8 @@ def _insert_suggestions(
                         json.dumps(evidence, ensure_ascii=False),
                         match.rationale,
                         match.confidence,
+                        project_id,
+                        match.memory_id,
                         match.memory_id,
                         match.pr_number,
                     ),

@@ -5,6 +5,7 @@ import pymysql
 from fastapi import APIRouter, HTTPException
 
 from ..db.mysql import get_connection
+from ..retriever.index_scope import mysql_visibility_condition
 from .auth import get_current_user_id, require_project_access
 
 logger = logging.getLogger(__name__)
@@ -60,8 +61,10 @@ def _suggestion_or_404(cursor, project_id: int, suggestion_id: int) -> dict:
         " m.completed_at AS memory_completed_at,"
         " m.superseded_by AS memory_superseded_by"
         " FROM memory_suggestions s"
-        " JOIN memory m ON m.id = s.memory_id AND m.project_id = s.project_id"
-        " WHERE s.id = %s AND s.project_id = %s",
+        " JOIN active_memory m"
+        "  ON m.id = s.memory_id AND m.project_id = s.project_id"
+        " WHERE s.id = %s AND s.project_id = %s"
+        " FOR UPDATE",
         (suggestion_id, project_id),
     )
     row = cursor.fetchone()
@@ -90,10 +93,26 @@ def list_suggestions(project_id: int, status: str = "pending", kind: str = "comp
             cursor.execute("SELECT id FROM projects WHERE id = %s", (project_id,))
             if not cursor.fetchone():
                 raise HTTPException(status_code=404, detail="Project not found")
-            sql = (
-                "SELECT * FROM memory_suggestions"
-                " WHERE project_id = %s AND status = %s"
-            )
+            if status == "pending":
+                sql = (
+                    "SELECT s.* FROM memory_suggestions s"
+                    " JOIN active_memory target"
+                    "  ON target.id=s.memory_id AND target.project_id=s.project_id"
+                    " LEFT JOIN active_memory superseding"
+                    "  ON s.kind='supersede'"
+                    "  AND superseding.project_id=s.project_id"
+                    "  AND superseding.id=CAST(JSON_UNQUOTE(JSON_EXTRACT("
+                    "s.evidence, '$.superseding_memory_id')) AS UNSIGNED)"
+                    " WHERE s.project_id = %s AND s.status = %s"
+                    " AND (s.kind<>'supersede' OR superseding.id IS NOT NULL)"
+                )
+            else:
+                # Resolved suggestions are audit history. Keep them visible
+                # even after their repository generation is superseded.
+                sql = (
+                    "SELECT s.* FROM memory_suggestions s"
+                    " WHERE s.project_id = %s AND s.status = %s"
+                )
             params = [project_id, status]
             if kind != "all":
                 sql += " AND kind = %s"
@@ -128,7 +147,7 @@ def _apply_accepted_effect(cursor, project_id: int, row: dict) -> None:
         #     활성으로 읽고 각자 다른 행을 갱신해 순환이 완성되는 TOCTOU를 차단 —
         #     행 잠금으로 한쪽이 상대 커밋을 대기한 뒤 superseded 상태를 보고 409.
         cursor.execute(
-            "SELECT id FROM memory WHERE id = %s AND project_id = %s"
+            "SELECT id FROM active_memory WHERE id = %s AND project_id = %s"
             " AND category = 'decision' AND superseded_by IS NULL"
             " FOR UPDATE",
             (superseding_id, project_id),
@@ -146,10 +165,12 @@ def _apply_accepted_effect(cursor, project_id: int, row: dict) -> None:
                 return
             raise HTTPException(status_code=409, detail="Decision already superseded by another decision")
         # 조건부 UPDATE + rowcount 확인: 읽은 뒤 다른 요청이 먼저 설정한 경합도 충돌로 거부.
+        published_sql, published_params = mysql_visibility_condition("memory")
         cursor.execute(
             "UPDATE memory SET superseded_by = %s, superseded_at = NOW(), updated_by = 'user'"
-            " WHERE id = %s AND project_id = %s AND superseded_by IS NULL",
-            (superseding_id, row["memory_id"], project_id),
+            " WHERE id = %s AND project_id = %s AND superseded_by IS NULL"
+            f" AND {published_sql}",
+            [superseding_id, row["memory_id"], project_id, *published_params],
         )
         if cursor.rowcount == 0:
             raise HTTPException(status_code=409, detail="Decision already superseded by another decision")
@@ -158,12 +179,19 @@ def _apply_accepted_effect(cursor, project_id: int, row: dict) -> None:
     if kind == "complete_action":
         # 미완료 action 완료 처리.
         if not row.get("memory_completed_at"):
+            published_sql, published_params = mysql_visibility_condition("memory")
             cursor.execute(
                 "UPDATE memory SET completed_at = NOW(), completion_status = 'completed',"
                 " completion_status_source = 'pr', updated_by = 'user'"
-                " WHERE id = %s AND project_id = %s",
-                (row["memory_id"], project_id),
+                " WHERE id = %s AND project_id = %s"
+                f" AND {published_sql}",
+                [row["memory_id"], project_id, *published_params],
             )
+            if cursor.rowcount == 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Action is no longer in the published repository generation",
+                )
         return
 
     raise HTTPException(status_code=400, detail="Unsupported suggestion kind")
@@ -180,8 +208,31 @@ def _resolve_suggestion(project_id: int, suggestion_id: int, status: str) -> dic
             if row["status"] != "pending":
                 raise HTTPException(status_code=400, detail="Suggestion already resolved")
 
+            resolved_by = get_current_user_id()
             if status == "accepted":
                 _apply_accepted_effect(cursor, project_id, row)
+                if row["kind"] == "supersede":
+                    # The accepted edge hides only its old target. Close every
+                    # pending edge that would become unreachable because it
+                    # references that inactive memory, while preserving valid
+                    # follow-up edges involving the still-active replacement.
+                    cursor.execute(
+                        "UPDATE memory_suggestions SET status='rejected',"
+                        " resolved_at=NOW(),resolved_by=%s"
+                        " WHERE project_id=%s AND kind='supersede'"
+                        " AND status='pending' AND id<>%s AND ("
+                        " memory_id=%s OR"
+                        " CAST(JSON_UNQUOTE(JSON_EXTRACT("
+                        "evidence,'$.superseding_memory_id')) AS UNSIGNED)"
+                        " =%s)",
+                        (
+                            resolved_by,
+                            project_id,
+                            suggestion_id,
+                            row["memory_id"],
+                            row["memory_id"],
+                        ),
+                    )
 
             # 조건부 UPDATE + rowcount 확인: 초기 pending 검사 후 다른 요청이 먼저
             # 해소했을 수 있다. 나중 요청이 확정된 상태를 덮어쓰면(예: accept가
@@ -190,7 +241,7 @@ def _resolve_suggestion(project_id: int, suggestion_id: int, status: str) -> dic
             cursor.execute(
                 "UPDATE memory_suggestions SET status = %s, resolved_at = NOW(), resolved_by = %s"
                 " WHERE id = %s AND project_id = %s AND status = 'pending'",
-                (status, get_current_user_id(), suggestion_id, project_id),
+                (status, resolved_by, suggestion_id, project_id),
             )
             if cursor.rowcount == 0:
                 raise HTTPException(status_code=409, detail="Suggestion already resolved")

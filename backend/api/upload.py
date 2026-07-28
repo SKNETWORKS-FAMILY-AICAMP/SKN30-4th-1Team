@@ -16,6 +16,7 @@ from ..document_content import (
 )
 from ..pipeline.extractor import extract
 from ..pipeline.ingestor import ingest
+from ..retriever.index_scope import mysql_visibility_condition
 from ..retriever.memory_vector import delete_memory_vector, upsert_memory_vector
 from ..storage import delete_file, safe_upload_name, write_reserved_file
 from ..quota import (
@@ -504,7 +505,7 @@ def update_memory(project_id: int, memory_id: int, body: MemoryUpdate):
         with conn.cursor() as cursor:
             if has_completed_update and "category" not in fields:
                 cursor.execute(
-                    "SELECT category FROM memory"
+                    "SELECT category FROM published_memory"
                     " WHERE id = %s AND project_id = %s FOR UPDATE",
                     (memory_id, project_id),
                 )
@@ -521,7 +522,8 @@ def update_memory(project_id: int, memory_id: int, body: MemoryUpdate):
             # 사후 PATCH로 무력화되어 비decision이 결정을 숨기는 상태를 만들지 않도록.
             if fields.get("category") not in (None, "decision"):
                 cursor.execute(
-                    "SELECT 1 FROM memory WHERE superseded_by = %s AND project_id = %s LIMIT 1",
+                    "SELECT 1 FROM published_memory"
+                    " WHERE superseded_by = %s AND project_id = %s LIMIT 1",
                     (memory_id, project_id),
                 )
                 if cursor.fetchone():
@@ -533,7 +535,8 @@ def update_memory(project_id: int, memory_id: int, body: MemoryUpdate):
                 # 사람이 승인한 supersede 관계는 decision→decision이어야 하며, 허용하면
                 # 새 category의 항목이 active_memory에서 계속 숨겨진 채 남는다.
                 cursor.execute(
-                    "SELECT superseded_by FROM memory WHERE id = %s AND project_id = %s",
+                    "SELECT superseded_by FROM published_memory"
+                    " WHERE id = %s AND project_id = %s",
                     (memory_id, project_id),
                 )
                 current = cursor.fetchone()
@@ -559,19 +562,30 @@ def update_memory(project_id: int, memory_id: int, body: MemoryUpdate):
                     "evidence, '$.superseding_memory_id')) AS UNSIGNED) = %s)",
                     (get_current_user_id(), project_id, memory_id, memory_id),
                 )
+            published_sql, published_params = mysql_visibility_condition("memory")
             cursor.execute(
-                f"UPDATE memory SET {set_clause} WHERE id = %s AND project_id = %s",
-                values,
+                f"UPDATE memory SET {set_clause}"
+                " WHERE id = %s AND project_id = %s"
+                f" AND {published_sql}",
+                values + published_params,
             )
             if cursor.rowcount == 0:
                 raise HTTPException(status_code=404, detail="Memory item not found")
         conn.commit()
         with conn.cursor() as cursor:
-            cursor.execute("SELECT * FROM memory WHERE id = %s", (memory_id,))
+            cursor.execute(
+                "SELECT m.*,active.id IS NOT NULL AS _is_active"
+                " FROM memory m"
+                " LEFT JOIN active_memory active ON active.id=m.id"
+                " WHERE m.id = %s",
+                (memory_id,),
+            )
             row = cursor.fetchone()
-        if row and row.get("superseded_by") is not None:
-            # superseded(숨겨진) memory의 벡터는 upsert로 부활시키지 않는다 — accept가
-            # 삭제한 상태를 유지해 비활성 벡터가 후보/RAG top-N을 차지하지 못하게 한다.
+        is_active = bool(
+            row.pop("_is_active", row.get("superseded_by") is None)
+        ) if row else False
+        if row and not is_active:
+            # 현재 게시 세대에서 비활성인 memory의 벡터는 부활시키지 않는다.
             _delete_memory_vector_best_effort(memory_id)
         else:
             _upsert_memory_vector_best_effort(row)
@@ -586,9 +600,11 @@ def delete_memory(project_id: int, memory_id: int):
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
+            published_sql, published_params = mysql_visibility_condition("memory")
             cursor.execute(
-                "DELETE FROM memory WHERE id = %s AND project_id = %s",
-                (memory_id, project_id),
+                "DELETE FROM memory WHERE id = %s AND project_id = %s"
+                f" AND {published_sql}",
+                [memory_id, project_id, *published_params],
             )
             if cursor.rowcount == 0:
                 raise HTTPException(status_code=404, detail="Memory item not found")

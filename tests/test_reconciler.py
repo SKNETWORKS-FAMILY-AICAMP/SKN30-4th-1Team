@@ -110,6 +110,7 @@ def test_fetch_open_actions_excludes_unknown_status(monkeypatch):
         {"id": 10, "content": "열린 작업", "owner": None, "due_date": None}
     ]
     sql = cursor.execute.call_args.args[0]
+    assert "FROM active_memory" in sql
     assert "completion_status = 'open'" in sql
     assert "completion_status <>" not in sql
 

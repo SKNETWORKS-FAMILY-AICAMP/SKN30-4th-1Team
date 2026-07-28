@@ -3,6 +3,11 @@ from typing import Dict, Iterable, List, Optional, Set
 
 from ..db.chroma import get_collection
 from ..db.mysql import get_connection
+from .index_scope import (
+    ProjectIndexScope,
+    chroma_visibility_filter,
+    load_project_index_scope,
+)
 
 _NO_ID = -1
 
@@ -50,6 +55,10 @@ def _metadata(row: Dict) -> Dict:
         "memory_id": row["id"],
         "doc_id": row.get("doc_id") if row.get("doc_id") is not None else _NO_ID,
         "repo_id": row.get("repo_id") if row.get("repo_id") is not None else _NO_ID,
+        "repo_sync_run_id": row.get("repo_sync_run_id") or "",
+        "repo_sync_staging": bool(
+            row.get("repo_id") is not None and row.get("repo_sync_run_id")
+        ),
         "category": row.get("category") or "",
         "owner": row.get("owner") or "",
         "source": row.get("source") or "",
@@ -84,6 +93,7 @@ def find_similar_memories(
     category: Optional[str] = None,
     n_results: int = 5,
     exclude_ids: Optional[Set[int]] = None,
+    index_scope: ProjectIndexScope | None = None,
 ) -> List[int]:
     """의미 유사한 memory 후보의 memory_id 목록을 ChromaDB에서 조회한다.
 
@@ -95,14 +105,15 @@ def find_similar_memories(
 
     exclude = exclude_ids or set()
 
-    conditions: List[Dict] = [{"project_id": project_id}, {"item_type": "memory"}]
+    scope = index_scope or load_project_index_scope(project_id)
+    conditions: List[Dict] = [{"item_type": "memory"}]
     if category:
         conditions.append({"category": category})
     # 제외 대상을 쿼리 단계에서 걸러 top-N 슬롯을 소모하지 않게 한다. 사후 필터로만 제외하면
     # 방금 upsert한 신규 decision(자기 자신)이 상위 결과를 차지해 실제 기존 후보가 밀려날 수 있다.
     if exclude:
         conditions.append({"memory_id": {"$nin": sorted(exclude)}})
-    where = conditions[0] if len(conditions) == 1 else {"$and": conditions}
+    where = chroma_visibility_filter(scope, *conditions)
 
     results = get_collection().query(
         query_texts=[text],
@@ -129,66 +140,103 @@ def delete_memory_vector(memory_id: int) -> None:
     get_collection().delete(ids=[memory_vector_id(memory_id)])
 
 
-def cleanup_orphan_memory_vectors() -> int:
-    """MySQL 기준으로 유효하지 않은 memory 벡터를 삭제한다.
-
-    삭제 대상: MySQL에 없는 project_id/memory_id를 가리키는 벡터(고아), 그리고
-    superseded된 memory의 벡터. 후자는 accept 시점의 delete_memory_vector(best-effort)가
-    실패했거나 과거 백필이 되살린 경우를 매 시작마다 수렴시킨다(자기치유).
-    """
+def _capture_all_active_memory_rows() -> List[Dict]:
+    """Read the startup-time published memory snapshot from its DB view."""
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT id FROM projects")
-            project_ids = {row["id"] for row in cursor.fetchall()}
-            cursor.execute("SELECT id, superseded_by FROM memory")
-            rows = cursor.fetchall()
-            memory_ids = {row["id"] for row in rows}
-            superseded_ids = {row["id"] for row in rows if row["superseded_by"] is not None}
+            cursor.execute("SELECT * FROM active_memory ORDER BY id")
+            return cursor.fetchall()
     finally:
         conn.close()
 
-    collection = get_collection()
-    raw = collection.get()
+
+def _is_memory_vector(vector_id, metadata: Dict) -> bool:
+    return (
+        str(vector_id).startswith("memory:")
+        or metadata.get("item_type") == "memory"
+    )
+
+
+def _vector_matches_row(vector_id, metadata: Dict, row: Dict) -> bool:
+    """Require canonical identity metadata so retrieval can return the row."""
+    return (
+        str(vector_id) == memory_vector_id(row["id"])
+        and metadata.get("item_type") == "memory"
+        and metadata.get("project_id") == row["project_id"]
+        and metadata.get("memory_id") == row["id"]
+    )
+
+
+def _reconcile_memory_vector_snapshot(
+    rows: Iterable[Dict],
+    raw: Dict,
+    collection,
+    *,
+    restore_missing: bool,
+) -> tuple[int, int]:
+    """Converge Chroma to one already-captured active-memory snapshot."""
+    rows = list(rows)
+    active = {memory_vector_id(row["id"]): row for row in rows}
+    existing: Set[str] = set()
     delete_ids = []
-    for vector_id, metadata in zip(raw.get("ids") or [], raw.get("metadatas") or []):
+
+    for vector_id, metadata in zip(
+        raw.get("ids") or [],
+        raw.get("metadatas") or [],
+    ):
         metadata = metadata or {}
-        if not (str(vector_id).startswith("memory:") or metadata.get("item_type") == "memory"):
+        if not _is_memory_vector(vector_id, metadata):
             continue
-        if (
-            metadata.get("project_id") not in project_ids
-            or metadata.get("memory_id") not in memory_ids
-            or metadata.get("memory_id") in superseded_ids
-        ):
+        row = active.get(str(vector_id))
+        if row is None or not _vector_matches_row(vector_id, metadata, row):
             delete_ids.append(vector_id)
+        else:
+            existing.add(str(vector_id))
 
     if delete_ids:
         collection.delete(ids=delete_ids)
-    return len(delete_ids)
+
+    restored = 0
+    if restore_missing:
+        missing = [
+            row
+            for row in rows
+            if memory_vector_id(row["id"]) not in existing
+        ]
+        restored = upsert_memory_vectors(missing)
+    return len(delete_ids), restored
+
+
+def cleanup_orphan_memory_vectors() -> int:
+    """MySQL 기준으로 유효하지 않은 memory 벡터를 삭제한다.
+
+    삭제 대상은 캡처한 게시 generation의 active_memory 의미론에서 벗어난 모든
+    memory 벡터다. 숨겨진 staging successor는 기존 게시 항목을 비활성화하지 않는다.
+    """
+    rows = _capture_all_active_memory_rows()
+    collection = get_collection()
+    deleted, _ = _reconcile_memory_vector_snapshot(
+        rows,
+        collection.get(),
+        collection,
+        restore_missing=False,
+    )
+    return deleted
 
 
 def backfill_memory_vectors() -> int:
     """아직 ChromaDB에 없는 기존 memory row만 1회 백필한다.
 
-    superseded row는 색인하지 않는다 — accept가 지운 벡터를 재시작이 되살려
-    후보 top-N을 비활성 벡터로 채우는 것을 막는다. 대체 decision 삭제로 복귀한
-    (superseded_by가 NULL로 돌아온) row는 여기서 벡터도 함께 복원된다.
+    시작 시 active_memory를 한 번 읽고 비활성 벡터 정리와 누락 벡터 복원을
+    같은 스냅샷에서 수행한다.
     """
-    cleanup_orphan_memory_vectors()
-
-    conn = get_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT * FROM memory WHERE superseded_by IS NULL ORDER BY id ASC")
-            rows = cursor.fetchall()
-    finally:
-        conn.close()
-
-    if not rows:
-        return 0
-
-    ids = [memory_vector_id(row["id"]) for row in rows]
+    rows = _capture_all_active_memory_rows()
     collection = get_collection()
-    existing = set(collection.get(ids=ids).get("ids") or [])
-    missing = [row for row in rows if memory_vector_id(row["id"]) not in existing]
-    return upsert_memory_vectors(missing)
+    _, restored = _reconcile_memory_vector_snapshot(
+        rows,
+        collection.get(),
+        collection,
+        restore_missing=True,
+    )
+    return restored

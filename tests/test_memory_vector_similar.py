@@ -1,7 +1,9 @@
 """find_similar_memories — supersede 후보 recall 단위 테스트."""
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 from backend.retriever import memory_vector
+from backend.retriever.index_scope import ProjectIndexScope
 
 
 class _FakeCollection:
@@ -20,7 +22,18 @@ class _FakeCollection:
 
 def _patch_collection(metas):
     coll = _FakeCollection(metas)
-    return coll, patch("backend.retriever.memory_vector.get_collection", return_value=coll)
+
+    @contextmanager
+    def _patched():
+        with patch(
+            "backend.retriever.memory_vector.get_collection", return_value=coll
+        ), patch(
+            "backend.retriever.memory_vector.load_project_index_scope",
+            side_effect=lambda project_id: ProjectIndexScope(project_id),
+        ):
+            yield
+
+    return coll, _patched()
 
 
 def test_find_similar_returns_memory_ids_excluding_self():
@@ -47,6 +60,7 @@ def test_find_similar_builds_and_where_with_category():
     assert coll.where == {
         "$and": [
             {"project_id": 2},
+            {"repo_id": -1},
             {"item_type": "memory"},
             {"category": "decision"},
         ]
@@ -63,11 +77,30 @@ def test_find_similar_excludes_via_query_nin():
 
 
 def test_find_similar_without_category_uses_two_conditions():
-    """category 미지정이면 project_id·item_type만으로 검색한다."""
+    """category 미지정이어도 문서 + 게시 generation 범위만 검색한다."""
     coll, cm = _patch_collection([])
     with cm:
         memory_vector.find_similar_memories(2, "내용")
-    assert coll.where == {"$and": [{"project_id": 2}, {"item_type": "memory"}]}
+    assert coll.where == {
+        "$and": [
+            {"project_id": 2},
+            {"repo_id": -1},
+            {"item_type": "memory"},
+        ]
+    }
+
+
+def test_find_similar_uses_only_active_repository_generation():
+    coll, cm = _patch_collection([])
+    scope = ProjectIndexScope(1, active_run_ids=("published-run",))
+    with cm:
+        memory_vector.find_similar_memories(
+            1, "결정", category="decision", index_scope=scope
+        )
+
+    visible = coll.where["$and"][1]["$or"]
+    assert {"repo_sync_run_id": {"$in": ["published-run"]}} in visible
+    assert "staging-run" not in str(coll.where)
 
 
 def test_find_similar_empty_text_skips_query():

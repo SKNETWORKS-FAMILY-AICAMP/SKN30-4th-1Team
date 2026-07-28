@@ -85,6 +85,34 @@ def test_accept_supersede_sets_superseded_by_from_evidence():
     mock_refresh.assert_called_once_with(1)
 
 
+def test_accept_supersede_rejects_edges_that_would_become_hidden():
+    """비활성화되는 기존 decision을 참조한 pending supersede만 함께 닫힌다."""
+    row = _supersede_row(superseded_by=None)
+    updated = {**row, "status": "accepted", "resolved_at": "2026-07-02 11:00:00"}
+    conn, cur = _make_conn(fetchone=[row, _EXISTS, updated])
+
+    with patch("backend.api.suggestion.require_project_access"), \
+         patch("backend.retriever.memory_vector.delete_memory_vector"), \
+         patch("backend.graph.refresh_project_memory_after_delete"), \
+         patch("backend.api.suggestion.get_current_user_id", return_value=99), \
+         patch("backend.api.suggestion.get_connection", return_value=conn):
+        resp = _client.post("/api/v1/projects/1/suggestions/8/accept")
+
+    assert resp.status_code == 200
+    competing = next(
+        call
+        for call in cur.execute.call_args_list
+        if "SET status='rejected'" in call.args[0]
+    )
+    sql, params = competing.args
+    assert "id<>%s" in sql
+    assert "memory_id=%s" in sql
+    assert "memory_id IN" not in sql
+    assert "$.superseding_memory_id" in sql
+    assert params == (99, 1, 8, 10, 10)
+    conn.commit.assert_called_once()
+
+
 def test_accept_supersede_already_superseded_is_noop_on_memory():
     """이미 superseded된 decision이면 memory는 다시 건드리지 않는다."""
     row = _supersede_row(superseded_by=42)
@@ -130,7 +158,7 @@ def test_accept_supersede_existence_check_requires_live_decision():
     assert resp.status_code == 200
     existence_checks = [
         call.args[0] for call in cur.execute.call_args_list
-        if call.args[0].strip().startswith("SELECT id FROM memory WHERE id")
+        if call.args[0].strip().startswith("SELECT id FROM active_memory WHERE id")
     ]
     assert len(existence_checks) == 1
     assert "category = 'decision'" in existence_checks[0]
@@ -178,7 +206,7 @@ def test_accept_supersede_validation_locks_superseding_row():
     assert resp.status_code == 200
     check_sql = next(
         c.args[0] for c in cur.execute.call_args_list
-        if c.args[0].strip().startswith("SELECT id FROM memory WHERE id")
+        if c.args[0].strip().startswith("SELECT id FROM active_memory WHERE id")
     )
     assert "FOR UPDATE" in check_sql
 
@@ -237,6 +265,24 @@ def test_list_pending_suggestions_returns_evidence_and_rationale():
     body = resp.json()
     assert body[0]["evidence"]["number"] == 20
     assert body[0]["rationale"] == "PR #20이 FastAPI 연동 작업을 구현했습니다."
+    list_sql = conn.cursor.return_value.__enter__.return_value.execute.call_args.args[0]
+    assert "JOIN active_memory target" in list_sql
+    assert "LEFT JOIN active_memory superseding" in list_sql
+
+
+def test_list_resolved_suggestions_preserves_audit_history():
+    row = _suggestion_row(status="accepted")
+    conn, cur = _make_conn(fetchone=[{"id": 1}], fetchall=[row])
+    with patch("backend.api.suggestion.require_project_access"), \
+         patch("backend.api.suggestion.get_connection", return_value=conn):
+        resp = _client.get(
+            "/api/v1/projects/1/suggestions?status=accepted&kind=all"
+        )
+
+    assert resp.status_code == 200
+    sql = cur.execute.call_args.args[0]
+    assert "memory_suggestions s" in sql
+    assert "active_memory" not in sql
 
 
 def test_list_suggestions_defaults_to_complete_action_kind():

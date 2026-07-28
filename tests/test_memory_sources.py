@@ -7,6 +7,7 @@ from backend.llm.base import LLMResponse
 from backend.pipeline.extractor import extract
 from backend.pipeline.ingestor import _completion_status, ingest
 from backend.pipeline.models import MemoryItem
+from backend.retriever.index_scope import ProjectIndexScope
 from backend.retriever.mysql_search import search
 
 
@@ -194,11 +195,12 @@ def test_collect_repo_sources_returns_content_and_metadata():
     """README.md 엔트리가 content + metadata dict 형태로 반환됨."""
     encoded = base64.b64encode(b"project readme content").decode()
     with patch("backend.api.repository._gh_get", side_effect=[
+        {"sha": "abc1234"},  # branch HEAD
         [{"sha": "abc1234", "commit": {"message": "init", "author": {"date": "2026-07-02"}}}],  # commits
         {"content": encoded, "encoding": "base64"},   # readme
         [],   # issues
         [],   # pulls
-    ]):
+    ]) as github_get:
         sources, sha, warnings = _collect_repo_sources("owner/repo", "main")
 
     assert sha == "abc1234"
@@ -209,11 +211,16 @@ def test_collect_repo_sources_returns_content_and_metadata():
     assert src["metadata"]["source_type"] == "readme"
     assert src["metadata"]["source_ref"] == "abc1234"
     assert "github.com" in src["metadata"]["source_url"]
+    paths = [entry.args[0] for entry in github_get.call_args_list]
+    assert paths[0] == "/repos/owner/repo/commits/main"
+    assert "commits?sha=abc1234" in paths[1]
+    assert paths[2] == "/repos/owner/repo/readme?ref=abc1234"
 
 
 def test_collect_repo_sources_commits_metadata():
     """commits.txt 엔트리도 source_type='commits' metadata 포함."""
     with patch("backend.api.repository._gh_get", side_effect=[
+        {"sha": "def5678"},  # branch HEAD
         [{"sha": "def5678", "commit": {"message": "feat: add X", "author": {"date": "2026-07-02"}}}],
         {},   # readme empty
         [],
@@ -251,16 +258,25 @@ def test_sync_bg_passes_source_metadata_to_ingest():
                          "source_ref": "abc", "source_url": "https://github.com/o/r/blob/abc/README.md"},
         }
     }
-    with patch("backend.api.repository._precheck_repository"), \
+    with patch("backend.api.repository._require_sync_ownership"), \
          patch("backend.api.repository._collect_repo_sources", return_value=(sources, "abc", [])), \
          patch("backend.api.repository._get_last_reconciled_pr", return_value=None), \
          patch("backend.api.repository._collect_merged_prs", return_value=[]), \
-         patch("backend.api.repository._clear_repo_indexed_data"), \
-         patch("backend.api.repository._set_repo_status"), \
+         patch("backend.api.repository._set_repo_status", return_value=(True, "old-run")), \
+         patch("backend.api.repository._cleanup_repo_generation"), \
          patch("backend.api.repository.reconcile_repository_prs"), \
+         patch("backend.api.repository._detect_published_generation_supersedes"), \
+         patch("backend.graph.refresh_project_memory_after_delete"), \
          patch("backend.pipeline.extractor.extract", return_value=[]) as mock_extract, \
          patch("backend.pipeline.ingestor.ingest") as mock_ingest:
-        _sync_bg(project_id=1, repo_id=10, full_name="owner/repo", branch="main", token=None)
+        _sync_bg(
+            project_id=1,
+            repo_id=10,
+            run_id="run-1",
+            full_name="owner/repo",
+            branch="main",
+            token=None,
+        )
 
     assert mock_extract.call_args.kwargs["source_kind"] == "repo_readme"
     assert mock_ingest.called
@@ -268,6 +284,7 @@ def test_sync_bg_passes_source_metadata_to_ingest():
     assert "source_metadata" in kwargs
     assert kwargs["source_metadata"]["source_type"] == "readme"
     assert kwargs["source_metadata"]["source_kind"] == "repository"
+    assert kwargs["repo_sync_run_id"] == "run-1"
 
 
 # ── mysql_search source_info ──────────────────────────────────────
@@ -284,7 +301,10 @@ def test_memory_search_includes_source_info():
     conn, cursor = _make_conn()
     cursor.fetchall.return_value = [row.copy()]
     with patch("backend.retriever.mysql_search.get_connection", return_value=conn):
-        results = search(project_id=1)
+        results = search(
+            project_id=1,
+            index_scope=ProjectIndexScope(1),
+        )
 
     assert len(results) == 1
     assert "source_info" in results[0]
@@ -305,7 +325,10 @@ def test_memory_search_source_info_none_when_no_source_row():
     conn, cursor = _make_conn()
     cursor.fetchall.return_value = [row.copy()]
     with patch("backend.retriever.mysql_search.get_connection", return_value=conn):
-        results = search(project_id=1)
+        results = search(
+            project_id=1,
+            index_scope=ProjectIndexScope(1),
+        )
 
     assert results[0]["source_info"]["kind"] is None
     assert results[0]["source_info"]["path"] is None

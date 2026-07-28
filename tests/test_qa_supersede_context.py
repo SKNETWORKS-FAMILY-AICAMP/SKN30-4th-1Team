@@ -11,6 +11,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from backend.retriever import qa_engine
+from backend.retriever.index_scope import ProjectIndexScope
+
+
+@pytest.fixture(autouse=True)
+def _published_index_scope(monkeypatch):
+    monkeypatch.setattr(
+        qa_engine,
+        "load_project_index_scope",
+        lambda project_id: ProjectIndexScope(project_id),
+    )
 
 
 # ── 공통 fixture ──────────────────────────────────────────────────────────────
@@ -41,7 +51,7 @@ def _build(question, rows, graph_rows, *, scope="global", tokens=(),
     )
     monkeypatch.setattr(
         qa_engine.mysql_search, "fetch_supersede_graph",
-        lambda pid: [dict(r) for r in graph_rows],
+        lambda pid, **_kwargs: [dict(r) for r in graph_rows],
     )
     with patch("backend.retriever.qa_engine.get_collection",
                return_value=collection or _empty_chunk_collection()):
@@ -395,7 +405,7 @@ def test_history_mode_uses_dedicated_graph_query(monkeypatch):
     graph_calls = []
     monkeypatch.setattr(
         qa_engine.mysql_search, "fetch_supersede_graph",
-        lambda pid: graph_calls.append(pid) or [],
+        lambda pid, **_kwargs: graph_calls.append(pid) or [],
     )
     with patch("backend.retriever.qa_engine.get_collection",
                return_value=_empty_chunk_collection()):
@@ -438,7 +448,11 @@ def _fake_vectorstore(order_by_query):
 def _build_chunks(question, queries, chunks, dense_map, monkeypatch):
     monkeypatch.setattr(qa_engine, "_generate_multi_queries", lambda q: list(queries))
     monkeypatch.setattr(qa_engine.mysql_search, "search", lambda pid, **kw: [])
-    monkeypatch.setattr(qa_engine.mysql_search, "fetch_supersede_graph", lambda pid: [])
+    monkeypatch.setattr(
+        qa_engine.mysql_search,
+        "fetch_supersede_graph",
+        lambda pid, **_kwargs: [],
+    )
     monkeypatch.setattr(qa_engine, "_get_vectorstore", lambda: _fake_vectorstore(dense_map))
     with patch("backend.retriever.qa_engine.get_collection",
                return_value=_chunk_collection(chunks)):

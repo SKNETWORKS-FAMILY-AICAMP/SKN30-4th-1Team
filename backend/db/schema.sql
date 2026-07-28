@@ -93,8 +93,13 @@ CREATE TABLE IF NOT EXISTS repositories (
     last_error     TEXT         DEFAULT NULL,
     sync_warning   TEXT         DEFAULT NULL,
     last_reconciled_pr INT      NULL,
+    active_sync_run_id CHAR(36) NULL,
+    current_sync_run_id CHAR(36) NULL,
+    sync_started_at DATETIME(6) NULL,
     connected_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (project_id) REFERENCES projects(id)
+    FOREIGN KEY (project_id) REFERENCES projects(id),
+    INDEX idx_repositories_active_sync_run (active_sync_run_id),
+    INDEX idx_repositories_current_sync_run (current_sync_run_id)
 );
 
 CREATE TABLE IF NOT EXISTS memory (
@@ -102,6 +107,7 @@ CREATE TABLE IF NOT EXISTS memory (
     project_id       INT NOT NULL,
     doc_id           INT NULL,
     repo_id          INT NULL,
+    repo_sync_run_id CHAR(36) NULL,
     category         VARCHAR(20),
     content          TEXT,
     reason           TEXT,
@@ -125,13 +131,27 @@ CREATE TABLE IF NOT EXISTS memory (
     FOREIGN KEY (repo_id)    REFERENCES repositories(id),
     -- self-FK: 대체(신) decision 삭제 시 포인터를 자동 해제해 구 decision을 복귀시킨다(v8).
     CONSTRAINT fk_memory_superseded_by
-        FOREIGN KEY (superseded_by) REFERENCES memory(id) ON DELETE SET NULL
+        FOREIGN KEY (superseded_by) REFERENCES memory(id) ON DELETE SET NULL,
+    INDEX idx_memory_repo_sync_run (repo_id, repo_sync_run_id)
 );
 
--- 현재 유효한(번복되지 않은) memory만 보는 뷰(v8). 유효 항목만 봐야 하는 집계/요약
--- raw SQL은 memory 대신 이 뷰를 읽어 superseded 필터 누락을 구조적으로 방지한다.
+-- 문서 memory는 항상 게시 상태다. 저장소 memory는 현재 active generation 또는
+-- generation 추적 전 legacy(NULL/NULL) 행만 노출한다.
+CREATE OR REPLACE VIEW published_memory AS
+SELECT m.*
+FROM memory m
+LEFT JOIN repositories r ON r.id = m.repo_id
+WHERE m.repo_id IS NULL
+   OR r.active_sync_run_id = m.repo_sync_run_id
+   OR (r.active_sync_run_id IS NULL AND m.repo_sync_run_id IS NULL);
+
+-- 게시된 항목 중 아직 게시된 successor가 없는 항목만 현재 유효하다.
+-- unpublished staging successor가 있어도 기존 published 항목은 계속 노출된다.
 CREATE OR REPLACE VIEW active_memory AS
-SELECT * FROM memory WHERE superseded_by IS NULL;
+SELECT pm.*
+FROM published_memory pm
+LEFT JOIN published_memory successor ON successor.id = pm.superseded_by
+WHERE successor.id IS NULL;
 
 CREATE TABLE IF NOT EXISTS memory_sources (
     id          INT PRIMARY KEY AUTO_INCREMENT,

@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from backend.main import app
 from backend.github import router as github_api
 from backend.api.upload import _infer_doc_type
+from backend.retriever.index_scope import ProjectIndexScope
 
 _client = TestClient(app, raise_server_exceptions=False)
 
@@ -97,6 +98,75 @@ def test_missing_session_returns_404_http():
     assert resp.status_code == 404
 
 
+def test_github_app_preview_uses_requested_connected_branch():
+    """preview의 HEAD와 반환 branch는 GitHub default가 아니라 연결 branch를 따른다."""
+    paths = []
+
+    def fake_json_request(method, path, token=None, body=None):
+        paths.append(path)
+        if path == "/repos/o/r":
+            return {
+                "default_branch": "main",
+                "full_name": "o/r",
+                "html_url": "https://github.com/o/r",
+                "name": "r",
+                "private": False,
+            }
+        if "/commits?" in path:
+            return [{"sha": "release-sha", "commit": {"message": "release"}}]
+        return []
+
+    with patch("backend.github.router._json_request", side_effect=fake_json_request):
+        preview = github_api._github_repo_preview(
+            "https://github.com/o/r",
+            requested_branch="release/1.x",
+        )
+
+    assert preview["repository"]["branch"] == "release/1.x"
+    assert preview["repository"]["remoteHeadSha"] == "release-sha"
+    assert any("commits?sha=release%2F1.x" in path for path in paths)
+    assert not any("commits?sha=main" in path for path in paths)
+
+
+def test_github_app_head_is_lightweight_and_session_expiry_stays_410():
+    """이벤트 기반 HEAD 확인은 commits 한 건만 읽고, 만료 state는 프론트가 구분할 410을 유지한다."""
+    body = github_api.GithubRepositoryPreviewRequest(
+        repository_url="https://github.com/o/r",
+        state="active-state",
+        branch="release/1.x",
+        head_only=True,
+    )
+    with patch("backend.github.router._installation_token", return_value="token"), patch(
+        "backend.github.router._json_request",
+        return_value=[{"sha": "release-sha"}],
+    ) as request_json:
+        head = github_api.preview_github_repository(body)
+
+    assert head == {"branch": "release/1.x", "remoteHeadSha": "release-sha"}
+    request_json.assert_called_once_with(
+        "GET",
+        "/repos/o/r/commits?sha=release%2F1.x&per_page=1",
+        token="token",
+    )
+
+    github_api._sessions.clear()
+    github_api._expired_states.clear()
+    github_api._sessions["expired-head-state"] = github_api.GithubAppSession(
+        created_at=time.time() - github_api.SESSION_TTL_SECONDS - 1
+    )
+    response = _client.post(
+        "/github/app/repository-preview",
+        json={
+            "repository_url": "https://github.com/o/r",
+            "state": "expired-head-state",
+            "branch": "release/1.x",
+            "head_only": True,
+        },
+    )
+    assert response.status_code == 410
+    assert response.json()["code"] == "SESSION_EXPIRED"
+
+
 # ── Q2: 파일 크기 제한 ───────────────────────────────────────────
 
 def _conn_seq_upload(*fetchone_values):
@@ -167,7 +237,11 @@ def test_memory_get_includes_todo_fields_and_sort_order():
     ]
     conn, cur = _conn_for_memory_rows(rows)
     with patch("backend.api.upload.require_project_access"), \
-         patch("backend.retriever.mysql_search.get_connection", return_value=conn):
+         patch("backend.retriever.mysql_search.get_connection", return_value=conn), \
+         patch(
+             "backend.retriever.mysql_search.load_project_index_scope",
+             return_value=ProjectIndexScope(1),
+         ):
         resp = _client.get("/api/v1/projects/1/memory")
 
     assert resp.status_code == 200
@@ -504,6 +578,31 @@ def test_memory_patch_superseded_row_deletes_vector_instead_of_upsert():
     mock_upsert.assert_not_called()
 
 
+def test_memory_patch_reactivated_row_restores_vector():
+    """A successor from an old repository generation no longer hides the row."""
+    row = {
+        "id": 10,
+        "project_id": 1,
+        "category": "decision",
+        "content": "다시 유효한 결정",
+        "superseded_by": 42,
+        "_is_active": 1,
+    }
+    conn, _cur = _conn_for_memory_patch(row)
+    with patch("backend.api.upload.require_project_access"), \
+         patch("backend.api.upload._upsert_memory_vector_best_effort") as upsert, \
+         patch("backend.api.upload._delete_memory_vector_best_effort") as delete_vector, \
+         patch("backend.api.upload.get_connection", return_value=conn):
+        resp = _client.patch(
+            "/api/v1/projects/1/memory/10",
+            json={"content": "다시 유효한 결정"},
+        )
+
+    assert resp.status_code == 200
+    upsert.assert_called_once()
+    delete_vector.assert_not_called()
+
+
 def test_memory_patch_due_date_sets_value_and_marks_verified():
     """PATCH due_date=YYYY-MM-DD — 마감일 저장 + 사용자 검증 마킹."""
     row = {
@@ -542,6 +641,38 @@ def test_memory_patch_due_date_null_clears_without_verifying():
     assert "due_date = %s" in update_call.args[0]
     assert "is_user_verified" not in update_call.args[0]
     assert update_call.args[1][0] is None
+
+
+def test_memory_patch_rejects_hidden_repository_generation():
+    conn = MagicMock()
+    cur = conn.cursor.return_value.__enter__.return_value
+    cur.rowcount = 0
+    with patch("backend.api.upload.require_project_access"), \
+         patch("backend.api.upload._upsert_memory_vector_best_effort"), \
+         patch("backend.api.upload.get_connection", return_value=conn):
+        resp = _client.patch(
+            "/api/v1/projects/1/memory/10",
+            json={"content": "stale edit"},
+        )
+
+    assert resp.status_code == 404
+    update_sql = cur.execute.call_args.args[0]
+    assert "active_sync_run_id=memory.repo_sync_run_id" in update_sql
+
+
+def test_memory_delete_rejects_hidden_repository_generation():
+    conn = MagicMock()
+    cur = conn.cursor.return_value.__enter__.return_value
+    cur.rowcount = 0
+    with patch("backend.api.upload.require_project_access"), \
+         patch("backend.api.upload._delete_memory_vector_best_effort") as delete_vector, \
+         patch("backend.api.upload.get_connection", return_value=conn):
+        resp = _client.delete("/api/v1/projects/1/memory/10")
+
+    assert resp.status_code == 404
+    delete_sql = cur.execute.call_args.args[0]
+    assert "active_sync_run_id=memory.repo_sync_run_id" in delete_sql
+    delete_vector.assert_not_called()
 
 
 # ── doc_type 추론 ────────────────────────────────────────────────

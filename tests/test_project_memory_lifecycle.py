@@ -73,8 +73,7 @@ def test_regenerate_project_memory_summarizes_remaining_memory(monkeypatch):
 
 def test_cleanup_orphan_memory_vectors_removes_missing_project_or_memory(monkeypatch):
     """존재하지 않는 project_id/memory_id를 가리키는 memory 벡터를 삭제한다."""
-    cursor = MagicMock()
-    cursor.fetchall.side_effect = [[{"id": 2}], [{"id": 20, "superseded_by": None}]]
+    active_row = {"id": 20, "project_id": 2}
     collection = MagicMock()
     collection.get.return_value = {
         "ids": ["memory:10", "memory:20", "doc:1"],
@@ -84,7 +83,11 @@ def test_cleanup_orphan_memory_vectors_removes_missing_project_or_memory(monkeyp
             {"item_type": "document", "project_id": 1},
         ],
     }
-    monkeypatch.setattr(memory_vector, "get_connection", lambda: _conn_with_cursor(cursor))
+    monkeypatch.setattr(
+        memory_vector,
+        "_capture_all_active_memory_rows",
+        lambda: [active_row],
+    )
     monkeypatch.setattr(memory_vector, "get_collection", lambda: collection)
 
     assert memory_vector.cleanup_orphan_memory_vectors() == 1
@@ -92,16 +95,9 @@ def test_cleanup_orphan_memory_vectors_removes_missing_project_or_memory(monkeyp
     collection.delete.assert_called_once_with(ids=["memory:10"])
 
 
-def test_cleanup_removes_superseded_memory_vectors(monkeypatch):
-    """F-002: superseded된 memory의 벡터도 시작 시 정리한다(자기치유).
-
-    accept 시점의 delete_memory_vector가 실패했거나 과거 백필이 되살린 비활성 벡터가
-    후보 top-N 슬롯을 차지하지 못하도록, MySQL superseded_by 상태로 수렴시킨다."""
-    cursor = MagicMock()
-    cursor.fetchall.side_effect = [
-        [{"id": 1}],
-        [{"id": 10, "superseded_by": 42}, {"id": 42, "superseded_by": None}],
-    ]
+def test_cleanup_removes_memory_with_visible_successor(monkeypatch):
+    """active snapshot에 없는 predecessor 벡터는 시작 시 정리한다."""
+    active_row = {"id": 42, "project_id": 1}
     collection = MagicMock()
     collection.get.return_value = {
         "ids": ["memory:10", "memory:42"],
@@ -110,7 +106,11 @@ def test_cleanup_removes_superseded_memory_vectors(monkeypatch):
             {"item_type": "memory", "project_id": 1, "memory_id": 42},
         ],
     }
-    monkeypatch.setattr(memory_vector, "get_connection", lambda: _conn_with_cursor(cursor))
+    monkeypatch.setattr(
+        memory_vector,
+        "_capture_all_active_memory_rows",
+        lambda: [active_row],
+    )
     monkeypatch.setattr(memory_vector, "get_collection", lambda: collection)
 
     assert memory_vector.cleanup_orphan_memory_vectors() == 1
@@ -118,24 +118,69 @@ def test_cleanup_removes_superseded_memory_vectors(monkeypatch):
     collection.delete.assert_called_once_with(ids=["memory:10"])
 
 
-def test_backfill_skips_superseded_rows(monkeypatch):
-    """F-002: 백필은 superseded_by IS NULL인 row만 색인한다.
-
-    accept가 지운 비활성 벡터를 서버 재시작이 재생성해 D-4를 무력화하지 않도록."""
-    cursor = MagicMock()
-    live_row = {"id": 42, "superseded_by": None}
-    cursor.fetchall.return_value = [live_row]
+def test_cleanup_keeps_predecessor_when_successor_is_not_published(monkeypatch):
+    """숨겨진 successor는 기존 published predecessor를 비활성화하지 않는다."""
+    predecessor = {"id": 10, "project_id": 1}
     collection = MagicMock()
-    collection.get.return_value = {"ids": []}
-    monkeypatch.setattr(memory_vector, "cleanup_orphan_memory_vectors", lambda: 0)
-    monkeypatch.setattr(memory_vector, "get_connection", lambda: _conn_with_cursor(cursor))
+    collection.get.return_value = {
+        "ids": ["memory:10", "memory:20"],
+        "metadatas": [
+            {"item_type": "memory", "project_id": 1, "memory_id": 10},
+            {"item_type": "memory", "project_id": 1, "memory_id": 20},
+        ],
+    }
+    monkeypatch.setattr(
+        memory_vector,
+        "_capture_all_active_memory_rows",
+        lambda: [predecessor],
+    )
+    monkeypatch.setattr(memory_vector, "get_collection", lambda: collection)
+
+    assert memory_vector.cleanup_orphan_memory_vectors() == 1
+
+    collection.delete.assert_called_once_with(ids=["memory:20"])
+
+
+def test_startup_vector_snapshot_reads_active_memory_view(monkeypatch):
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [{"id": 10, "project_id": 1}]
+    monkeypatch.setattr(
+        memory_vector,
+        "get_connection",
+        lambda: _conn_with_cursor(cursor),
+    )
+    rows = memory_vector._capture_all_active_memory_rows()
+
+    assert rows == [{"id": 10, "project_id": 1}]
+    assert cursor.execute.call_args.args[0] == (
+        "SELECT * FROM active_memory ORDER BY id"
+    )
+
+
+def test_backfill_reconciles_against_active_snapshot(monkeypatch):
+    """백필은 inactive 벡터를 지우고 active 누락 row만 복원한다."""
+    live_row = {"id": 42, "project_id": 1}
+    collection = MagicMock()
+    collection.get.return_value = {
+        "ids": ["memory:10"],
+        "metadatas": [
+            {"item_type": "memory", "project_id": 1, "memory_id": 10},
+        ],
+    }
+    monkeypatch.setattr(
+        memory_vector,
+        "_capture_all_active_memory_rows",
+        lambda: [live_row],
+    )
     monkeypatch.setattr(memory_vector, "get_collection", lambda: collection)
     upserted = []
-    monkeypatch.setattr(memory_vector, "upsert_memory_vectors",
-                        lambda rows: upserted.extend(rows) or len(list(upserted)))
+    monkeypatch.setattr(
+        memory_vector,
+        "upsert_memory_vectors",
+        lambda rows: upserted.extend(rows) or len(rows),
+    )
 
-    memory_vector.backfill_memory_vectors()
+    assert memory_vector.backfill_memory_vectors() == 1
 
-    select_sql = cursor.execute.call_args_list[0].args[0]
-    assert "superseded_by IS NULL" in select_sql
+    collection.delete.assert_called_once_with(ids=["memory:10"])
     assert upserted == [live_row]

@@ -166,12 +166,16 @@ def ingest(
     date: str,
     doc_type: str,
     repo_id: Optional[int] = None,
+    repo_sync_run_id: Optional[str] = None,
     source_metadata: Optional[dict] = None,
     processing_token: Optional[str] = None,
-):
+) -> List[dict]:
     """추출 결과를 두 DB에 순서대로 저장.
     1단계: MySQL — items 각각을 memory + memory_sources 테이블에 INSERT (같은 트랜잭션)
     2단계: ChromaDB — 원문(raw_text)을 청크로 분할해 벡터 임베딩으로 저장
+
+    성공 시 생성된 memory 행을 반환한다. 기존 호출자는 반환값을 무시해도 되며,
+    repository sync는 이 값을 모아 generation 게시 후 supersede 판별에 사용할 수 있다.
     """
     chunks = _split_text(raw_text)
 
@@ -207,9 +211,9 @@ def ingest(
                     f"""
                     INSERT INTO memory
                         (project_id, doc_id, repo_id, category, content,
-                         reason, topic, owner, date, source, completed_at,
+                         reason, topic, owner, date, source, repo_sync_run_id, completed_at,
                          completion_status, completion_status_source)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                             {completed_sql}, %s, %s)
                     """,
                     [
@@ -218,6 +222,7 @@ def ingest(
                         item.reason, item.topic,
                         item.owner, item_date,
                         source,
+                        repo_sync_run_id,
                     ] + completed_params + [completion_status, completion_source],
                 )
                 memory_id = cursor.lastrowid
@@ -228,6 +233,7 @@ def ingest(
                     "project_id": project_id,
                     "doc_id": doc_id,
                     "repo_id": repo_id,
+                    "repo_sync_run_id": repo_sync_run_id,
                     "category": item.category,
                     "content": item.content,
                     "reason": item.reason,
@@ -259,7 +265,8 @@ def ingest(
             import hashlib
             src_hash = hashlib.md5(source.encode()).hexdigest()[:6]
             if repo_id is not None:
-                chunk_prefix = f"repo{repo_id}_{src_hash}"
+                run_prefix = f"_{repo_sync_run_id}" if repo_sync_run_id else ""
+                chunk_prefix = f"repo{repo_id}{run_prefix}_{src_hash}"
             elif doc_id is not None:
                 chunk_prefix = f"doc{doc_id}"
             else:
@@ -274,6 +281,8 @@ def ingest(
                     "project_id": project_id,
                     "doc_id": doc_id if doc_id is not None else _NO_ID,
                     "repo_id": repo_id if repo_id is not None else _NO_ID,
+                    "repo_sync_run_id": repo_sync_run_id or "",
+                    "repo_sync_staging": bool(repo_id is not None and repo_sync_run_id),
                     "source": source,
                     "item_type": "document",
                     "date": date or "",
@@ -319,7 +328,11 @@ def ingest(
         for r in memory_rows
         if r["category"] == "decision"
     ]
-    if new_decisions:
+    # A repository generation is invisible until its active pointer is published.
+    # Running supersede here would still create user-visible suggestions and could
+    # mutate relationships against the old published generation. Reconciliation
+    # for staged repository decisions must run only after publish.
+    if new_decisions and repo_sync_run_id is None:
         try:
             from ..reconciler.supersede import detect_supersede
             detect_supersede(project_id, new_decisions)
@@ -328,3 +341,5 @@ def ingest(
                 "supersede_detection_failed",
                 extra={"project_id": project_id, "code": "SUPERSEDE_DETECTION_FAILED"},
             )
+
+    return memory_rows

@@ -1,5 +1,6 @@
 import os
 import asyncio
+import json
 import subprocess
 import threading
 import time
@@ -19,6 +20,8 @@ from backend.api.project import delete_project
 from backend.api import project as project_module
 from backend.api.upload import _process_upload_locked
 from backend.api import health as health_api
+from backend.api.suggestion import _suggestion_or_404
+from backend.api.repository import _set_repo_status
 from backend import quota as quota_module
 from backend.quota import (
     abandon_reservation,
@@ -32,6 +35,7 @@ from backend.quota import (
 )
 from backend.startup import (
     ensure_schema_v9,
+    ensure_schema_v10,
     recover_quota_tasks,
     recover_stale_tasks,
 )
@@ -118,6 +122,7 @@ def reset_database(monkeypatch, tmp_path):
                 "memory_suggestions",
                 "memory",
                 "documents",
+                "repositories",
                 "project_members",
                 "projects",
                 "users",
@@ -150,6 +155,167 @@ def test_v9_is_idempotent_and_manifest_is_closed():
         " ('size_bytes','uploaded_by','processing_token','lease_expires_at')"
     ) == 4
     assert scalar("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('upload_quota_reservations','storage_cleanup_pending')") == 2
+
+
+def test_v10_views_follow_published_generation_and_allow_locking_reads():
+    conn = connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO repositories"
+                " (id,project_id,provider,repository_url,branch,status,active_sync_run_id)"
+                " VALUES (1,1,'github','https://github.com/o/r','main','indexed','run-a')"
+            )
+            cursor.execute(
+                "INSERT INTO memory(project_id,repo_id,repo_sync_run_id,category,content)"
+                " VALUES (1,1,'run-a','decision','generation A')"
+            )
+            generation_a = cursor.lastrowid
+            cursor.execute(
+                "INSERT INTO memory(project_id,repo_id,repo_sync_run_id,category,content)"
+                " VALUES (1,1,'run-b','decision','generation B')"
+            )
+            generation_b = cursor.lastrowid
+            cursor.execute(
+                "INSERT INTO memory(project_id,category,content,superseded_by)"
+                " VALUES (1,'decision','document decision',%s)",
+                (generation_b,),
+            )
+            document_memory = cursor.lastrowid
+            cursor.execute(
+                "INSERT INTO memory_suggestions"
+                " (project_id,memory_id,kind,evidence,rationale,confidence,status)"
+                " VALUES (1,%s,'supersede',%s,'test','high','pending')",
+                (
+                    generation_a,
+                    json.dumps(
+                        {
+                            "type": "supersede",
+                            "superseding_memory_id": document_memory,
+                        }
+                    ),
+                ),
+            )
+            suggestion_id = cursor.lastrowid
+        conn.commit()
+
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT id FROM published_memory WHERE project_id=1 ORDER BY id"
+            )
+            assert [row["id"] for row in cursor.fetchall()] == [
+                generation_a,
+                document_memory,
+            ]
+            cursor.execute(
+                "SELECT id FROM active_memory WHERE project_id=1 ORDER BY id"
+            )
+            assert [row["id"] for row in cursor.fetchall()] == [
+                generation_a,
+                document_memory,
+            ]
+            cursor.execute(
+                "SELECT id FROM active_memory WHERE id=%s FOR UPDATE",
+                (document_memory,),
+            )
+            assert cursor.fetchone()["id"] == document_memory
+            assert _suggestion_or_404(cursor, 1, suggestion_id)["id"] == suggestion_id
+            cursor.execute(
+                "UPDATE repositories SET active_sync_run_id='run-b' WHERE id=1"
+            )
+        conn.commit()
+
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT id FROM active_memory WHERE project_id=1 ORDER BY id"
+            )
+            assert [row["id"] for row in cursor.fetchall()] == [generation_b]
+    finally:
+        conn.close()
+
+
+def test_v10_publish_fence_switches_generation_and_retires_old_derivatives():
+    conn = connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO repositories"
+                " (id,project_id,provider,repository_url,branch,status,"
+                "  active_sync_run_id,current_sync_run_id)"
+                " VALUES (1,1,'github','https://github.com/o/r','main',"
+                " 'syncing','run-old','run-new')"
+            )
+            cursor.execute(
+                "INSERT INTO memory(project_id,repo_id,repo_sync_run_id,category,content)"
+                " VALUES (1,1,'run-old','decision','old generation')"
+            )
+            old_memory = cursor.lastrowid
+            cursor.execute(
+                "INSERT INTO memory(project_id,category,content,superseded_by)"
+                " VALUES (1,'decision','published predecessor',%s)",
+                (old_memory,),
+            )
+            predecessor = cursor.lastrowid
+            cursor.execute(
+                "INSERT INTO memory_suggestions"
+                " (project_id,memory_id,kind,evidence,rationale,confidence,status)"
+                " VALUES (1,%s,'supersede',%s,'test','high','pending')",
+                (
+                    old_memory,
+                    json.dumps(
+                        {
+                            "type": "supersede",
+                            "superseding_memory_id": predecessor,
+                        }
+                    ),
+                ),
+            )
+            suggestion_id = cursor.lastrowid
+        conn.commit()
+    finally:
+        conn.close()
+
+    published, previous = _set_repo_status(
+        1,
+        "run-new",
+        "indexed",
+        commit_sha="abc123",
+        indexed_files=4,
+        last_error=None,
+    )
+    assert published is True
+    assert previous == "run-old"
+
+    conn = connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT status,active_sync_run_id,current_sync_run_id,commit_sha"
+                " FROM repositories WHERE id=1"
+            )
+            repository = cursor.fetchone()
+            cursor.execute(
+                "SELECT superseded_by FROM memory WHERE id=%s",
+                (predecessor,),
+            )
+            predecessor_row = cursor.fetchone()
+            cursor.execute(
+                "SELECT status,resolved_at FROM memory_suggestions WHERE id=%s",
+                (suggestion_id,),
+            )
+            suggestion = cursor.fetchone()
+    finally:
+        conn.close()
+
+    assert repository == {
+        "status": "indexed",
+        "active_sync_run_id": "run-new",
+        "current_sync_run_id": None,
+        "commit_sha": "abc123",
+    }
+    assert predecessor_row["superseded_by"] is None
+    assert suggestion["status"] == "rejected"
+    assert suggestion["resolved_at"] is not None
 
 
 def test_real_v8_upgrade_backfills_and_resumes_after_interruption(monkeypatch, tmp_path):
@@ -546,16 +712,7 @@ def test_schema_probe_rejects_stale_active_memory_view():
         with pytest.raises(RuntimeError, match="schema manifest mismatch"):
             health_api._schema_probe()
     finally:
-        conn = connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    "CREATE OR REPLACE VIEW active_memory AS"
-                    " SELECT * FROM memory WHERE superseded_by IS NULL"
-                )
-            conn.commit()
-        finally:
-            conn.close()
+        ensure_schema_v10()
     health_api._schema_probe()
 
 

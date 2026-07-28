@@ -211,7 +211,7 @@ def _fetch_candidate_decisions(project_id: int, ids: set[int]) -> list[dict]:
     try:
         with conn.cursor() as cursor:
             cursor.execute(
-                "SELECT id, content, topic, reason, date FROM memory"
+                "SELECT id, content, topic, reason, date FROM active_memory"
                 " WHERE project_id = %s AND category = 'decision'"
                 " AND superseded_by IS NULL"
                 f" AND id IN ({placeholders})"
@@ -282,7 +282,17 @@ def _insert_supersede_suggestions(
                         (project_id, memory_id, kind, evidence, rationale, confidence, status)
                     SELECT %s, %s, 'supersede', %s, %s, %s, 'pending'
                     FROM DUAL
-                    WHERE NOT EXISTS (
+                    WHERE EXISTS (
+                        SELECT 1 FROM active_memory
+                        WHERE project_id = %s AND id = %s
+                          AND category = 'decision'
+                    )
+                      AND EXISTS (
+                        SELECT 1 FROM active_memory
+                        WHERE project_id = %s AND id = %s
+                          AND category = 'decision'
+                    )
+                      AND NOT EXISTS (
                         SELECT 1 FROM memory_suggestions
                         WHERE memory_id = %s
                           AND kind = 'supersede'
@@ -296,6 +306,10 @@ def _insert_supersede_suggestions(
                         json.dumps(evidence, ensure_ascii=False),
                         match.rationale,
                         match.confidence,
+                        project_id,
+                        match.memory_id,
+                        project_id,
+                        match.superseding_memory_id,
                         match.memory_id,
                         match.superseding_memory_id,
                     ),
