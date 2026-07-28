@@ -413,3 +413,62 @@ def test_failure_path_still_skips_already_failed_document():
     assert not any(
         "storage_cleanup_pending" in c.args[0] for c in cur.execute.call_args_list
     )
+
+
+def _stale_conns(lease_row):
+    """fail_stale_document 경로용 get_connection 목록. lease_row는 lease 만료 검사 결과."""
+    snap_cur = MagicMock()
+    snap_cur.fetchone.return_value = {"project_id": 1, "uploaded_by": 7}
+    snap = MagicMock()
+    snap.cursor.return_value.__enter__.return_value = snap_cur
+    snap.cursor.return_value.__exit__.return_value = False
+
+    cur = MagicMock()
+    cur.fetchone.side_effect = [
+        {"id": 7},                       # 사용자 행 잠금
+        {"id": 1},                       # 프로젝트 행 잠금
+        {                                # 대상 문서 — 처리 중이고 토큰 일치
+            "id": 5, "project_id": 1, "status": "processing",
+            "uploaded_by": 7, "file_path": None, "size_bytes": 0,
+            "processing_token": "tok",
+        },
+        lease_row,                       # lease 만료 검사 결과
+    ]
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    conn.cursor.return_value.__exit__.return_value = False
+    return [snap, conn], cur
+
+
+def test_stale_transfer_accepts_null_lease():
+    """lease가 NULL인 processing 행도 정리 대상으로 받아들인다.
+
+    recover_stale_tasks(startup.py)는 `lease_expires_at IS NULL OR lease<NOW()`로 stale을
+    뽑는데 이 함수가 `lease<NOW()`만 통과시켜, NULL lease 행은 뽑히고도 거부돼 영구히
+    processing으로 남고(쿼터 미해제) 워치독이 매 사이클 재시도했다. 두 판정을 일치시킨다."""
+    conns, cur = _stale_conns({"1": 1})
+    with patch.object(quota_module, "get_connection", side_effect=conns):
+        project_id = quota_module.transfer_document_to_cleanup(
+            5, "UPLOAD_PROCESSING_STALE", expected_processing_token="tok"
+        )
+
+    assert project_id == 1
+    lease_sql = next(
+        c.args[0] for c in cur.execute.call_args_list if "lease_expires_at" in c.args[0]
+    )
+    assert "lease_expires_at IS NULL" in lease_sql  # startup.py의 조건과 동일해야 한다
+    assert any("storage_cleanup_pending" in c.args[0] for c in cur.execute.call_args_list)
+
+
+def test_stale_transfer_still_skips_live_lease():
+    """아직 살아있는 lease는 여전히 건드리지 않는다 — 가드가 과하게 넓어지지 않았는지 고정."""
+    conns, cur = _stale_conns(None)  # lease 검사에서 행 없음 = 아직 유효
+    with patch.object(quota_module, "get_connection", side_effect=conns):
+        project_id = quota_module.transfer_document_to_cleanup(
+            5, "UPLOAD_PROCESSING_STALE", expected_processing_token="tok"
+        )
+
+    assert project_id is None
+    assert not any(
+        "storage_cleanup_pending" in c.args[0] for c in cur.execute.call_args_list
+    )

@@ -392,8 +392,14 @@ def transfer_document_to_cleanup(
                     or row.get("processing_token") != expected_processing_token
                 ):
                     return None
+                # lease 만료 판정을 recover_stale_tasks(startup.py)와 동일하게 맞춘다.
+                # 워치독은 NULL lease도 stale로 뽑는데 여기서 거부하면, 그 행은 영구히
+                # processing으로 남아 쿼터가 안 풀리고 워치독이 매 사이클 재시도한다.
+                # (현재 정상 경로로는 processing + 토큰 있음 + lease NULL 조합이 만들어지지
+                #  않지만, 두 곳이 같은 사실을 다르게 판정하던 것을 일치시켜 둔다.)
                 cursor.execute(
-                    "SELECT 1 FROM documents WHERE id=%s AND lease_expires_at<NOW()",
+                    "SELECT 1 FROM documents WHERE id=%s"
+                    " AND (lease_expires_at IS NULL OR lease_expires_at<NOW())",
                     (doc_id,),
                 )
                 if not cursor.fetchone():

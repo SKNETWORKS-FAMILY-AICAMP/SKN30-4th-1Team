@@ -325,12 +325,13 @@ def backfill_dev_user_membership() -> None:
 def recover_stale_tasks() -> None:
     """서버 재시작 시 stale processing/syncing 작업을 failed로 전환.
 
-    cutoff보다 오래된 in-progress 작업만 대상.
-    최근 등록된 작업은 현재 서버에서 막 시작된 것일 수 있으므로 건드리지 않음.
+    stale 판정 기준이 두 테이블에서 다르다:
+    - documents: lease_expires_at 기반(NULL이거나 만료된 것). 임계값은 lease를 발급하는
+      쪽의 LEASE_MINUTES(quota.py)이며 아래 cutoff와 무관하다.
+    - repositories: connected_at이 cutoff보다 오래된 것.
 
-    BACKGROUND_TASK_STALE_MINUTES <= 0 이면 recovery 비활성화.
-    timestamp 기준: documents.uploaded_at, repositories.connected_at.
-    향후 started_at/updated_at 컬럼 추가 시 이 기준을 교체하면 더 정확해짐.
+    따라서 BACKGROUND_TASK_STALE_MINUTES는 repositories에서만 임계값으로 쓰이고,
+    documents에는 recovery on/off 스위치로만 작용한다(<= 0 이면 전체 비활성화).
     """
     raw = os.getenv("BACKGROUND_TASK_STALE_MINUTES", "30")
     try:
