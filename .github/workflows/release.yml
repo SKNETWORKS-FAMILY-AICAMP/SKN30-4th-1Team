@@ -21,7 +21,7 @@ jobs:
           gh release view "$TAG_NAME" >/dev/null 2>&1 || \
             gh release create "$TAG_NAME" \
               --title "PaiM $TAG_NAME" \
-              --notes "macOS와 Windows 설치 파일입니다." \
+              --generate-notes \
               --verify-tag
 
   build-installers:
