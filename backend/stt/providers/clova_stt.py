@@ -5,12 +5,39 @@
 - 긴 파일을 직접 업로드할 수 있어 OpenAI의 25MB 제약을 받지 않는다
 - REST API라 새 패키지가 필요 없다(httpx는 openai가 이미 가져온다)
 
-필요한 환경변수 (NAVER Cloud Platform 콘솔에서 발급)
-- `CLOVA_SPEECH_INVOKE_URL` : 도메인별 호출 URL
-- `CLOVA_SPEECH_SECRET`     : 도메인 시크릿 키
+필요한 환경변수 (NAVER Cloud Platform 콘솔 → CLOVA Speech → 도메인 상세)
+- `CLOVA_SPEECH_INVOKE_URL` : 도메인별 호출 URL.
+  `https://clovaspeech-gw.ncloud.com/external/v1/{도메인ID}/{키}` 형태여야 한다.
+  호스트만 적거나 gRPC 포트(`:50051`)를 적으면 동작하지 않는다 — gRPC는
+  스트리밍(단문) API이고 여기서 쓰는 긴 문장 인식은 REST다.
+- `CLOVA_SPEECH_SECRET`     : 도메인 Secret Key.
+  **CSR(단문 인식) 시크릿과 다르다.** CSR은 화자 분리를 지원하지 않으므로
+  이 제공자에는 쓸 수 없다.
+
+> **검증 완료**: 합성 회의록(화자 4명·발화 9개)을 실제 서비스로 왕복 검증했다.
+> 구간 9개·화자 4명(A~D)이 정확히 분리됐고, 밀리초→초 변환과 화자 라벨 매핑이
+> 의도대로 동작했다. 추출 단계에서 6개 항목의 owner가 모두 올바른 화자로 귀속됐다.
 
 화자 분리로 얻는 라벨은 `화자 1`·`화자 2` 같은 **익명 식별자**다. 실제 이름 매핑은
 계획서가 후속 과제로 미룬 항목이므로 여기서 추측하지 않는다.
+
+## 알려진 한계 — 영어 기술 용어 음차
+
+한국어 발화에 섞인 영어 용어의 일부가 한글로 음차된다. `enko` 모드와 `boostings`를
+적용한 뒤에도 남는 현상이다(실측).
+
+    MySQL    → "마이세ql"
+    ChromaDB → "크로마 DB"
+
+`FastAPI`처럼 철자는 살아 있고 대소문자만 다른 경우(`fastapi`)는 **문제가 아니다.**
+이 저장소의 검색 경로가 모두 대소문자를 정규화하기 때문이다 — BM25는
+`qa_engine._tokenize_ko()`가 `.lower()`를 적용하고, MySQL은 기본 collation이
+case-insensitive이며, Chroma는 임베딩 기반이다.
+
+철자 자체가 깨지는 음차는 **교정하지 않는다.** 단어별 치환표를 두면 프로젝트·발음마다
+패턴이 달라 끝없이 늘어나는 부채가 되고, 실사용 데이터 없이 만든 목록은 관리 비용만
+남긴다. 벡터 검색은 음차된 청크도 의미상 근접하게 잡으므로 실질 손실이 크지 않다.
+정확한 철자가 반드시 필요하면 화자 분리를 포기하고 openai 제공자를 쓴다.
 """
 from __future__ import annotations
 
@@ -28,6 +55,9 @@ from ..base import (
     WarningCode,
     assemble,
 )
+# 어휘 목록은 제공자와 무관하게 같아야 한다 — 제공자를 바꿨다고 용어 표기가
+# 달라지면 같은 문서가 검색에서 다르게 잡힌다.
+from .openai_stt import _DEFAULT_VOCABULARY
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +149,12 @@ def transcribe(
     import httpx
 
     invoke_url, secret = _credentials()
-    language = language or os.getenv("STT_LANGUAGE") or "ko-KR"
+    # "ko-KR"은 순수 한국어 인식 모드라 출력이 한글로 제약되고, 그 결과 영어
+    # 기술 용어가 전부 한글 음차로 강제 변환된다(실측: FastAPI → "패스트 API").
+    # "enko"는 한국어 발화에 섞인 영어를 그대로 인식하도록 만들어진 전용 모드다
+    # (NCP 공식 문서, ai-application-service-clovaspeech-longsentence).
+    # 회의 녹음은 기본적으로 영어 기술 용어가 섞이므로 enko를 기본값으로 한다.
+    language = language or os.getenv("STT_LANGUAGE") or "enko"
 
     params = {
         "language": language,
@@ -129,6 +164,14 @@ def transcribe(
         "wordAlignment": False,
         "fullText": True,
     }
+    # 도메인 어휘 부스팅. 음차를 완전히 막지는 못하지만(모듈 상단 "알려진 한계"),
+    # 붙이지 않는 것보다는 인식 정확도가 높다. weight는 문서 기준 형식을 따른다.
+    vocabulary = os.getenv("STT_VOCABULARY", _DEFAULT_VOCABULARY).strip()
+    if vocabulary:
+        words = ", ".join(w.strip() for w in vocabulary.split(",") if w.strip())
+        if words:
+            params["boostings"] = [{"words": words, "weight": 5}]
+
     speaker_count = os.getenv("CLOVA_SPEAKER_COUNT")
     if speaker_count and speaker_count.isdigit():
         params["diarization"].update({

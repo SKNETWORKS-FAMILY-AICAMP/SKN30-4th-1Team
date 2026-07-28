@@ -23,7 +23,6 @@ from .base import (
 from .pipeline import SOURCE_KIND, ingest_transcript, transcribe_and_ingest
 from .providers import available as available_providers, diarizing_providers
 from .transcriber import (
-    MAX_AUDIO_BYTES,
     current_provider_name,
     is_supported,
     max_audio_bytes,
@@ -34,7 +33,6 @@ from .transcriber import (
 
 __all__ = [
     "ErrorCode",
-    "MAX_AUDIO_BYTES",
     "SOURCE_KIND",
     "Segment",
     "Transcript",

@@ -40,16 +40,18 @@ def ingest_transcript(
     """
     # 타임스탬프가 붙은 형태를 넘긴다. LLM이 "언제 나온 발언인지"를 읽을 수 있어야
     # 추출 결과에 시각 근거가 남는다.
-    # 구간 자체를 본다. text는 안내 머리말 같은 부가 문구를 포함할 수 있어
-    # 비어 있음 판정의 기준으로 삼으면 가드가 뚫린다.
+    # 구간 자체를 본다. 텍스트 길이로 판정하면 부가 문구 때문에 가드가 뚫린다.
     if not transcript.segments:
         raise ValueError("전사문이 비어 있어 적재할 내용이 없습니다.")
     text = transcript.text
     if not text.strip():
         raise ValueError("전사문이 비어 있어 적재할 내용이 없습니다.")
 
+    # 추출에는 지시문이 포함된 llm_text를, 저장에는 전사문 자체(text)를 쓴다.
+    # 둘을 같은 값으로 두면 LLM 지시문이 벡터 저장소에 색인되어 검색 결과와
+    # 인용 출처로 노출된다.
     items = extract(
-        text,
+        transcript.llm_text,
         default_source=transcript.source,
         source_kind=SOURCE_KIND,
         on_progress=on_progress,

@@ -14,13 +14,12 @@ from __future__ import annotations
 
 from types import ModuleType
 
-from . import clova_stt, google_stt, openai_stt
+from . import clova_stt, openai_stt
 
-# 화자 분리가 필요하면 clova(한국어 회의 권장) 또는 google을 쓴다.
+# 화자 분리가 필요하면 clova(한국어 회의 권장)를 쓴다.
 _PROVIDERS: dict[str, ModuleType] = {
     openai_stt.NAME: openai_stt,
     clova_stt.NAME: clova_stt,
-    google_stt.NAME: google_stt,
 }
 
 DEFAULT_PROVIDER = openai_stt.NAME

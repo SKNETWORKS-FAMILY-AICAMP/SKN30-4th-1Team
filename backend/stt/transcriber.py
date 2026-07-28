@@ -13,10 +13,10 @@ from typing import Optional
 from . import providers
 from .base import ErrorCode, Transcript, TranscriptionError
 
-# 하위 호환: 기존 호출부가 참조하던 이름들을 기본 제공자 기준으로 노출한다.
-_DEFAULT = providers.get(providers.DEFAULT_PROVIDER)
-SUPPORTED_SUFFIXES = _DEFAULT.SUPPORTED_SUFFIXES
-MAX_AUDIO_BYTES = _DEFAULT.MAX_AUDIO_BYTES
+# 상한·지원 형식은 제공자마다 다르므로(openai 25MB vs clova 200MB) 모듈 상수로
+# 고정하지 않는다. import 시점의 기본 제공자 값으로 굳으면, STT_PROVIDER를 바꾼
+# 뒤에도 옛 값을 돌려줘 호출자의 사전 검증이 멀쩡한 파일을 거절한다.
+# 필요하면 max_audio_bytes()/supported_suffixes()를 호출한다.
 
 
 def current_provider_name() -> str:

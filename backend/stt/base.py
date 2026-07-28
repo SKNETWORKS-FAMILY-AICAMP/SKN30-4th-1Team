@@ -89,10 +89,25 @@ class Transcript:
 
     @property
     def text(self) -> str:
-        """extractor(LLM)에 넘길 평문.
+        """전사문 그 자체. **저장·색인되는 값은 이것이다.**
 
-        각 줄 앞에 타임스탬프(와 있으면 화자)를 붙인다. LLM이 "언제 나온 발언인지"를
-        읽을 수 있어야 추출된 항목에 시각 근거를 남길 수 있다.
+        각 줄 앞에 타임스탬프(와 있으면 화자)를 붙인다. "언제 나온 발언인지"가
+        문서의 페이지 번호에 해당하는 출처 정보이므로 청크에도 남아야 한다.
+
+        LLM용 지시문은 여기 넣지 않는다 — raw_text로 벡터 저장소에 색인되면
+        지시문이 검색 결과와 인용 출처로 튀어나온다.
+        """
+        lines = []
+        for segment in self.segments:
+            prefix = f"[{segment.timestamp}]"
+            if segment.speaker:
+                prefix = f"{prefix} {segment.speaker}:"
+            lines.append(f"{prefix} {segment.text}")
+        return "\n".join(lines)
+
+    @property
+    def llm_text(self) -> str:
+        """extractor(LLM)에만 넘기는 입력. 전사문 + 필요한 지시문.
 
         화자 정보가 없으면 머리말로 그 사실을 명시한다. 추출 프롬프트가 action의
         owner를 요구하는데 근거가 없으면, LLM이 `회의 참석자` 같은 사람이 아닌 값을
@@ -103,18 +118,13 @@ class Transcript:
             # 구간이 없으면 안내문도 붙이지 않는다. 붙이면 빈 전사문이 "내용 있음"으로
             # 보여, 호출자의 빈 입력 가드가 뚫린다.
             return ""
-        lines = []
-        if not self.has_speakers():
-            lines.append(
-                "[안내] 이 전사문에는 화자 구분 정보가 없습니다. "
-                "발언자를 추측하지 말고, 본문에 이름이 명시된 경우에만 owner를 채우세요."
-            )
-        for segment in self.segments:
-            prefix = f"[{segment.timestamp}]"
-            if segment.speaker:
-                prefix = f"{prefix} {segment.speaker}:"
-            lines.append(f"{prefix} {segment.text}")
-        return "\n".join(lines)
+        if self.has_speakers():
+            return self.text
+        return (
+            "[안내] 이 전사문에는 화자 구분 정보가 없습니다. "
+            "발언자를 추측하지 말고, 본문에 이름이 명시된 경우에만 owner를 채우세요.\n"
+            + self.text
+        )
 
     @property
     def plain_text(self) -> str:

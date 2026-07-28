@@ -3,13 +3,15 @@
 외부 API는 stable boundary(OpenAI 클라이언트)에서만 mock하고, 그 아래 계약
 변환·타임스탬프 보존·오류 분류는 실제 코드로 검증한다.
 """
+import json
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from backend.stt import (
     ErrorCode,
-    MAX_AUDIO_BYTES,
+    max_audio_bytes,
     Transcript,
     TranscriptionError,
     WarningCode,
@@ -48,7 +50,7 @@ def test_oversized_audio_rejected_before_api_call():
     """상한 초과는 호출해봐야 거절되므로 미리 막는다."""
     with patch("backend.stt.providers.openai_stt._require_client") as client:
         with pytest.raises(TranscriptionError) as exc:
-            transcribe("긴회의.mp3", b"x" * (MAX_AUDIO_BYTES + 1))
+            transcribe("긴회의.mp3", b"x" * (max_audio_bytes("openai") + 1))
     assert exc.value.code == ErrorCode.FILE_TOO_LARGE
     assert "나눠서" in exc.value.message  # 조치 안내가 있어야 한다
     client.assert_not_called()
@@ -330,8 +332,8 @@ def test_diarizing_providers_are_registered():
     """화자 분리가 필요한 회의 녹음에는 clova/google을 쓸 수 있어야 한다."""
     from backend.stt import available_providers, diarizing_providers
 
-    assert {"openai", "clova", "google"} <= set(available_providers())
-    assert {"clova", "google"} <= set(diarizing_providers())
+    assert {"openai", "clova"} <= set(available_providers())
+    assert "clova" in diarizing_providers()
     # 기본 제공자(openai)는 화자 분리를 지원하지 않는다 — 사실대로 선언해야 한다.
     assert "openai" not in diarizing_providers()
 
@@ -390,8 +392,11 @@ def test_speakerless_transcript_tells_llm_not_to_guess_owner():
     transcript, _ = _transcribe_with(_fake_response([
         {"text": "결정했습니다.", "start": 0.0, "end": 2.0},
     ]))
-    assert "추측하지" in transcript.text
-    assert transcript.text.splitlines()[0].startswith("[안내]")
+    assert "추측하지" in transcript.llm_text
+    assert transcript.llm_text.splitlines()[0].startswith("[안내]")
+    # 지시문은 LLM 입력에만 있어야 한다. text는 저장·색인되므로 섞이면
+    # 지시문이 검색 결과와 인용 출처로 노출된다.
+    assert "[안내]" not in transcript.text
 
 
 def test_transcript_with_speakers_has_no_guard_header():
@@ -399,7 +404,7 @@ def test_transcript_with_speakers_has_no_guard_header():
     transcript, _ = _transcribe_with(_fake_response([
         {"text": "제안합니다.", "start": 0.0, "end": 2.0, "speaker": "화자 1"},
     ]))
-    assert "[안내]" not in transcript.text
+    assert "[안내]" not in transcript.llm_text
     assert transcript.text.startswith("[00:00] 화자 1:")
 
 
@@ -419,37 +424,12 @@ def test_clova_payload_maps_speakers_and_milliseconds():
     assert segments[1]["speaker"] == "화자 2"
 
 
-def test_google_payload_groups_words_by_speaker():
-    """Google은 단어별 speakerTag를 주므로 같은 화자끼리 묶어야 한다."""
-    from backend.stt.providers.google_stt import _segments_from_payload
-
-    segments, _ = _segments_from_payload({"results": [{"alternatives": [{"words": [
-        {"word": "기술", "startTime": "0s", "endTime": "0.5s", "speakerTag": 1},
-        {"word": "스택은", "startTime": "0.5s", "endTime": "1.0s", "speakerTag": 1},
-        {"word": "동의합니다", "startTime": "1.0s", "endTime": "2.0s", "speakerTag": 2},
-    ]}]}]})
-
-    assert len(segments) == 2
-    assert segments[0]["text"] == "기술 스택은"
-    assert segments[0]["speaker"] == "화자 1"
-    assert segments[1]["speaker"] == "화자 2"
-    assert segments[1]["end"] == 2.0
-
-
 def test_clova_missing_credentials_has_distinct_code(monkeypatch):
     monkeypatch.setenv("STT_PROVIDER", "clova")
     monkeypatch.delenv("CLOVA_SPEECH_INVOKE_URL", raising=False)
     monkeypatch.delenv("CLOVA_SPEECH_SECRET", raising=False)
     with pytest.raises(TranscriptionError) as exc:
         transcribe("회의.mp3", b"audio")
-    assert exc.value.code == ErrorCode.MISSING_CREDENTIALS
-
-
-def test_google_missing_credentials_has_distinct_code(monkeypatch):
-    monkeypatch.setenv("STT_PROVIDER", "google")
-    monkeypatch.delenv("GOOGLE_STT_API_KEY", raising=False)
-    with pytest.raises(TranscriptionError) as exc:
-        transcribe("회의.wav", b"audio")
     assert exc.value.code == ErrorCode.MISSING_CREDENTIALS
 
 
@@ -466,3 +446,85 @@ def test_low_confidence_segments_are_reported():
         Seg("잡음 오인식", 2.0, 4.0, 0.95),
     ]))
     assert WarningCode.LOW_CONFIDENCE in {w.code for w in transcript.warnings}
+
+
+def test_guard_instruction_never_reaches_vector_store():
+    """LLM 지시문이 raw_text로 색인되면 검색 결과·인용 출처로 노출된다."""
+    from backend.stt import ingest_transcript
+
+    transcript = assemble(
+        source="회의.mp3",
+        raw_segments=[{"text": "FastAPI로 결정했습니다.", "start": 0.0, "end": 4.0}],
+        provider="openai", model="whisper-1",
+    )
+    captured = {}
+    with patch("backend.stt.pipeline.extract", return_value=[]) as mock_extract,          patch("backend.stt.pipeline.ingest", side_effect=lambda **kw: captured.update(kw)):
+        ingest_transcript(1, transcript)
+
+    # 추출에는 지시문이 들어가고
+    assert "[안내]" in mock_extract.call_args.args[0]
+    # 저장에는 들어가지 않는다
+    assert "[안내]" not in captured["raw_text"]
+    assert "FastAPI로 결정했습니다." in captured["raw_text"]
+
+
+def test_clova_defaults_to_mixed_language_mode():
+    """ko-KR은 순수 한국어 모드라 영어 용어를 전부 한글로 음차한다(실측:
+    FastAPI → "페스트 API"). 한국어 회의에는 영어 기술 용어가 기본으로 섞이므로
+    한영 동시 인식 모드(enko)를 기본값으로 둔다."""
+    import httpx
+    from unittest.mock import MagicMock
+
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["params"] = json.loads(kwargs["files"]["params"][1])
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "result": "COMPLETED",
+            "segments": [{"text": "내용", "start": 0, "end": 1000, "speaker": {"label": "1"}}],
+        }
+        return response
+
+    with patch.dict(os.environ, {
+        "STT_PROVIDER": "clova",
+        "CLOVA_SPEECH_INVOKE_URL": "https://example.test/external/v1/1/x",
+        "CLOVA_SPEECH_SECRET": "secret",
+    }, clear=False), patch.object(httpx, "post", side_effect=fake_post):
+        os.environ.pop("STT_LANGUAGE", None)
+        transcribe("회의.mp3", b"audio")
+
+    assert captured["params"]["language"] == "enko"
+
+
+def test_clova_sends_boostings_with_weight():
+    """부스팅은 words와 weight를 함께 보낸다(NCP 문서 형식)."""
+    import httpx
+    from unittest.mock import MagicMock
+
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["params"] = json.loads(kwargs["files"]["params"][1])
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "result": "COMPLETED",
+            "segments": [{"text": "내용", "start": 0, "end": 1000, "speaker": {"label": "1"}}],
+        }
+        return response
+
+    with patch.dict(os.environ, {
+        "STT_PROVIDER": "clova",
+        "CLOVA_SPEECH_INVOKE_URL": "https://example.test/external/v1/1/x",
+        "CLOVA_SPEECH_SECRET": "secret",
+        "STT_VOCABULARY": "FastAPI, ChromaDB",
+    }, clear=False), patch.object(httpx, "post", side_effect=fake_post):
+        transcribe("회의.mp3", b"audio")
+
+    boostings = captured["params"]["boostings"]
+    assert boostings[0]["words"] == "FastAPI, ChromaDB"
+    assert boostings[0]["weight"] > 0
+    # 화자 분리는 항상 켠다 — 이 제공자를 쓰는 이유다.
+    assert captured["params"]["diarization"]["enable"] is True
