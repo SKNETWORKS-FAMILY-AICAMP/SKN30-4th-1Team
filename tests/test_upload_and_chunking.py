@@ -690,3 +690,67 @@ def test_upload_preserves_folder_relative_filename():
         assert resp.status_code == 201
         assert reserve.call_args.kwargs["filename"] == "docs/README.md"
         assert finalize.call_args.args[1] == "docs/README.md"
+
+
+def _tool_response(tool_input):
+    from backend.llm.base import LLMResponse
+    return LLMResponse(content="", tool_input=tool_input)
+
+
+def test_malformed_completion_does_not_discard_chunk_items():
+    """완료 판정 1건의 형식 오류가 그 청크의 정상 items까지 버리면 안 된다.
+
+    items와 completions를 한 번에 검증하면 CompletionReport의 ValidationError
+    (⊂ ValueError)가 청크 실패로 집계된다. 단일 청크 문서(_CHUNK_SIZE=15000자라
+    대부분이 해당)면 extract()가 '모든 청크 실패'로 ValueError를 올리고 호출부가
+    fail_document를 불러 업로드 자체가 파괴된다. 부가 기능의 형식 오류가 치를
+    대가가 아니다."""
+    from backend.pipeline.extractor import extract
+
+    client = MagicMock()
+    client.chat.return_value = _tool_response({
+        "items": [{"category": "decision", "content": "기술스택은 FastAPI로 간다"}],
+        "completions": [
+            {"action_id": "숫자가 아님", "evidence": "완료", "fully_complete": True},
+        ],
+    })
+    with patch("backend.pipeline.extractor.get_llm_client", return_value=client):
+        items, completions = extract(
+            "짧은 문서", default_source="doc.md",
+            open_actions=[{"id": 1, "content": "액션"}],
+        )
+
+    assert [i.content for i in items] == ["기술스택은 FastAPI로 간다"]  # 적재는 살아남는다
+    assert completions == []                                            # 잘못된 판정만 버린다
+
+
+def test_valid_completions_survive_alongside_a_malformed_one():
+    """형식이 맞는 완료 판정은 같은 응답에 잘못된 항목이 있어도 살아남는다 —
+    가드가 completions를 통째로 버리지 않는지 고정한다."""
+    from backend.pipeline.extractor import extract
+
+    client = MagicMock()
+    client.chat.return_value = _tool_response({
+        "items": [],
+        "completions": [
+            {"action_id": 1, "evidence": "인원관리 완료", "fully_complete": True},
+            {"evidence": "action_id 누락", "fully_complete": True},
+        ],
+    })
+    with patch("backend.pipeline.extractor.get_llm_client", return_value=client):
+        _items, completions = extract(
+            "짧은 문서", default_source="doc.md",
+            open_actions=[{"id": 1, "content": "액션"}],
+        )
+
+    assert [c.action_id for c in completions] == [1]
+
+
+def test_tool_schema_still_declares_completions():
+    """LLM에게 보여주는 tool_schema는 그대로여야 한다 — 분리한 것은 파싱뿐이고,
+    스키마가 바뀌면 모델이 완료 판정을 아예 반환하지 않게 된다."""
+    from backend.pipeline.models import ExtractionResult
+
+    schema = ExtractionResult.model_json_schema()
+    assert "completions" in schema["properties"]
+    assert "items" in schema["properties"]

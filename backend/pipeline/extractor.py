@@ -1,9 +1,15 @@
 # 문서 텍스트에서 결정/액션/이슈/리스크를 LLM으로 추출하는 모듈.
 # 대용량 문서는 문단 경계 기반 청크로 분할해 각각 추출한 뒤 합산하고 중복을 제거한다.
+import logging
 import re
 from typing import Callable, List, Optional, Set, Tuple, Union
+
+from pydantic import ValidationError
+
 from .models import MemoryItem, ExtractionResult, CompletionReport
 from ..llm import get_llm_client, Message
+
+logger = logging.getLogger(__name__)
 
 
 class PartialExtractionError(Exception):
@@ -295,12 +301,40 @@ def _extract_chunk(
     # items가 빈 리스트면 추출할 내용이 없는 것 (정상)
     if response.tool_input is None:
         raise ValueError("LLM did not return tool output for chunk")
-    result = ExtractionResult(**response.tool_input)
+    # items와 completions를 따로 검증한다. 한 번에 검증하면 부가 기능인 완료 판정 1건의
+    # 형식 오류가 ValidationError(⊂ ValueError)를 내고, 이 청크의 정상 items까지 함께
+    # 버려진다. 단일 청크 문서(_CHUNK_SIZE=15000자라 대부분의 문서가 여기 해당)면
+    # extract()가 "모든 청크 실패"로 ValueError를 올려 호출부가 fail_document를 부르므로
+    # 업로드 자체가 파괴된다. tool_schema는 그대로라 LLM이 받는 계약은 바뀌지 않고,
+    # 파싱 실패의 격리 범위만 좁아진다.
+    payload = dict(response.tool_input)
+    raw_completions = payload.pop("completions", None)
+    result = ExtractionResult(**payload)
     items = result.items
     for item in items:
         if not item.source:
             item.source = default_source  # LLM이 source 미반환 시 파일명으로 fallback
-    return _post_process_items(items, source_kind), result.completions
+    return _post_process_items(items, source_kind), _parse_completions(raw_completions)
+
+
+def _parse_completions(raw) -> List[CompletionReport]:
+    """완료 판정을 항목별로 검증해, 형식이 틀린 항목만 버리고 나머지는 살린다.
+
+    적재(items)는 주 산출물이고 완료 판정은 부가 산출물이므로, 후자의 형식 오류가
+    전자를 실패시키지 않게 격리한다. 목록 자체가 아닌 값이 오면 전량 무시한다.
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        logger.warning("완료 판정이 목록이 아니라 무시 type=%s", type(raw).__name__)
+        return []
+    parsed: List[CompletionReport] = []
+    for entry in raw:
+        try:
+            parsed.append(CompletionReport(**entry))
+        except (ValidationError, TypeError):
+            logger.warning("완료 판정 1건 형식 오류로 제외 entry=%r", entry)
+    return parsed
 
 
 def _dedup_completions(completions: List[CompletionReport]) -> List[CompletionReport]:
