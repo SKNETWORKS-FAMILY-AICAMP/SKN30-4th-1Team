@@ -449,3 +449,37 @@ def test_upload_success_response_matches_openapi_contract():
     source = inspect.getsource(upload.upload_document)
     for field in _UPLOAD_SUCCESS_FIELDS:
         assert f'"{field}"' in source, f"업로드 응답에 {field}가 없다(계약 상수가 낡음)"
+
+
+# ── 변환 경고 코드 명세 (PR-001-R402) ──────────────────────────────────────
+
+def test_warning_codes_documented_in_both_specs():
+    """R402: 경고 코드 전체가 md·html 양쪽 명세에 기술돼야 한다.
+
+    이전에는 `table_flattened` 하나만 예시로 있고 나머지는 정책서 링크로 넘겨서,
+    API 명세만 보는 소비자가 7종 중 1종만 알 수 있었다.
+    """
+    from backend.pipeline.converters.base import WarningCode
+
+    codes = [
+        v for k, v in vars(WarningCode).items()
+        if not k.startswith("_") and isinstance(v, str)
+    ]
+    assert len(codes) >= 7, "WarningCode 목록이 예상보다 적다"
+
+    md = _MD.read_text(encoding="utf-8")
+    html = _HTML.read_text(encoding="utf-8")
+    for code in codes:
+        assert code in md, f"Markdown 명세에 {code} 없음"
+        assert code in html, f"HTML 명세에 {code} 없음"
+
+
+def test_nullable_warning_location_documented():
+    """R402: location이 null일 수 있다는 계약이 명세에 드러나야 한다."""
+    md = _MD.read_text(encoding="utf-8")
+    html = _HTML.read_text(encoding="utf-8")
+    assert "null" in md and "location" in md
+    assert "null" in html and "location" in html
+    # 개수 요약 1건으로 바뀐 경고는 그 사실이 적혀 있어야 한다.
+    assert "개수 요약" in md
+    assert "개수 요약" in html

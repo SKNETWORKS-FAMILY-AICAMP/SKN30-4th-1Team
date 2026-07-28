@@ -27,6 +27,14 @@ logger = logging.getLogger(__name__)
 
 SUFFIXES = (".docx",)
 
+# 파일 열기·파싱 실패 시 사용자에게 나가는 고정 문구. 원시 예외를 섞지 않는다 —
+# 이 문자열이 업로드 400 응답의 detail이 된다. ZIP 중앙 디렉터리 실패와 python-docx
+# 파싱 실패는 내부 단계만 다르고 사용자가 취할 조치는 같으므로 문구를 공유한다.
+DOCX_OPEN_FAILED_MESSAGE = (
+    "DOCX 파일을 열 수 없습니다. 파일이 손상되었거나 올바른 DOCX 파일이 아닐 수 있으니 "
+    "확인 후 다시 올려주세요."
+)
+
 # 압축 폭탄 방어 한도. DOCX는 ZIP이라 업로드 크기 제한(10MB)이 압축된 바이트에만
 # 걸린다. 반복 텍스트만으로도 압축비 250:1이 나와 10MB가 2.5GB로 전개될 수 있고,
 # python-docx는 XML 전체를 메모리에 올리므로 워커가 그대로 고갈된다.
@@ -244,9 +252,13 @@ def _guard_archive_size(data: bytes, filename: str) -> None:
         ValueError,
         OSError,
     ) as exc:
+        # 원시 예외 문자열을 메시지에 넣지 않는다. 이 message는 업로드 400 detail로
+        # 그대로 나가므로 ZIP 파서 내부 정보가 사용자에게 노출된다.
+        # 진단 정보는 로그와 예외 체인(__cause__)에만 남긴다.
+        logger.warning("DOCX ZIP 중앙 디렉터리 읽기 실패 filename=%s", filename, exc_info=True)
         raise ConversionError(
             ErrorCode.CORRUPT_FILE,
-            f"DOCX 파일을 열 수 없습니다: {exc}",
+            DOCX_OPEN_FAILED_MESSAGE,
             source=filename,
         ) from exc
     # MemoryError 등 자원 고갈 예외는 잡지 않는다 — 입력이 잘못된 게 아니라 서버가
@@ -334,9 +346,13 @@ def convert(filename: str, data: bytes):
     try:
         document = docx.Document(io.BytesIO(data))
     except Exception as exc:
+        # ZIP 가드는 통과했으나 python-docx가 문서를 해석하지 못한 경우다.
+        # 사용자가 취할 조치는 ZIP 실패와 같으므로 같은 문구를 쓰고, 어느 단계에서
+        # 실패했는지는 로그와 예외 체인으로 구분한다.
+        logger.warning("DOCX 문서 파싱 실패 filename=%s", filename, exc_info=True)
         raise ConversionError(
             ErrorCode.CORRUPT_FILE,
-            f"DOCX 파일을 열 수 없습니다: {exc}",
+            DOCX_OPEN_FAILED_MESSAGE,
             source=filename,
         ) from exc
 

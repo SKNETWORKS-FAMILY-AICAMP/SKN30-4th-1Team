@@ -10,6 +10,7 @@ from ..db.mysql import get_connection
 from ..pipeline.converters import (
     ConversionError,
     ConvertedDocument,
+    ErrorCode,
     convert,
     supported_suffixes,
 )
@@ -260,11 +261,15 @@ async def upload_document(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid filename")
     if Path(filename).suffix.lower() not in supported_suffixes():
-        raise HTTPException(
-            status_code=400,
-            detail="지원하지 않는 파일 형식입니다. ("
-                   + " / ".join(sorted(supported_suffixes())) + ")",
-        )
+        # 변환기를 거치지 않고 여기서 걸러지지만, 응답 형태는 변환 실패와 같아야 한다.
+        # 최상위 code가 없으면 명세에 있는 unsupported_format을 클라이언트가 받을 수
+        # 없어, 기계 판독 계약이 코드 안에서만 참이 된다.
+        return _conversion_error_response(ConversionError(
+            ErrorCode.UNSUPPORTED_FORMAT,
+            "지원하지 않는 파일 형식입니다. ("
+            + " / ".join(sorted(supported_suffixes())) + ")",
+            source=filename,
+        ))
     doc_type = _infer_doc_type(filename)
 
     data = await file.read()

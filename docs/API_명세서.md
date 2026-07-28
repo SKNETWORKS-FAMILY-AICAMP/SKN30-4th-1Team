@@ -320,12 +320,28 @@ prefix). CORS `OPTIONS` 프리플라이트도 통과.
 | `pages` | int\|null | PDF 페이지 수. DOCX·평문은 `null` |
 | `warnings` | array | 변환 경고 목록(비치명적 손실). 없으면 `[]` |
 
+`warnings[]` 원소는 `{ code, message, location }`입니다. **`location`은 `null`일 수 있습니다.**
+
+| `code` | 의미 | `location` |
+|--------|------|-----------|
+| `page_no_text` | 해당 페이지에서 텍스트를 추출하지 못함 | `page N` |
+| `page_extract_failed` | 해당 페이지 파싱 실패 | `page N` |
+| `table_flattened` | 표를 행 단위 텍스트로 평탄화(열 구조 유실) | `table N` |
+| `unsupported_element` | 이미지·도형·텍스트 상자 등 비텍스트 요소 유실 | `null` |
+| `unsupported_element` | 중첩 깊이 상한(5단) 초과 표의 내용 유실 | `table N` |
+| `repeated_line_dropped` | 머리말·꼬리말로 판단해 제거(개수 요약 1건) | `null` |
+| `duplicate_block_dropped` | 중복 문단 제거(**개수 요약 1건**) | `null` |
+| `decode_fallback` | UTF-8 실패로 다른 인코딩 사용 | `null` |
+
 > **변환 경고**: 변환은 요청 경로에서 수행되므로 폴링 없이 즉시 확인할 수 있습니다.
-> 경고 코드 전체 목록은 [문서 전처리 정책서 §8](DOCUMENT_INGESTION_POLICY.md) 참고.
+> `duplicate_block_dropped`와 `repeated_line_dropped`는 블록마다 발생해도 **개수만
+> 요약한 1건**으로 반환됩니다(`location` 없음). 나머지는 위치마다 별도 항목입니다.
+> 각 규칙의 판정 기준은 [문서 전처리 정책서](DOCUMENT_INGESTION_POLICY.md) 참고.
 
 **응답 `400`** — 미지원 확장자
 ```json
-{ "detail": "지원하지 않는 파일 형식입니다. (.docx / .markdown / .md / .pdf / .txt)" }
+{ "detail": "지원하지 않는 파일 형식입니다. (.docx / .markdown / .md / .pdf / .txt)",
+  "code": "unsupported_format" }
 ```
 
 **응답 `400`** — 변환 실패

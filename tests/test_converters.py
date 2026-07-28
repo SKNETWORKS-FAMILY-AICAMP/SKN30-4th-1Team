@@ -965,3 +965,236 @@ def test_upload_error_detail_is_string_for_every_conversion_failure():
         assert response.status_code == 400, name
         assert isinstance(body["detail"], str), name
         assert body["code"] == expected_code, name
+
+
+# ─── 4차 리뷰 회귀 (PR-001-R401, R4B02) ────────────────────────────────────
+
+def test_empty_document_message_is_bounded_and_hides_internals():
+    """R401: 경고가 많아도 오류 메시지가 폭증하지 않고 내부 정보를 노출하지 않는다."""
+    from backend.pipeline.converters.base import ConversionWarning, assemble
+
+    # 메시지를 페이지마다 다르게 만든다. 수정 전 구현은 message 기준으로만 중복을
+    # 제거했으므로, 같은 문구를 반복하면 1건으로 접혀 이 테스트가 공허해진다.
+    # 실제 R401 상황도 원시 예외가 페이지마다 달라 메시지가 전부 고유했다.
+    warnings = [
+        ConversionWarning(WarningCode.PAGE_EXTRACT_FAILED,
+                          f"페이지 텍스트 추출에 실패했습니다: 내부토큰_{i} at offset 0x{i:04x}",
+                          f"page {i}")
+        for i in range(1, 80)
+    ] + [
+        ConversionWarning(WarningCode.PAGE_NO_TEXT,
+                          f"{i}번 페이지에서 텍스트를 찾지 못했습니다.", f"page {i}")
+        for i in range(1, 20)
+    ]
+
+    with pytest.raises(ConversionError) as exc:
+        assemble("많은경고.pdf", "pdf", [], warnings)
+
+    message = exc.value.message
+    assert exc.value.code == ErrorCode.EMPTY_DOCUMENT
+    # 고유 메시지 98건이 그대로 붙으면 수천 자가 된다(수정 전 실측 3,643자).
+    assert len(message) < 300, f"메시지가 {len(message)}자로 과도하다"
+    # 경고 메시지를 그대로 실으면 내부 토큰이 사용자 응답에 노출된다.
+    assert "내부토큰_" not in message
+    assert "offset 0x" not in message
+
+
+def test_page_extract_failure_warning_excludes_raw_exception():
+    """R401: 페이지 파싱 실패 경고에 원시 예외 문자열이 들어가지 않는다."""
+    from backend.pipeline.converters.pdf_converter import _page_texts
+
+    class _BoomPage:
+        def extract_text(self):
+            raise ValueError("내부파서고유토큰_XYZ at offset 0x1234")
+
+    class _Reader:
+        pages = [_BoomPage()]
+
+    _texts, warnings = _page_texts(_Reader(), "깨진.pdf")
+
+    assert len(warnings) == 1
+    assert warnings[0].code == WarningCode.PAGE_EXTRACT_FAILED
+    # 원시 예외가 실리면 이 단언이 깨진다. 사용자 응답으로 나가는 문자열이다.
+    assert "내부파서고유토큰_XYZ" not in warnings[0].message
+    assert "0x1234" not in warnings[0].message
+
+
+def test_empty_document_message_unchanged_without_warnings():
+    """R401: 경고가 없을 때는 기존 문구를 그대로 유지한다."""
+    from backend.pipeline.converters.base import assemble
+
+    with pytest.raises(ConversionError) as exc:
+        assemble("빈.docx", "docx", [], [])
+    assert exc.value.message == "문서에서 추출된 텍스트가 없습니다."
+
+
+def test_depth_limit_reason_still_reaches_user():
+    """R401 수정이 R301의 깊이 상한 사유 전달을 깨지 않는다."""
+    import docx
+
+    def build(document):
+        cell = document.add_table(rows=1, cols=1).cell(0, 0)
+        for _ in range(5):
+            cell = cell.add_table(rows=1, cols=1).cell(0, 0)
+        cell.text = "깊은 내용"
+
+    with pytest.raises(ConversionError) as exc:
+        convert("깊은표만.docx", _make_docx(build))
+    assert exc.value.code == ErrorCode.EMPTY_DOCUMENT
+    assert "중첩 깊이" in exc.value.message
+
+
+def test_upload_unsupported_format_returns_top_level_code():
+    """R4B02: 미지원 확장자도 최상위 code를 실어야 한다(명세에 있는 계약)."""
+    from unittest.mock import patch
+
+    from fastapi.testclient import TestClient
+
+    from backend.main import app
+
+    client = TestClient(app, raise_server_exceptions=False)
+    with patch("backend.api.upload.require_project_access"):
+        response = client.post(
+            "/api/v1/projects/1/documents",
+            files={"file": ("문서.hwp", b"whatever", "application/octet-stream")},
+        )
+    body = response.json()
+    assert response.status_code == 400
+    assert isinstance(body["detail"], str)
+    assert body["code"] == ErrorCode.UNSUPPORTED_FORMAT
+
+
+# ─── 5차 리뷰 회귀 (PR-001-R501) ────────────────────────────────────────────
+#
+# 파일 열기·파싱 실패의 원시 예외가 사용자 응답(HTTP 400 detail)에 노출되던 문제.
+# 세 경로가 서로 독립이므로 한 경로의 수정만 되돌려도 그 테스트만 실패한다.
+#
+# 단언에 고정 문구를 포함하는 이유: `token not in message`만 검사하면 메시지를
+# 빈 문자열이나 무의미한 문구로 바꾼 수정도 통과한다(8차 리뷰 지적).
+
+_RAW_TOKEN = "내부파서고유토큰_XYZ_at_offset_0xBEEF"
+
+
+def _upload_and_get_body(name: str, data: bytes):
+    """업로드 엔드포인트를 실제로 태워 400 응답 본문을 돌려준다."""
+    from unittest.mock import patch
+
+    from fastapi.testclient import TestClient
+
+    from backend.main import app
+
+    client = TestClient(app, raise_server_exceptions=False)
+    with patch("backend.api.upload.require_project_access"):
+        response = client.post(
+            "/api/v1/projects/1/documents",
+            files={"file": (name, data, "application/octet-stream")},
+        )
+    return response
+
+
+def test_pdf_open_failure_hides_raw_exception(monkeypatch):
+    """R501: PDF reader 생성 실패의 원시 예외가 응답에 노출되지 않는다."""
+    from backend.pipeline.converters import pdf_converter
+
+    raw = RuntimeError(_RAW_TOKEN)
+
+    class _BoomReader:
+        def __init__(self, *_args, **_kwargs):
+            raise raw
+
+    monkeypatch.setattr(pdf_converter, "_require_pypdf", lambda: _BoomReader)
+
+    with pytest.raises(ConversionError) as exc:
+        convert("깨진.pdf", b"%PDF-1.4 whatever")
+
+    assert exc.value.code == ErrorCode.CORRUPT_FILE
+    assert exc.value.message == pdf_converter.PDF_OPEN_FAILED_MESSAGE
+    assert _RAW_TOKEN not in exc.value.message
+    assert exc.value.source == "깨진.pdf"
+    # 원인 예외는 체인으로 보존돼야 한다 — 진단 정보를 버리는 것이 아니라 옮기는 것이다.
+    assert exc.value.__cause__ is raw
+
+    response = _upload_and_get_body("깨진.pdf", b"%PDF-1.4 whatever")
+    body = response.json()
+    assert response.status_code == 400
+    assert body["code"] == ErrorCode.CORRUPT_FILE
+    assert body["detail"] == pdf_converter.PDF_OPEN_FAILED_MESSAGE
+    assert _RAW_TOKEN not in body["detail"]
+
+
+def test_docx_zip_guard_failure_hides_raw_exception(monkeypatch):
+    """R501: ZIP 중앙 디렉터리 읽기 실패의 원시 예외가 응답에 노출되지 않는다."""
+    import types
+    import zipfile as zipfile_module
+
+    from backend.pipeline.converters import docx_converter
+
+    raw = zipfile_module.BadZipFile(_RAW_TOKEN)
+
+    class _BoomZipFile:
+        def __init__(self, *_args, **_kwargs):
+            raise raw
+
+    # `docx_converter.zipfile`은 표준 zipfile 모듈 그 자체다. 거기에 setattr 하면
+    # 인터프리터 전역이 오염되어 다른 테스트의 DOCX 생성(zipfile 쓰기)까지 깨진다.
+    # 실제로 실행 순서에 따라 뒤 테스트가 BadZipFile로 실패하는 것을 확인했다.
+    # 모듈 자체를 대체해 이 테스트 안에서만 효과가 있도록 한다.
+    stub = types.SimpleNamespace(
+        ZipFile=_BoomZipFile,
+        BadZipFile=zipfile_module.BadZipFile,
+        LargeZipFile=zipfile_module.LargeZipFile,
+    )
+    monkeypatch.setattr(docx_converter, "zipfile", stub)
+
+    with pytest.raises(ConversionError) as exc:
+        convert("깨진.docx", b"tiny")
+
+    assert exc.value.code == ErrorCode.CORRUPT_FILE
+    assert exc.value.message == docx_converter.DOCX_OPEN_FAILED_MESSAGE
+    assert _RAW_TOKEN not in exc.value.message
+    assert exc.value.source == "깨진.docx"
+    assert exc.value.__cause__ is raw
+
+    response = _upload_and_get_body("깨진.docx", b"tiny")
+    body = response.json()
+    assert response.status_code == 400
+    assert body["code"] == ErrorCode.CORRUPT_FILE
+    assert body["detail"] == docx_converter.DOCX_OPEN_FAILED_MESSAGE
+    assert _RAW_TOKEN not in body["detail"]
+
+
+def test_docx_parser_failure_hides_raw_exception(monkeypatch):
+    """R501: python-docx 파싱 실패의 원시 예외가 응답에 노출되지 않는다.
+
+    정상 소형 DOCX를 먼저 만들어 ZIP 가드는 통과시키고, 파서 단계만 실패시킨다.
+    가드에서 걸려버리면 이 테스트가 다른 경로를 검증하게 된다.
+    """
+    import docx as docx_module
+
+    from backend.pipeline.converters import docx_converter
+
+    data = _make_docx(lambda d: d.add_paragraph("정상 본문"))
+    raw = ValueError(_RAW_TOKEN)
+
+    def _boom(*_args, **_kwargs):
+        raise raw
+
+    monkeypatch.setattr(docx_module, "Document", _boom)
+
+    with pytest.raises(ConversionError) as exc:
+        convert("파싱실패.docx", data)
+
+    assert exc.value.code == ErrorCode.CORRUPT_FILE
+    assert exc.value.message == docx_converter.DOCX_OPEN_FAILED_MESSAGE
+    assert _RAW_TOKEN not in exc.value.message
+    assert exc.value.source == "파싱실패.docx"
+    # ZIP 가드가 아니라 파서 단계에서 실패했음을 원인 예외 타입으로 고정한다.
+    assert exc.value.__cause__ is raw
+    assert isinstance(exc.value.__cause__, ValueError)
+
+    response = _upload_and_get_body("파싱실패.docx", data)
+    body = response.json()
+    assert response.status_code == 400
+    assert body["code"] == ErrorCode.CORRUPT_FILE
+    assert body["detail"] == docx_converter.DOCX_OPEN_FAILED_MESSAGE
+    assert _RAW_TOKEN not in body["detail"]

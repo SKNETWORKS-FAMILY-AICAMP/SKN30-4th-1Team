@@ -67,6 +67,50 @@ class ConversionWarning:
         return {"code": self.code, "message": self.message, "location": self.location}
 
 
+# 빈 문서 오류에 실을 사유는 코드별 고정 문구로만 만든다. 경고 메시지를 그대로 이어
+# 붙이면 PAGE_EXTRACT_FAILED처럼 원시 예외 문자열(파서 오프셋·객체 정보)을 담은
+# 메시지가 HTTP 400 응답으로 새어 나간다. 사용자가 취할 조치만 알리면 충분하다.
+_EMPTY_DOCUMENT_REASONS = {
+    WarningCode.PAGE_NO_TEXT: "일부 페이지에서 텍스트를 찾지 못했습니다.",
+    WarningCode.PAGE_EXTRACT_FAILED: "일부 페이지를 읽지 못했습니다.",
+    WarningCode.UNSUPPORTED_ELEMENT: "지원하지 않는 요소의 내용은 변환되지 않았습니다.",
+    WarningCode.TABLE_FLATTENED: "표는 텍스트로 변환되었습니다.",
+    WarningCode.REPEATED_LINE_DROPPED: "머리말·꼬리말로 판단된 줄은 제거되었습니다.",
+    WarningCode.DUPLICATE_BLOCK_DROPPED: "중복된 문단은 제거되었습니다.",
+    WarningCode.DECODE_FALLBACK: "문자 인코딩을 자동 판별해 읽었습니다.",
+}
+_EMPTY_DOCUMENT_MAX_REASONS = 3
+_EMPTY_DOCUMENT_BASE_MESSAGE = "문서에서 추출된 텍스트가 없습니다."
+
+
+def _empty_document_message(warnings: list["ConversionWarning"]) -> str:
+    """빈 문서 오류 메시지를 만든다.
+
+    깊이 상한처럼 이유가 분명한 유실이 "텍스트가 없습니다"로만 끝나면 사용자는
+    원인을 알 수 없다. 그래서 사유를 덧붙이되, 코드별 고정 문구로 치환하고 개수에
+    상한을 둔다. 경고가 없으면 기존 문구를 그대로 유지한다.
+    """
+    reasons: list[str] = []
+    for warning in warnings:
+        # 깊이 상한 경고는 코드가 UNSUPPORTED_ELEMENT지만 원인이 구체적이라
+        # 변환기가 만든 문구를 그대로 쓴다. 원시 예외가 섞이지 않는 자체 생성 문구다.
+        reason = _EMPTY_DOCUMENT_REASONS.get(warning.code)
+        if warning.code == WarningCode.UNSUPPORTED_ELEMENT and "중첩 깊이" in warning.message:
+            reason = warning.message
+        if reason and reason not in reasons:
+            reasons.append(reason)
+
+    if not reasons:
+        return _EMPTY_DOCUMENT_BASE_MESSAGE
+
+    shown = reasons[:_EMPTY_DOCUMENT_MAX_REASONS]
+    omitted = len(reasons) - len(shown)
+    message = f"{_EMPTY_DOCUMENT_BASE_MESSAGE} " + " ".join(shown)
+    if omitted:
+        message = f"{message} (그 외 {omitted}건)"
+    return message
+
+
 @dataclass(frozen=True)
 class Block:
     """문서를 구성하는 최소 의미 단위.
@@ -151,16 +195,9 @@ def assemble(
     unique_warnings = list(dict.fromkeys(warnings or []))
 
     if not blocks:
-        # 경고가 있으면 그 사유를 오류 메시지에 실어 보낸다. 여기서 그냥 버리면
-        # "텍스트가 없습니다"만 남아, 깊이 상한처럼 이유가 분명한 유실조차
-        # 사용자에게는 원인 불명이 된다 — 경고를 남기려던 조치가 무의미해진다.
-        reasons = " ".join(dict.fromkeys(w.message for w in unique_warnings))
-        message = "문서에서 추출된 텍스트가 없습니다."
-        if reasons:
-            message = f"{message} {reasons}"
         raise ConversionError(
             ErrorCode.EMPTY_DOCUMENT,
-            message,
+            _empty_document_message(unique_warnings),
             source=source,
         )
 

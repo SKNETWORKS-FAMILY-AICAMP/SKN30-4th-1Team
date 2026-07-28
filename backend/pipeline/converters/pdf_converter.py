@@ -10,6 +10,7 @@ Block마다 붙여서, 청크 출처를 "3페이지"까지 되짚을 수 있게 
 from __future__ import annotations
 
 import io
+import logging
 
 from .base import (
     ConversionError,
@@ -26,7 +27,16 @@ from .cleaning import (
     split_paragraphs,
 )
 
+logger = logging.getLogger(__name__)
+
 SUFFIXES = (".pdf",)
+
+# 파일 열기 실패 시 사용자에게 나가는 고정 문구. 원시 예외를 섞지 않는다 —
+# 이 문자열이 업로드 400 응답의 detail이 된다. 사용자가 취할 조치만 담는다.
+PDF_OPEN_FAILED_MESSAGE = (
+    "PDF 파일을 열 수 없습니다. 파일이 손상되었거나 올바른 PDF 파일이 아닐 수 있으니 "
+    "확인 후 다시 올려주세요."
+)
 
 
 def _require_pypdf():
@@ -47,11 +57,18 @@ def _page_texts(reader, filename: str) -> tuple[list[str], list[ConversionWarnin
     for index, page in enumerate(reader.pages):
         try:
             text = page.extract_text() or ""
-        except Exception as exc:
+        except Exception:
             texts.append("")
+            # 원시 예외 문자열을 메시지에 넣지 않는다. 이 경고는 업로드 실패 응답의
+            # detail로 사용자에게 전달될 수 있어, 파서 내부 오프셋·객체 정보가
+            # 그대로 노출된다. 진단 정보는 로그로만 남긴다.
+            logger.warning(
+                "PDF 페이지 텍스트 추출 실패 filename=%s page=%s",
+                filename, index + 1, exc_info=True,
+            )
             warnings.append(ConversionWarning(
                 WarningCode.PAGE_EXTRACT_FAILED,
-                f"페이지 텍스트 추출에 실패했습니다: {exc}",
+                "페이지 텍스트 추출에 실패했습니다.",
                 location=f"page {index + 1}",
             ))
             continue
@@ -73,9 +90,13 @@ def convert(filename: str, data: bytes):
         reader = PdfReader(io.BytesIO(data))
         page_count = len(reader.pages)
     except Exception as exc:
+        # 원시 예외 문자열을 메시지에 넣지 않는다. 이 message는 업로드 400 detail로
+        # 그대로 나가므로 파서 내부 오프셋·객체 정보가 사용자에게 노출된다.
+        # 진단 정보는 로그와 예외 체인(__cause__)에만 남긴다.
+        logger.warning("PDF 파일 열기 실패 filename=%s", filename, exc_info=True)
         raise ConversionError(
             ErrorCode.CORRUPT_FILE,
-            f"PDF 파일을 열 수 없습니다: {exc}",
+            PDF_OPEN_FAILED_MESSAGE,
             source=filename,
         ) from exc
 

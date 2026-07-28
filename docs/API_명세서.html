@@ -517,8 +517,24 @@
         <pre><code>{ "doc_id": 12, "status": "processing", "format": "pdf", "blocks": 87, "pages": 12,
   "warnings": [ { "code": "table_flattened", "message": "표를 행 단위 텍스트로 변환했습니다. 열 구조는 보존되지 않습니다.", "location": "table 2" } ] }</code></pre>
         <div class="res-label">format=docx|pdf|text · blocks=추출 문단·표행 수 · pages=PDF 페이지 수(그 외 null) · warnings=변환 경고(없으면 [])</div>
+        <table>
+          <tr><th>warning <code>code</code></th><th>의미</th><th><code>location</code></th></tr>
+          <tr><td><code>page_no_text</code></td><td>해당 페이지에서 텍스트를 추출하지 못함</td><td><code>page N</code></td></tr>
+          <tr><td><code>page_extract_failed</code></td><td>해당 페이지 파싱 실패</td><td><code>page N</code></td></tr>
+          <tr><td><code>table_flattened</code></td><td>표를 행 단위 텍스트로 평탄화(열 구조 유실)</td><td><code>table N</code></td></tr>
+          <tr><td><code>unsupported_element</code></td><td>이미지·도형·텍스트 상자 등 비텍스트 요소 유실</td><td><code>null</code></td></tr>
+          <tr><td><code>unsupported_element</code></td><td>중첩 깊이 상한(5단) 초과 표의 내용 유실</td><td><code>table N</code></td></tr>
+          <tr><td><code>repeated_line_dropped</code></td><td>머리말·꼬리말로 판단해 제거(개수 요약 1건)</td><td><code>null</code></td></tr>
+          <tr><td><code>duplicate_block_dropped</code></td><td>중복 문단 제거(<strong>개수 요약 1건</strong>)</td><td><code>null</code></td></tr>
+          <tr><td><code>decode_fallback</code></td><td>UTF-8 실패로 다른 인코딩 사용</td><td><code>null</code></td></tr>
+        </table>
+        <div class="note" style="margin-bottom:8px">
+          <code>location</code>은 <strong>null일 수 있습니다.</strong>
+          <code>duplicate_block_dropped</code>와 <code>repeated_line_dropped</code>는 블록마다 발생해도
+          개수만 요약한 1건으로 반환됩니다. 나머지는 위치마다 별도 항목입니다.
+        </div>
         <div class="res-label"><span class="s400">400</span> Bad Request</div>
-        <pre><code>{ "detail": "지원하지 않는 파일 형식입니다. (.docx / .markdown / .md / .pdf / .txt)" }
+        <pre><code>{ "detail": "지원하지 않는 파일 형식입니다. (.docx / .markdown / .md / .pdf / .txt)", "code": "unsupported_format" }
 { "detail": "PDF에서 텍스트를 추출하지 못했습니다. 스캔 이미지 PDF는 지원하지 않습니다.", "code": "no_text_layer" }
 { "detail": "DOCX의 압축 해제 크기가 안전한 처리 한도를 초과했습니다. 문서를 나누거나 내용을 줄여서 다시 올려주세요.", "code": "file_too_large" }</code></pre>
         <div class="res-label">code: unsupported_format | missing_dependency | corrupt_file | empty_document | no_text_layer | file_too_large</div>
