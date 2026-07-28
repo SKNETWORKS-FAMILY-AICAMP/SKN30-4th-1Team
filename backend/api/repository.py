@@ -697,8 +697,12 @@ def sync_repository(
     try:
         with conn.cursor() as cursor:
             repo_row = _repo_or_404(cursor, project_id, repo_id)
+            # sync_started_at을 여기서 찍는다 — stale 판정의 기준 시각이다. connected_at은
+            # 연결 시각이라 재동기화 때 갱신되지 않아, 이걸 안 남기면 워치독이 방금 시작한
+            # 동기화를 곧바로 stale로 실패 처리한다.
             cursor.execute(
-                "UPDATE repositories SET status='syncing', last_error=NULL, sync_warning=NULL WHERE id=%s",
+                "UPDATE repositories SET status='syncing', sync_started_at=NOW(),"
+                " last_error=NULL, sync_warning=NULL WHERE id=%s",
                 (repo_id,),
             )
         conn.commit()
