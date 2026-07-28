@@ -70,6 +70,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
 import packageJson from "../package.json";
 import {
   clearPaimAuthSession,
@@ -111,6 +112,13 @@ import {
   isPaimApiError,
 } from "./paimApi";
 import {
+  fetchPaimCapabilities,
+  formatBytesAsMiB,
+  formatExtensions,
+  supportsExtension,
+  type PaimCapabilities,
+} from "./capabilities";
+import {
   clampProjectFileTreeWidth,
   countProjectFileEntries,
   createProjectFileEntry,
@@ -137,6 +145,7 @@ import {
   type SuggestionMinConfidence,
   type ThemeSetting,
 } from "./settings";
+import { WorkspacePageLayout } from "./WorkspacePageLayout";
 import type {
   Attachment,
   ChatSession,
@@ -331,6 +340,14 @@ type ApiDocumentStatus = "uploaded" | "processing" | "indexed" | "failed";
 type ApiDocumentUploadResponse = {
   doc_id: number;
   status: ApiDocumentStatus;
+  format?: string;
+  blocks?: number;
+  pages?: number | null;
+  warnings?: Array<{
+    code: string;
+    message: string;
+    location?: string | null;
+  }>;
 };
 
 type ApiDocumentListItem = {
@@ -515,7 +532,7 @@ const SIDEBAR_WIDTH_STORAGE_KEY = "paim.sidebarWidth.v1";
 const PROJECT_PANEL_COLLAPSED_STORAGE_KEY = "paim.projectPanelCollapsed.v2";
 const PROJECT_PANEL_WIDTH_STORAGE_KEY = "paim.projectPanelWidth.v1";
 const ZOOM_STORAGE_KEY = "paim.zoomScale.v1";
-const DEFAULT_SIDEBAR_WIDTH = 252;
+const DEFAULT_SIDEBAR_WIDTH = 264;
 const COLLAPSED_SIDEBAR_WIDTH = 52;
 const MIN_SIDEBAR_WIDTH = 232;
 const MAX_SIDEBAR_WIDTH = 332;
@@ -525,9 +542,9 @@ const MAX_PROJECT_PANEL_WIDTH = 520;
 const MIN_MAIN_CONTENT_WIDTH = 580;
 const PANEL_RAIL_WIDTH = 44;
 const DEFAULT_ZOOM_SCALE = 1;
-const MIN_ZOOM_SCALE = 1;
+const MIN_ZOOM_SCALE = 0.5;
 const MAX_ZOOM_SCALE = 2;
-const ZOOM_STEP = 0.1;
+const ZOOM_STEP = 0.05;
 const LEGACY_WELCOME_CONTENT = "안녕하세요! 😊";
 const FOCUSABLE_ELEMENT_SELECTOR = [
   "a[href]",
@@ -996,11 +1013,22 @@ function loadProjectPanelWidth() {
 }
 
 function clampZoomScale(scale: number) {
-  return Math.min(MAX_ZOOM_SCALE, Math.max(MIN_ZOOM_SCALE, scale));
+  const clampedScale = Math.min(MAX_ZOOM_SCALE, Math.max(MIN_ZOOM_SCALE, scale));
+  const steppedScale =
+    MIN_ZOOM_SCALE +
+    Math.round((clampedScale - MIN_ZOOM_SCALE) / ZOOM_STEP) * ZOOM_STEP;
+
+  return Math.round(steppedScale * 100) / 100;
 }
 
 function loadZoomScale() {
-  const savedScale = Number(window.localStorage.getItem(ZOOM_STORAGE_KEY));
+  const savedValue = window.localStorage.getItem(ZOOM_STORAGE_KEY);
+
+  if (savedValue === null || savedValue.trim() === "") {
+    return DEFAULT_ZOOM_SCALE;
+  }
+
+  const savedScale = Number(savedValue);
 
   if (!Number.isFinite(savedScale)) {
     return DEFAULT_ZOOM_SCALE;
@@ -1081,27 +1109,9 @@ function normalizeDialogPaths(selectedPaths: string | string[] | null) {
   return (Array.isArray(selectedPaths) ? selectedPaths : [selectedPaths]).filter(Boolean);
 }
 
-function getFileExtension(name: string) {
-  return name.includes(".") ? name.split(".").pop()?.toLowerCase() ?? "" : "";
-}
-
-function isSupportedProjectDocument(name: string) {
-  return ["md", "txt", "pdf"].includes(getFileExtension(name));
-}
-
 function getBase64ByteLength(encoded: string) {
   const padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
   return Math.floor((encoded.length * 3) / 4) - padding;
-}
-
-function getUploadMimeType(name: string) {
-  const extension = getFileExtension(name);
-
-  if (extension === "pdf") {
-    return "application/pdf";
-  }
-
-  return "text/plain";
 }
 
 function base64ToBytes(encoded: string) {
@@ -1815,6 +1825,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   const [prompt, setPrompt] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isSending, setIsSending] = useState(false);
+  const [expandedProjectSourcesId, setExpandedProjectSourcesId] = useState<string | null>(null);
   const [pendingProjectId, setPendingProjectId] = useState<string | null>(null);
   const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
   const [thinkingStartedAt, setThinkingStartedAt] = useState<number | null>(null);
@@ -1915,6 +1926,9 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   const [serverStatus, setServerStatus] = useState<ServerStatus>(
     initialServerOffline ? "offline" : "online",
   );
+  const [capabilities, setCapabilities] = useState<PaimCapabilities | null>(null);
+  const [capabilitiesError, setCapabilitiesError] = useState("");
+  const [capabilitiesRevision, setCapabilitiesRevision] = useState(0);
   const serverUrlSyncRef = useRef(settings.serverUrl);
   const projectPanelReopenModeRef = useRef<VisibleProjectPanelMode>("open");
   const sidebarResizeRef = useRef<{
@@ -1974,6 +1988,23 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   );
   const projectHomeNameBeforeEditRef = useRef<string | null>(null);
   const zoomScaleRef = useRef(zoomScale);
+  const projectDocumentExtensions = capabilities?.project_documents.extensions ?? [];
+  const queryAttachmentExtensions = capabilities?.query_attachments.extensions ?? [];
+  const supportedDocumentLabel = capabilities
+    ? formatExtensions(capabilities.project_documents.extensions)
+    : "";
+  const projectDocumentCapabilityLabel = capabilities
+    ? `${supportedDocumentLabel} · 파일당 최대 ${formatBytesAsMiB(capabilities.project_documents.max_file_bytes)}`
+    : "";
+  const queryAttachmentCapabilityLabel = capabilities
+    ? `${formatExtensions(queryAttachmentExtensions)} · 파일당 최대 ${formatBytesAsMiB(
+        capabilities.query_attachments.max_file_bytes,
+      )} · 전체 최대 ${formatBytesAsMiB(capabilities.query_attachments.max_total_bytes)}`
+    : "";
+
+  function retryCapabilities() {
+    setCapabilitiesRevision((revision) => revision + 1);
+  }
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
@@ -2075,9 +2106,14 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   );
   const selectedProjectHasDocumentInProgress =
     selectedProjectDocumentStatusSummary.inProgressCount > 0;
+  const areSelectedProjectSourcesExpanded =
+    selectedProject !== null && expandedProjectSourcesId === selectedProject.id;
   const selectedProjectSetupVisibleSources = useMemo(
-    () => sortedSelectedProjectAttachments.slice(0, 5),
-    [sortedSelectedProjectAttachments],
+    () =>
+      areSelectedProjectSourcesExpanded
+        ? sortedSelectedProjectAttachments
+        : sortedSelectedProjectAttachments.slice(0, 5),
+    [areSelectedProjectSourcesExpanded, sortedSelectedProjectAttachments],
   );
   const selectedProjectSetupHiddenSourceCount = Math.max(
     0,
@@ -2702,7 +2738,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   }
 
   function applyZoomScale(scale: number) {
-    const nextScale = Math.round(clampZoomScale(scale) * 100) / 100;
+    const nextScale = clampZoomScale(scale);
     zoomScaleRef.current = nextScale;
     setZoomScaleState(nextScale);
     window.localStorage.setItem(ZOOM_STORAGE_KEY, String(nextScale));
@@ -2916,6 +2952,37 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
     return () => window.clearTimeout(timeoutId);
   }, [settings.serverUrl]);
+
+  useEffect(() => {
+    setCapabilities(null);
+    setCapabilitiesError("");
+
+    if (serverStatus !== "online") {
+      setCapabilitiesError("서버 연결 후 지원 파일 정보를 불러올 수 있습니다");
+      return;
+    }
+
+    const controller = new AbortController();
+    void fetchPaimCapabilities(controller.signal)
+      .then((response) => {
+        if (
+          response.schema_version !== 1 ||
+          response.project_documents.extensions.length === 0 ||
+          response.query_attachments.extensions.length === 0
+        ) {
+          throw new Error("지원 파일 정보 응답이 올바르지 않습니다");
+        }
+        setCapabilities(response);
+        setCapabilitiesError("");
+      })
+      .catch((error) => {
+        if (!(error instanceof DOMException && error.name === "AbortError")) {
+          setCapabilitiesError(getErrorMessage(error, "지원 파일 정보를 불러올 수 없습니다"));
+        }
+      });
+
+    return () => controller.abort();
+  }, [authUser?.id, capabilitiesRevision, serverStatus, settings.serverUrl]);
 
   useEffect(() => {
     void getVersion()
@@ -4267,16 +4334,35 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
   // 서버 업로드는 로컬 파일을 base64로 읽어 브라우저 FormData 파일로 감싼다.
   async function readUploadFile(entry: Attachment) {
+    if (!capabilities) {
+      throw new Error(capabilitiesError || "지원 파일 정보를 먼저 불러와야 합니다");
+    }
     const encoded = await invoke<string>("read_file_base64", { path: entry.path });
     const bytes = base64ToBytes(encoded);
+    if (bytes.byteLength > capabilities.project_documents.max_file_bytes) {
+      throw new Error(
+        t("{name}은 {limit}를 초과해 업로드할 수 없습니다", {
+          name: entry.name,
+          limit: formatBytesAsMiB(capabilities.project_documents.max_file_bytes),
+        }),
+      );
+    }
 
-    return new File([bytes], entry.name, { type: getUploadMimeType(entry.name) });
+    return new File([bytes], entry.name, { type: "application/octet-stream" });
   }
 
   async function readQueryAttachment(entry: Attachment): Promise<ApiQueryAttachment> {
+    if (!capabilities) {
+      throw new Error(capabilitiesError || "지원 파일 정보를 먼저 불러와야 합니다");
+    }
     const encoded = await invoke<string>("read_file_base64", { path: entry.path });
-    if (getBase64ByteLength(encoded) > 10 * 1024 * 1024) {
-      throw new Error(t("{name}은 10 MB를 초과해 첨부할 수 없습니다", { name: entry.name }));
+    if (getBase64ByteLength(encoded) > capabilities.query_attachments.max_file_bytes) {
+      throw new Error(
+        t("{name}은 {limit}를 초과해 첨부할 수 없습니다", {
+          name: entry.name,
+          limit: formatBytesAsMiB(capabilities.query_attachments.max_file_bytes),
+        }),
+      );
     }
     return { filename: entry.name, content_base64: encoded };
   }
@@ -4302,7 +4388,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
     try {
       const file = await readUploadFile(entry);
-      if (controller.signal.aborted || !hasProjectAttachment(projectId, entry.id)) {
+      if (controller.signal.aborted) {
         return "cancelled" as const;
       }
       const formData = new FormData();
@@ -4316,7 +4402,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         formData,
       );
 
-      if (controller.signal.aborted || !hasProjectAttachment(projectId, entry.id)) {
+      if (controller.signal.aborted) {
         cancelledDocumentIdsRef.current.add(response.doc_id);
         try {
           await fetchPaimJson<void>(
@@ -4352,7 +4438,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       }
       return "uploaded" as const;
     } catch (error) {
-      if (controller.signal.aborted || !hasProjectAttachment(projectId, entry.id)) {
+      if (controller.signal.aborted) {
         return "cancelled" as const;
       }
       updateProjectAttachment(projectId, entry.id, (attachment) => ({
@@ -4378,7 +4464,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       (entry) =>
         !entry.serverOnly &&
         typeof entry.docId !== "number" &&
-        isSupportedProjectDocument(entry.name),
+        supportsExtension(entry.name, projectDocumentExtensions),
     );
 
     if (supportedFiles.length === 0) {
@@ -5096,14 +5182,20 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       return;
     }
 
-    updateProject(projectId, (project) => ({
-      ...project,
-      files: [...entries, ...(project.files ?? [])],
-    }));
+    // 네이티브 드롭 콜백에서는 React 상태 반영보다 업로드 비동기 흐름이 먼저 진행될 수 있다.
+    // 기존에 예약된 프로젝트 갱신까지 보존하면서, 업로드 전에 새 파일 등록을 확정한다.
+    flushSync(() => {
+      updateProject(projectId, (project) => ({
+        ...project,
+        files: [...entries, ...(project.files ?? [])],
+      }));
+    });
+    const registeredProject =
+      projectsRef.current.find((project) => project.id === projectId) ?? targetProject;
     if (selectedProjectIdRef.current === projectId) {
       setProjectSourcesMode("library");
     }
-    void uploadProjectDocuments(projectId, targetProject, entries);
+    void uploadProjectDocuments(projectId, registeredProject, entries);
   }
 
   async function addDroppedPathsToProject(projectId: string, paths: string[]) {
@@ -5189,6 +5281,14 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     if (!targetProject || shouldSkipProjectPermission(targetProject)) {
       return;
     }
+    if (!capabilities) {
+      setDemoStatus({
+        ok: false,
+        message: capabilitiesError || "지원 파일 정보를 불러오는 중입니다",
+        scope: "overview",
+      });
+      return;
+    }
 
     if (!canUseTauriDialog()) {
       setDemoStatus({
@@ -5202,7 +5302,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     try {
       const selectedPaths = await open({
         directory: false,
-        filters: [{ name: t("지원 문서"), extensions: ["md", "txt", "pdf"] }],
+        filters: [{ name: t("지원 문서"), extensions: projectDocumentExtensions }],
         multiple: true,
         title: t("프로젝트 자료 추가"),
       });
@@ -6986,11 +7086,19 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     if (!selectedProject || !selectedSession) {
       return;
     }
+    if (!capabilities) {
+      setDemoStatus({
+        ok: false,
+        message: capabilitiesError || "지원 파일 정보를 불러오는 중입니다",
+        scope: "overview",
+      });
+      return;
+    }
 
     const selectedPaths = await open({
       multiple: true,
       directory: false,
-      filters: [{ name: t("지원 문서"), extensions: ["md", "txt", "pdf"] }],
+      filters: [{ name: t("지원 문서"), extensions: queryAttachmentExtensions }],
       title: t("PaiM에 첨부할 파일 선택"),
     });
 
@@ -7008,15 +7116,26 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       return;
     }
 
-    const supportedPaths = paths.filter((path) => isSupportedProjectDocument(getFileName(path)));
+    if (!capabilities) {
+      setDemoStatus({
+        ok: false,
+        message: capabilitiesError || "지원 파일 정보를 불러오는 중입니다",
+        scope: "overview",
+      });
+      return;
+    }
+    const supportedPaths = paths.filter((path) =>
+      supportsExtension(getFileName(path), queryAttachmentExtensions),
+    );
     const skippedCount = paths.length - supportedPaths.length;
     if (supportedPaths.length !== paths.length) {
       setDemoStatus({
         kind: "warning",
         ok: false,
-        message: t("{added}개 추가 · {skipped}개 제외 — 채팅 첨부는 md/txt/pdf를 지원합니다", {
+        message: t("{added}개 추가 · {skipped}개 제외 — 지원 형식: {formats}", {
           added: supportedPaths.length,
           skipped: skippedCount,
+          formats: formatExtensions(queryAttachmentExtensions),
         }),
         scope: "overview",
       });
@@ -7172,6 +7291,20 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       if (messageAttachments.length > 0) {
         if (canUseTauriDialog()) {
           queryAttachments = await Promise.all(messageAttachments.map(readQueryAttachment));
+          const totalBytes = queryAttachments.reduce(
+            (total, attachment) => total + getBase64ByteLength(attachment.content_base64),
+            0,
+          );
+          if (
+            capabilities &&
+            totalBytes > capabilities.query_attachments.max_total_bytes
+          ) {
+            throw new Error(
+              `전체 첨부 파일은 ${formatBytesAsMiB(
+                capabilities.query_attachments.max_total_bytes,
+              )}를 초과할 수 없습니다`,
+            );
+          }
           if (controller.signal.aborted) {
             throw new DOMException("Query cancelled", "AbortError");
           }
@@ -7327,8 +7460,11 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
   function renderMembersPage() {
     return (
-      <section className="members-page" aria-label={t("프로젝트 멤버 관리")}>
-        <div className="members-page-content">
+      <WorkspacePageLayout
+        ariaLabel={t("프로젝트 멤버 관리")}
+        className="members-page"
+        contentClassName="members-page-content"
+      >
           <header className="settings-header members-page-header">
             <Button
               className="settings-back-button"
@@ -7339,7 +7475,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
               tooltip={t("돌아가기")}
               variant="ghost"
             />
-            <div>
+            <div className="settings-header-copy">
               <h1 ref={mainViewHeadingRef} tabIndex={-1}>{t("멤버 관리")}</h1>
               {selectedProject ? <p>{selectedProject.name}</p> : null}
             </div>
@@ -7361,15 +7497,17 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
               title={t("로그인된 서버 프로젝트에서만 멤버를 관리할 수 있습니다.")}
             />
           )}
-        </div>
-      </section>
+      </WorkspacePageLayout>
     );
   }
 
   function renderProfilePage() {
     return (
-      <section className="profile-page" aria-label={t("프로필")}>
-        <div className="profile-content">
+      <WorkspacePageLayout
+        ariaLabel={t("프로필")}
+        className="profile-page"
+        contentClassName="profile-content"
+      >
           <header className="settings-header">
             <Button
               className="settings-back-button"
@@ -7380,7 +7518,9 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
               tooltip={t("돌아가기")}
               variant="ghost"
             />
-            <h1 ref={mainViewHeadingRef} tabIndex={-1}>{t("프로필")}</h1>
+            <div className="settings-header-copy">
+              <h1 ref={mainViewHeadingRef} tabIndex={-1}>{t("프로필")}</h1>
+            </div>
           </header>
 
           <section className="profile-identity-card" aria-label={t("계정 정보")}>
@@ -7420,8 +7560,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
               title={t("오프라인 또는 인증이 없는 개발 서버를 사용 중입니다.")}
             />
           )}
-        </div>
-      </section>
+      </WorkspacePageLayout>
     );
   }
 
@@ -7435,8 +7574,11 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       getProjectStorageKey(authUser, canLogout, draftServerUrl) !== projectStorageKey;
 
     return (
-      <section className="settings-page" aria-label={t("설정")}>
-        <div className="settings-content">
+      <WorkspacePageLayout
+        ariaLabel={t("설정")}
+        className="settings-page"
+        contentClassName="settings-content"
+      >
           <header className="settings-header">
             <Button
               className="settings-back-button"
@@ -7447,7 +7589,9 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
               tooltip={t("돌아가기")}
               variant="ghost"
             />
-            <h1 ref={mainViewHeadingRef} tabIndex={-1}>{t("설정")}</h1>
+            <div className="settings-header-copy">
+              <h1 ref={mainViewHeadingRef} tabIndex={-1}>{t("설정")}</h1>
+            </div>
           </header>
 
           <section className="settings-group" aria-label={t("테마")}>
@@ -7471,7 +7615,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
           <section className="settings-group" aria-label={t("화면 확대")}>
             <div className="settings-copy">
               <h2>{t("화면 확대")}</h2>
-              <p>{t("텍스트와 인터페이스를 100%에서 200%까지 확대합니다.")}</p>
+              <p>{t("텍스트와 인터페이스를 50%에서 200%까지 5% 단위로 조절합니다.")}</p>
             </div>
             <div className="settings-range">
               <Suspense fallback={<div className="settings-control-skeleton" aria-hidden="true" />}>
@@ -7671,8 +7815,87 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
               variant="secondary"
             />
           </section>
+      </WorkspacePageLayout>
+    );
+  }
+
+  function renderProjectHomeMemorySummary() {
+    if (!selectedProject) {
+      return null;
+    }
+
+    return (
+      <>
+        <div>
+          <p className="project-home-slots-title">{t("추출될 항목")}</p>
+          <p className="project-home-slots-hint">
+            {canOpenProjectMemory
+              ? t("서버 프로젝트 메모리 개수를 표시합니다")
+              : t("자료 업로드 후 서버 메모리 개수를 표시합니다")}
+          </p>
         </div>
-      </section>
+        <div className="project-home-slot-list">
+          <div
+            className="project-home-slot"
+            data-kind="action"
+            data-state={getProjectMemorySlotState(
+              canOpenProjectMemory,
+              selectedProjectMemorySlotCounts.action,
+            )}
+          >
+            <Zap size={13} />
+            <span>{t("액션")}</span>
+            <strong>
+              {canOpenProjectMemory ? selectedProjectMemorySlotCounts.action : "—"}
+            </strong>
+          </div>
+          <div
+            className="project-home-slot"
+            data-kind="decision"
+            data-state={getProjectMemorySlotState(
+              canOpenProjectMemory,
+              selectedProjectMemorySlotCounts.decision,
+            )}
+          >
+            <Check size={13} />
+            <span>{t("결정")}</span>
+            <strong>
+              {canOpenProjectMemory ? selectedProjectMemorySlotCounts.decision : "—"}
+            </strong>
+          </div>
+          <div
+            className="project-home-slot"
+            data-kind="issue"
+            data-state={getProjectMemorySlotState(
+              canOpenProjectMemory,
+              selectedProjectMemorySlotCounts.issue,
+            )}
+          >
+            <AlertTriangle size={13} />
+            <span>{t("이슈")}</span>
+            <strong>
+              {canOpenProjectMemory ? selectedProjectMemorySlotCounts.issue : "—"}
+            </strong>
+          </div>
+          <div
+            className="project-home-slot"
+            data-kind="risk"
+            data-state={getProjectMemorySlotState(
+              canOpenProjectMemory,
+              selectedProjectMemorySlotCounts.risk,
+            )}
+          >
+            <Flag size={13} />
+            <span>{t("리스크")}</span>
+            <strong>
+              {canOpenProjectMemory ? selectedProjectMemorySlotCounts.risk : "—"}
+            </strong>
+          </div>
+        </div>
+        <p className="project-home-slots-foot">
+          {t("업로드와 분석 결과가 서버에 반영되면 자동으로 갱신됩니다.")}
+        </p>
+      </>
     );
   }
 
@@ -8178,20 +8401,23 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         {showNoticeStack ? (
           <div className="notice-stack" ref={noticeStackRef}>
             {serverStatus === "offline" ? (
-              <Banner
-                className="notice"
-                container="card"
-                endContent={
-                  <Button
-                    label={t("다시 연결")}
-                    onClick={() => void syncProjectsWithServer(true)}
-                    size="sm"
-                    variant="primary"
-                  />
-                }
-                status="error"
-                title={t("PaiM 서버에 연결할 수 없습니다 — 마지막 저장 상태를 표시 중")}
-              />
+              <div
+                aria-live="polite"
+                className="app-connection-status notice"
+                data-state="offline"
+                role="status"
+              >
+                <span className="app-connection-status-copy">
+                  <span aria-hidden="true" className="app-connection-status-dot" />
+                  <span>{t("오프라인 · 저장된 프로젝트 사용 중")}</span>
+                </span>
+                <Button
+                  label={t("다시 연결")}
+                  onClick={() => void syncProjectsWithServer(true)}
+                  size="sm"
+                  variant="ghost"
+                />
+              </div>
             ) : null}
             {showBackgroundQueryNotice && pendingQueryProject && pendingQuerySession ? (
               <Banner
@@ -8353,7 +8579,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                       </span>
                       <div className="message-content">
                         {message.role === "assistant" ? (
-                          <div className="assistant">
+                          <div className="paim-assistant-content">
                             {selectedSession.title === "Project Briefing" && messageIndex === 0 ? (
                               <span className="message-briefing-label">{t("프로젝트 브리핑")}</span>
                             ) : null}
@@ -8373,7 +8599,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                               }
                             >
                               <LazyMarkdown
-                                className="md"
+                                className="paim-message-markdown"
                                 density="compact"
                                 headingLevelStart={3}
                               >
@@ -8382,7 +8608,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                             </Suspense>
                             {message.sources && message.sources.length > 0 ? (
                               <div className="sources" aria-label={t("출처")}>
-                                <span className="label">{t("출처")}</span>
+                                <span className="paim-sources-label">{t("출처")}</span>
                                 {message.sources.map((source, sourceIndex) => (
                                   <Badge
                                     className="source-chip"
@@ -8431,7 +8657,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                       <div className="thinking">
                         <Spinner aria-label={t("응답 생성 중")} shade="subtle" size="sm" />
                         <span aria-hidden="true">
-                          <span className="dots">{t("생각 중")}</span> · {t("{seconds}초", {
+                          <span className="paim-thinking-dots">{t("생각 중")}</span> · {t("{seconds}초", {
                             seconds: thinkingElapsedSeconds,
                           })}
                         </span>
@@ -8481,13 +8707,37 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                   />
                 </div>
               ) : null}
+              <div className="attachment-scope-note">
+                {capabilities ? (
+                  <span>{t("지원 형식 및 제한: {details}", { details: queryAttachmentCapabilityLabel })}</span>
+                ) : (
+                  <>
+                    <span>{capabilitiesError || t("지원 파일 정보를 불러오는 중입니다")}</span>
+                    {capabilitiesError ? (
+                      <Button
+                        label={t("지원 파일 정보 다시 불러오기")}
+                        onClick={retryCapabilities}
+                        size="sm"
+                        variant="secondary"
+                      >
+                        {t("다시 시도")}
+                      </Button>
+                    ) : null}
+                  </>
+                )}
+              </div>
               <div className="prompt-actions">
                 <IconButton
                   icon={<Plus size={17} />}
-                  isDisabled={!canMutateSelectedProject}
+                  isDisabled={!canMutateSelectedProject || !capabilities}
                   label={t("파일 추가")}
                   onClick={() => void handlePickFiles()}
-                  tooltip={selectedProjectReadOnlyReason ?? t("파일 추가")}
+                  tooltip={
+                    selectedProjectReadOnlyReason ??
+                    (capabilities
+                      ? t("파일 추가 · {details}", { details: queryAttachmentCapabilityLabel })
+                      : capabilitiesError || t("지원 파일 정보를 불러오는 중입니다"))
+                  }
                   variant="ghost"
                 />
                 {isCurrentSessionSending ? (
@@ -8520,16 +8770,21 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
           </>
         ) : selectedProject ? (
           <>
-            <section
+            <WorkspacePageLayout
+              ariaLabel={t("프로젝트 시작 화면")}
+              aside={renderProjectHomeMemorySummary()}
+              asideAriaLabel={t("추출될 항목")}
+              asideClassName="project-home-slots"
               className="project-home"
-              data-drop-zone="project-files"
-              aria-label={t("프로젝트 시작 화면")}
+              contentClassName="project-home-main-content"
+              layoutClassName="project-home-content"
+              mainClassName="project-home-main"
+              sectionProps={{
+                "data-context-ready": hasProjectHomeContext ? "true" : "false",
+                "data-drop-zone": "project-files",
+                "data-stage": "context",
+              }}
             >
-              <div
-                className="project-home-content"
-                data-has-sources={selectedProjectFileCount > 0 ? "true" : "false"}
-              >
-                <div className="project-home-main">
                   <div className="project-home-name-row">
                     <TextInput
                       className="project-home-name"
@@ -8592,36 +8847,61 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                     />
                     <Pencil aria-hidden="true" className="project-home-name-edit" size={15} />
                   </div>
-                  <p className="project-home-subtitle">
-                    {selectedProjectFileCount > 0
-                      ? t("{count}개 자료가 연결되었습니다", { count: selectedProjectFileCount })
-                      : t("자료를 추가하거나 설명만으로 바로 대화를 시작하세요")}
-                  </p>
-                  <TextArea
-                    className="project-home-description"
-                    isDisabled={!canMutateSelectedProject}
-                    isLabelHidden
-                    label={t("프로젝트 설명")}
-                    onChange={(nextDescription) => {
-                      updateProject(selectedProject.id, (project) => ({
-                        ...project,
-                        description: nextDescription,
-                      }));
-                    }}
-                    placeholder={t("프로젝트 설명을 적어두면 PaiM이 맥락을 잡는 데 도움이 됩니다.")}
-                    rows={2}
-                    value={selectedProject.description ?? ""}
-                    width="100%"
-                  />
+                  <ol className="project-home-steps" aria-label={t("프로젝트 시작 단계")}>
+                    <li aria-current="step" data-state="current">
+                      <span className="project-home-step-number">1</span>
+                      <span className="project-home-step-label">{t("맥락 추가")}</span>
+                    </li>
+                    <li data-state="upcoming">
+                      <span className="project-home-step-number">2</span>
+                      <span className="project-home-step-label">{t("분석")}</span>
+                    </li>
+                    <li data-state="upcoming">
+                      <span className="project-home-step-number">3</span>
+                      <span className="project-home-step-label">{t("첫 질문")}</span>
+                    </li>
+                  </ol>
 
-                  <div
-                    className="project-home-canvas"
-                    data-state={selectedProjectFileCount > 0 ? "filled" : "empty"}
-                  >
+                  <section className="project-home-section">
+                    <h2>{t("프로젝트 설명")}</h2>
+                    <TextArea
+                      className="project-home-description"
+                      isDisabled={!canMutateSelectedProject}
+                      isLabelHidden
+                      label={t("프로젝트 설명")}
+                      onChange={(nextDescription) => {
+                        updateProject(selectedProject.id, (project) => ({
+                          ...project,
+                          description: nextDescription,
+                        }));
+                      }}
+                      placeholder={t("프로젝트 설명을 적어두면 PaiM이 맥락을 잡는 데 도움이 됩니다.")}
+                      rows={2}
+                      value={selectedProject.description ?? ""}
+                      width="100%"
+                    />
+                  </section>
+
+                  <section className="project-home-section project-home-context-section">
+                    <header className="project-home-section-header">
+                      <h2>{t("프로젝트 맥락 추가")}</h2>
+                      <p>
+                        {capabilities
+                          ? t("지원 형식 및 제한: {details}", {
+                              details: projectDocumentCapabilityLabel,
+                            })
+                          : capabilitiesError || t("지원 파일 정보를 불러오는 중입니다")}
+                      </p>
+                    </header>
+                    <div
+                      className="project-home-canvas"
+                      data-state={selectedProjectFileCount > 0 ? "filled" : "empty"}
+                    >
                     {selectedProjectFileCount > 0 ? (
                       <div
                         aria-label={t("프로젝트 자료")}
                         className="project-home-canvas-filled"
+                        data-expanded={areSelectedProjectSourcesExpanded ? "true" : "false"}
                         role="group"
                       >
                         <div className="project-home-upload-summary">
@@ -8645,55 +8925,63 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                             variant="ghost"
                           />
                         </div>
-                        {selectedProjectSetupVisibleSources.map((source) => {
-                          const sourceMeta =
-                            source.kind === "directory"
-                              ? { Icon: FolderOpen, color: "var(--muted)" }
-                              : getProjectFileVisualMeta(source.name);
-                          const SourceIcon = sourceMeta.Icon;
-                          const sourceStatus =
-                            source.documentStatus ?? (source.kind === "directory" ? "folder" : "local");
+                        <div className="project-home-source-list">
+                          {selectedProjectSetupVisibleSources.map((source) => {
+                            const sourceMeta =
+                              source.kind === "directory"
+                                ? { Icon: FolderOpen, color: "var(--muted)" }
+                                : getProjectFileVisualMeta(source.name);
+                            const SourceIcon = sourceMeta.Icon;
+                            const sourceStatus =
+                              source.documentStatus ??
+                              (source.kind === "directory" ? "folder" : "local");
 
-                          return (
-                            <div
-                              className="project-home-source-row"
-                              data-delete={
-                                pendingSetupDeleteProjectFileId === source.id ? "confirm" : undefined
-                              }
-                              data-status={sourceStatus}
-                              key={source.id}
-                            >
-                              <span className="project-home-source-icon" style={{ color: sourceMeta.color }}>
-                                <SourceIcon size={15} />
-                              </span>
-                              <span className="project-home-source-name">{source.name}</span>
-                              <span className="project-home-source-status">
-                                {t(getProjectSetupSourceStatusLabel(source))}
-                              </span>
-                              <IconButton
-                                className="project-home-source-delete"
-                                icon={<X size={12} />}
-                                isDisabled={!canMutateSelectedProject}
-                                label={
+                            return (
+                              <div
+                                className="project-home-source-row"
+                                data-delete={
                                   pendingSetupDeleteProjectFileId === source.id
-                                    ? t("자료 삭제 확인")
-                                    : t("자료 삭제")
+                                    ? "confirm"
+                                    : undefined
                                 }
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  handleRequestDeleteProjectSetupSource(selectedProject.id, source);
-                                }}
-                                size="sm"
-                                tooltip={
-                                  pendingSetupDeleteProjectFileId === source.id
-                                    ? t("한 번 더 누르면 삭제")
-                                    : t("자료 삭제")
-                                }
-                                variant="ghost"
-                              />
-                            </div>
-                          );
-                        })}
+                                data-status={sourceStatus}
+                                key={source.id}
+                              >
+                                <span
+                                  className="project-home-source-icon"
+                                  style={{ color: sourceMeta.color }}
+                                >
+                                  <SourceIcon size={15} />
+                                </span>
+                                <span className="project-home-source-name">{source.name}</span>
+                                <span className="project-home-source-status">
+                                  {t(getProjectSetupSourceStatusLabel(source))}
+                                </span>
+                                <IconButton
+                                  className="project-home-source-delete"
+                                  icon={<X size={12} />}
+                                  isDisabled={!canMutateSelectedProject}
+                                  label={
+                                    pendingSetupDeleteProjectFileId === source.id
+                                      ? t("자료 삭제 확인")
+                                      : t("자료 삭제")
+                                  }
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    handleRequestDeleteProjectSetupSource(selectedProject.id, source);
+                                  }}
+                                  size="sm"
+                                  tooltip={
+                                    pendingSetupDeleteProjectFileId === source.id
+                                      ? t("한 번 더 누르면 삭제")
+                                      : t("자료 삭제")
+                                  }
+                                  variant="ghost"
+                                />
+                              </div>
+                            );
+                          })}
+                        </div>
                         {selectedProjectSetupHiddenSourceCount > 0 ? (
                           <Button
                             className="project-home-source-more"
@@ -8701,8 +8989,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                               count: selectedProjectSetupHiddenSourceCount,
                             })}
                             onClick={() => {
-                              openProjectPanel();
-                              openProjectPanelTool("files");
+                              setExpandedProjectSourcesId(selectedProject.id);
                             }}
                             size="sm"
                             variant="ghost"
@@ -8711,13 +8998,14 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                       </div>
                     ) : (
                       <div className="project-home-canvas-empty">
-                        <div className="project-home-paper-stack" aria-hidden="true">
-                          <span />
-                          <span />
-                          <span />
-                        </div>
-                        <h2>{t("자료를 여기에 끌어다 놓으세요")}</h2>
-                        <p>{t("회의록, README, PDF, 스펙 문서를 읽고 프로젝트 맥락을 정리합니다")}</p>
+                        <FileText
+                          aria-hidden="true"
+                          className="project-home-drop-icon"
+                          size={30}
+                          strokeWidth={1.6}
+                        />
+                        <h3>{t("자료를 추가해 프로젝트 맥락을 만드세요")}</h3>
+                        <p>{t("파일을 드래그하거나 아래 버튼을 이용해 추가할 수 있습니다.")}</p>
                         <div className="project-home-picker-row">
                           <Button
                             className="project-home-picker"
@@ -8740,7 +9028,8 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                         </div>
                       </div>
                     )}
-                  </div>
+                    </div>
+                  </section>
 
                   <div className="project-home-footer">
                     <p
@@ -8775,84 +9064,15 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                         }
                         size="sm"
                         variant="primary"
-                      />
+                      >
+                        <span className="project-home-primary-content">
+                          <span>{isSending ? t("분석 중") : t("분석 시작")}</span>
+                          <ChevronRight aria-hidden="true" size={15} />
+                        </span>
+                      </Button>
                     </div>
                   </div>
-                </div>
-
-                <aside className="project-home-slots" aria-label={t("추출될 항목")}>
-                  <div>
-                    <p className="project-home-slots-title">{t("추출될 항목")}</p>
-                    <p className="project-home-slots-hint">
-                      {canOpenProjectMemory
-                        ? t("서버 프로젝트 메모리 개수를 표시합니다")
-                        : t("자료 업로드 후 서버 메모리 개수를 표시합니다")}
-                    </p>
-                  </div>
-                  <div className="project-home-slot-list">
-                    <div
-                      className="project-home-slot"
-                      data-kind="action"
-                      data-state={getProjectMemorySlotState(
-                        canOpenProjectMemory,
-                        selectedProjectMemorySlotCounts.action,
-                      )}
-                    >
-                      <Zap size={13} />
-                      <span>{t("액션")}</span>
-                      <strong>
-                        {canOpenProjectMemory ? selectedProjectMemorySlotCounts.action : "—"}
-                      </strong>
-                    </div>
-                    <div
-                      className="project-home-slot"
-                      data-kind="decision"
-                      data-state={getProjectMemorySlotState(
-                        canOpenProjectMemory,
-                        selectedProjectMemorySlotCounts.decision,
-                      )}
-                    >
-                      <Check size={13} />
-                      <span>{t("결정")}</span>
-                      <strong>
-                        {canOpenProjectMemory ? selectedProjectMemorySlotCounts.decision : "—"}
-                      </strong>
-                    </div>
-                    <div
-                      className="project-home-slot"
-                      data-kind="issue"
-                      data-state={getProjectMemorySlotState(
-                        canOpenProjectMemory,
-                        selectedProjectMemorySlotCounts.issue,
-                      )}
-                    >
-                      <AlertTriangle size={13} />
-                      <span>{t("이슈")}</span>
-                      <strong>
-                        {canOpenProjectMemory ? selectedProjectMemorySlotCounts.issue : "—"}
-                      </strong>
-                    </div>
-                    <div
-                      className="project-home-slot"
-                      data-kind="risk"
-                      data-state={getProjectMemorySlotState(
-                        canOpenProjectMemory,
-                        selectedProjectMemorySlotCounts.risk,
-                      )}
-                    >
-                      <Flag size={13} />
-                      <span>{t("리스크")}</span>
-                      <strong>
-                        {canOpenProjectMemory ? selectedProjectMemorySlotCounts.risk : "—"}
-                      </strong>
-                    </div>
-                  </div>
-                  <p className="project-home-slots-foot">
-                    {t("업로드와 분석 결과가 서버에 반영되면 자동으로 갱신됩니다.")}
-                  </p>
-                </aside>
-              </div>
-            </section>
+            </WorkspacePageLayout>
           </>
         ) : (
           <section className="project-start" aria-labelledby="project-start-title">

@@ -21,7 +21,12 @@ from .base import (
     WarningCode,
     assemble,
 )
-from .cleaning import drop_duplicate_blocks, is_noise_line, normalize_text
+from .cleaning import (
+    drop_duplicate_blocks,
+    guard_extracted_text,
+    is_noise_line,
+    normalize_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +167,9 @@ def _cell_text(cell, qn, Table, Paragraph, depth: int, warnings: list, location:
     parts: list[str] = []
     for child in cell._tc.iterchildren():
         if child.tag == qn("w:p"):
-            text = normalize_text(Paragraph(child, cell).text).replace("\n", " ").strip()
+            text = normalize_text(
+                guard_extracted_text(Paragraph(child, cell).text)
+            ).replace("\n", " ").strip()
             if text:
                 parts.append(text)
         elif child.tag == qn("w:tbl"):
@@ -376,7 +383,7 @@ def convert(filename: str, data: bytes):
             table_index += 1
             continue
 
-        text = normalize_text(item.text).replace("\n", " ").strip()
+        text = normalize_text(guard_extracted_text(item.text)).replace("\n", " ").strip()
         if not text or is_noise_line(text):
             continue
         kind, level = _paragraph_kind(item, style_names)

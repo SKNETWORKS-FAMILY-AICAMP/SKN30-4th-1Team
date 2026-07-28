@@ -409,7 +409,8 @@ def test_upload_rejects_corrupted_archive_with_corrupt_file_code():
     from backend.main import app
 
     client = TestClient(app, raise_server_exceptions=False)
-    with patch("backend.api.upload.require_project_access"):
+    with patch("backend.api.upload.require_project_access"), \
+         patch("backend.api.upload.require_upload_user", return_value=1):
         response = client.post(
             "/api/v1/projects/1/documents",
             files={"file": ("변조.docx", _corrupted_docx(), "application/octet-stream")},
@@ -466,7 +467,8 @@ def test_upload_rejects_oversized_archive_with_400(monkeypatch):
 
     monkeypatch.setattr(module, "_MAX_COMPRESSION_RATIO", 1)
     client = TestClient(app, raise_server_exceptions=False)
-    with patch("backend.api.upload.require_project_access"):
+    with patch("backend.api.upload.require_project_access"), \
+         patch("backend.api.upload.require_upload_user", return_value=1):
         response = client.post(
             "/api/v1/projects/1/documents",
             files={"file": ("보통.docx", _ordinary_docx(), "application/octet-stream")},
@@ -874,8 +876,26 @@ def test_upload_accepts_docx_and_passes_structure_to_ingest():
     ))
     client = TestClient(app, raise_server_exceptions=False)
 
+    # 업로드는 quota 예약 → 파일 기록 → finalize 순으로 진행된다(#7). 이 테스트의
+    # 관심사는 "변환 구조가 ingest까지 전달되는가"이므로 저장 계층만 대역으로 세운다.
+    reservation = {
+        "reservation_id": 1,
+        "temp_path": "data/tmp/회의록.docx",
+        "target_path": "data/1/회의록.docx",
+    }
+    finalized = {
+        "doc_id": 12,
+        "old_doc_ids": [],
+        "file_path": "data/1/회의록.docx",
+        "processing_token": None,
+    }
+
     with patch("backend.api.upload.get_connection", side_effect=_conn_seq()), \
-         patch("backend.api.upload.save_file", return_value="data/1/회의록.docx"), \
+         patch("backend.api.upload.require_project_access"), \
+         patch("backend.api.upload.require_upload_user", return_value=1), \
+         patch("backend.api.upload.reserve_document", return_value=reservation), \
+         patch("backend.api.upload.write_reserved_file"), \
+         patch("backend.api.upload.finalize_document", return_value=finalized), \
          patch("backend.api.upload.extract", return_value=[]), \
          patch("backend.api.upload.ingest") as mock_ingest, \
          patch("backend.api.upload.update_project_memory"), \
@@ -907,7 +927,8 @@ def test_upload_rejects_unsupported_format_with_reason():
     from backend.main import app
 
     client = TestClient(app, raise_server_exceptions=False)
-    with patch("backend.api.upload.require_project_access"):
+    with patch("backend.api.upload.require_project_access"), \
+         patch("backend.api.upload.require_upload_user", return_value=1):
         response = client.post(
             "/api/v1/projects/1/documents",
             files={"file": ("보고서.hwp", b"data", "application/octet-stream")},
@@ -926,7 +947,8 @@ def test_upload_rejects_scanned_pdf_with_explicit_code():
     from backend.main import app
 
     client = TestClient(app, raise_server_exceptions=False)
-    with patch("backend.api.upload.require_project_access"):
+    with patch("backend.api.upload.require_project_access"), \
+         patch("backend.api.upload.require_upload_user", return_value=1):
         response = client.post(
             "/api/v1/projects/1/documents",
             files={"file": ("스캔본.pdf", _make_pdf([[], []]), "application/pdf")},
@@ -950,13 +972,16 @@ def test_upload_error_detail_is_string_for_every_conversion_failure():
     from backend.main import app
 
     client = TestClient(app, raise_server_exceptions=False)
+    # 여기 사례는 모두 "형식 검증은 통과했으나 변환에 실패한" 400 경로여야 한다.
+    # 매직 불일치(예: ZIP이 아닌 .docx)는 415 검증 실패이므로 이 표에 넣지 않는다.
     cases = [
-        ("깨진.docx", b"not a real docx", ErrorCode.CORRUPT_FILE),
+        ("깨진.docx", b"PK\x03\x04not a real docx", ErrorCode.CORRUPT_FILE),
         ("빈.txt", b"\n\n   \n", ErrorCode.EMPTY_DOCUMENT),
         ("스캔.pdf", _make_pdf([[], []]), ErrorCode.NO_TEXT_LAYER),
     ]
     for name, data, expected_code in cases:
-        with patch("backend.api.upload.require_project_access"):
+        with patch("backend.api.upload.require_project_access"), \
+         patch("backend.api.upload.require_upload_user", return_value=1):
             response = client.post(
                 "/api/v1/projects/1/documents",
                 files={"file": (name, data, "application/octet-stream")},
@@ -1053,7 +1078,8 @@ def test_upload_unsupported_format_returns_top_level_code():
     from backend.main import app
 
     client = TestClient(app, raise_server_exceptions=False)
-    with patch("backend.api.upload.require_project_access"):
+    with patch("backend.api.upload.require_project_access"), \
+         patch("backend.api.upload.require_upload_user", return_value=1):
         response = client.post(
             "/api/v1/projects/1/documents",
             files={"file": ("문서.hwp", b"whatever", "application/octet-stream")},
@@ -1084,7 +1110,8 @@ def _upload_and_get_body(name: str, data: bytes):
     from backend.main import app
 
     client = TestClient(app, raise_server_exceptions=False)
-    with patch("backend.api.upload.require_project_access"):
+    with patch("backend.api.upload.require_project_access"), \
+         patch("backend.api.upload.require_upload_user", return_value=1):
         response = client.post(
             "/api/v1/projects/1/documents",
             files={"file": (name, data, "application/octet-stream")},
@@ -1146,8 +1173,13 @@ def test_docx_zip_guard_failure_hides_raw_exception(monkeypatch):
     )
     monkeypatch.setattr(docx_converter, "zipfile", stub)
 
+    # ZIP 매직으로 시작해야 업로드 경계 검증(415)을 통과해 변환기의 ZIP 가드까지
+    # 도달한다. 매직이 없으면 validate_document_bytes()가 먼저 415로 끊어, 이 테스트가
+    # 검증하려던 경로(가드 실패 시 원시 예외 비노출)를 타지 못한다.
+    broken_zip = b"PK\x03\x04tiny"
+
     with pytest.raises(ConversionError) as exc:
-        convert("깨진.docx", b"tiny")
+        convert("깨진.docx", broken_zip)
 
     assert exc.value.code == ErrorCode.CORRUPT_FILE
     assert exc.value.message == docx_converter.DOCX_OPEN_FAILED_MESSAGE
@@ -1155,7 +1187,7 @@ def test_docx_zip_guard_failure_hides_raw_exception(monkeypatch):
     assert exc.value.source == "깨진.docx"
     assert exc.value.__cause__ is raw
 
-    response = _upload_and_get_body("깨진.docx", b"tiny")
+    response = _upload_and_get_body("깨진.docx", broken_zip)
     body = response.json()
     assert response.status_code == 400
     assert body["code"] == ErrorCode.CORRUPT_FILE

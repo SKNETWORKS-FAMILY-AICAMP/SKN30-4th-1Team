@@ -108,10 +108,10 @@ def _invoke_reconciler_once(prs: list[MergedPullRequest], actions: list[OpenActi
 
     try:
         raw = llm.with_structured_output(ReconcileResult).invoke(messages)
-        logger.info("reconciler structured raw output=%s", raw)
+        logger.info("reconciler_structured_output_received")
         return _coerce_result(raw)
     except Exception:
-        logger.warning("with_structured_output 실패, PydanticOutputParser로 폴백", exc_info=True)
+        logger.warning("reconciler_structured_output_fallback")
 
     parser = PydanticOutputParser(pydantic_object=ReconcileResult)
     fallback_prompt = ChatPromptTemplate.from_messages(
@@ -135,7 +135,7 @@ def _invoke_reconciler_once(prs: list[MergedPullRequest], actions: list[OpenActi
                 error=error_text or "(없음)",
             )
         ).content
-        logger.info("reconciler parser raw output=%s", text)
+        logger.info("reconciler_parser_output_received")
         try:
             return _coerce_result(parser.parse(text))
         except Exception as exc:
@@ -246,7 +246,7 @@ def _insert_suggestions(
         with conn.cursor() as cursor:
             for match in matches:
                 if match.memory_id not in action_ids or match.pr_number not in pr_by_number:
-                    logger.warning("reconciler invalid match skipped: %s", match.model_dump())
+                    logger.warning("reconciler_invalid_match_skipped")
                     continue
                 pr = pr_by_number[match.pr_number]
                 evidence = {

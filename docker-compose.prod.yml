@@ -24,6 +24,12 @@ x-required-env: &required-env
   #   OPENAI_API_KEY      → backend/db/chroma.py (임베딩, LLM_PROVIDER와 무관)
   SESSION_MEMORY_KEY: ${SESSION_MEMORY_KEY:?SESSION_MEMORY_KEY is required}
   OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY is required}
+  RATE_LIMIT_SIGNUP: ${RATE_LIMIT_SIGNUP:?RATE_LIMIT_SIGNUP is required}
+  RATE_LIMIT_LOGIN: ${RATE_LIMIT_LOGIN:?RATE_LIMIT_LOGIN is required}
+  RATE_LIMIT_UPLOAD: ${RATE_LIMIT_UPLOAD:?RATE_LIMIT_UPLOAD is required}
+  RATE_LIMIT_QUERY: ${RATE_LIMIT_QUERY:?RATE_LIMIT_QUERY is required}
+  RATE_LIMIT_CHAT: ${RATE_LIMIT_CHAT:?RATE_LIMIT_CHAT is required}
+  FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:?FORWARDED_ALLOW_IPS is required}
 
 x-logging: &logging
   driver: json-file
@@ -51,15 +57,21 @@ services:
       - ./backend/db/migrate_v6.sql:/docker-entrypoint-initdb.d/06_migrate_v6.sql:ro
       - ./backend/db/migrate_v7.sql:/docker-entrypoint-initdb.d/07_migrate_v7.sql:ro
       - ./backend/db/migrate_v8.sql:/docker-entrypoint-initdb.d/08_migrate_v8.sql:ro
+      - ./backend/db/migrate_v9.sql:/docker-entrypoint-initdb.d/09_migrate_v9.sql:ro
     healthcheck:
       # `$$`로 이스케이프해 Compose 보간이 아니라 **컨테이너 안에서** 확장시킨다.
       # `-p${DB_PASSWORD}`로 쓰면 비밀번호가 `docker compose config` 출력과
       # Docker 설정에 평문으로 굳는다. MYSQL_PWD를 쓰면 argv에도 남지 않는다.
-      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin ping -h localhost -u root"]
+      # 공식 MySQL entrypoint의 초기화용 임시 mysqld도 ping에 응답한다. ping만
+      # 검사하면 init SQL이 끝나기 전에 backend/restore가 붙어 테이블 생성과
+      # 충돌한다. 최종 서버가 PID 1로 exec된 뒤에만 healthy로 판정한다.
+      test: ["CMD-SHELL", "test \"$$(cat /proc/1/comm)\" = mysqld && MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin ping -h localhost -u root"]
       interval: 10s
       timeout: 5s
       retries: 5
     logging: *logging
+    networks:
+      - data_internal
 
   backend:
     build:
@@ -97,7 +109,20 @@ services:
     volumes:
       - chroma_data:/app/.chroma
       - upload_data:/app/data/uploads
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c 'import json,urllib.request; r=urllib.request.urlopen("http://127.0.0.1:8000/health/ready",timeout=6); b=json.load(r); raise SystemExit(0 if r.status==200 and b.get("status")=="ready" else 1)'
+      interval: 15s
+      timeout: 7s
+      retries: 5
+      start_period: 30s
     logging: *logging
+    networks:
+      data_internal:
+      proxy_internal:
+        ipv4_address: ${PAIM_BACKEND_PROXY_IP:?PAIM_BACKEND_PROXY_IP is required}
 
   caddy:
     image: caddy:2-alpine
@@ -124,6 +149,10 @@ services:
     depends_on:
       - backend
     logging: *logging
+    networks:
+      edge:
+      proxy_internal:
+        ipv4_address: ${PAIM_CADDY_PROXY_IP:?PAIM_CADDY_PROXY_IP is required}
 
 volumes:
   mysql_data:
@@ -131,3 +160,14 @@ volumes:
   upload_data:
   caddy_data:
   caddy_config:
+
+networks:
+  edge:
+  proxy_internal:
+    # backend의 외부 LLM/GitHub 호출 egress는 이 네트워크의 NAT를 사용한다.
+    # 호스트 포트는 Caddy에만 있으므로 backend가 직접 노출되지는 않는다.
+    ipam:
+      config:
+        - subnet: ${PAIM_PROXY_SUBNET:?PAIM_PROXY_SUBNET is required}
+  data_internal:
+    internal: true

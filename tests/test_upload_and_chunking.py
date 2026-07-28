@@ -146,6 +146,23 @@ def _conn_seq(old_doc_ids=(), new_doc_id=99):
     ]
 
 
+def _reservation():
+    return {
+        "reservation_id": "reservation-1",
+        "temp_path": "/tmp/upload.tmp",
+        "target_path": "/tmp/upload.txt",
+    }
+
+
+def _finalized(old_doc_ids=()):
+    return {
+        "doc_id": 99,
+        "old_doc_ids": list(old_doc_ids),
+        "file_path": "/tmp/upload.txt",
+        "processing_token": "processing-token",
+    }
+
+
 def test_document_status_includes_progress_fields():
     """status 응답은 진행률 컬럼을 그대로 내려준다."""
     from backend.api.upload import get_document_status
@@ -164,54 +181,49 @@ def test_document_status_includes_progress_fields():
 
 
 def test_extract_failure_sets_failed_status():
-    """extract 실패 시 응답은 processing, old doc 삭제 없음, 파일 삭제됨."""
-    with patch("backend.api.upload.get_connection", side_effect=_conn_seq((42,))), \
-         patch("backend.api.upload.save_file", return_value="data/1/test.md"), \
-         patch("backend.api.upload.delete_file") as mock_del_file, \
+    """extract 실패 시 durable cleanup으로 전환하고 안전한 code만 저장한다."""
+    with patch("backend.api.upload.require_upload_user", return_value=1), \
+         patch("backend.api.upload.reserve_document", return_value=_reservation()), \
+         patch("backend.api.upload.write_reserved_file"), \
+         patch("backend.api.upload.finalize_document", return_value=_finalized((42,))), \
+         patch("backend.api.upload.processing_owned", return_value=True), \
          patch("backend.api.upload.extract", side_effect=ValueError("LLM error")), \
-         patch("backend.api.upload._delete_document") as mock_del, \
-         patch("backend.api.upload._set_doc_status") as mock_status:
+         patch("backend.api.upload.fail_document") as fail_document:
 
         resp = _client.post(_URL, files={"file": _FILE}, data=_DATA)
 
         assert resp.status_code == 201
         assert resp.json()["status"] == "processing"
-        mock_del.assert_not_called()
-        mock_del_file.assert_called_once_with("data/1/test.md")
-        mock_status.assert_called_once_with(99, "failed", last_error=ANY)
+        fail_document.assert_called_once_with(99, "UPLOAD_EXTRACT_FAILED")
 
 
 def test_ingest_failure_sets_failed_status():
-    """ingest 실패 시 응답은 processing, doc row 유지(status=failed), memory/파일/벡터 정리됨."""
-    with patch("backend.api.upload.get_connection", side_effect=_conn_seq((42,), 99)), \
-         patch("backend.api.upload.save_file", return_value="data/1/test.md"), \
-         patch("backend.api.upload.delete_file") as mock_del_file, \
+    """ingest 실패 시 document accounting을 durable cleanup으로 넘긴다."""
+    with patch("backend.api.upload.require_upload_user", return_value=1), \
+         patch("backend.api.upload.reserve_document", return_value=_reservation()), \
+         patch("backend.api.upload.write_reserved_file"), \
+         patch("backend.api.upload.finalize_document", return_value=_finalized((42,))), \
+         patch("backend.api.upload.processing_owned", return_value=True), \
          patch("backend.api.upload.extract", return_value=[]), \
          patch("backend.api.upload.ingest", side_effect=RuntimeError("DB error")), \
-         patch("backend.api.upload._delete_doc_memory") as mock_del_mem, \
-         patch("backend.api.upload._delete_chroma_vectors") as mock_del_chroma, \
-         patch("backend.api.upload._delete_document") as mock_del, \
-         patch("backend.api.upload._set_doc_status") as mock_status:
+         patch("backend.api.upload.fail_document") as fail_document:
 
         resp = _client.post(_URL, files={"file": _FILE}, data=_DATA)
 
         assert resp.status_code == 201
         assert resp.json()["status"] == "processing"
-        mock_del.assert_not_called()
-        mock_del_mem.assert_called_once_with(99)
-        mock_del_file.assert_called_once_with("data/1/test.md")
-        mock_del_chroma.assert_called_once_with(99)
-        mock_status.assert_called_once_with(99, "failed", last_error=ANY)
+        fail_document.assert_called_once_with(99, "UPLOAD_INGEST_FAILED")
 
 
 def test_success_cleans_up_all_old_docs():
     """성공 후 old doc_ids 전체 삭제, 요약 갱신은 마지막에 한 번만 수행."""
-    with patch("backend.api.upload.get_connection", side_effect=_conn_seq((10, 11), 99)), \
-         patch("backend.api.upload.save_file", return_value="data/1/test.md"), \
-         patch("backend.api.upload.delete_file"), \
+    with patch("backend.api.upload.require_upload_user", return_value=1), \
+         patch("backend.api.upload.reserve_document", return_value=_reservation()), \
+         patch("backend.api.upload.write_reserved_file"), \
+         patch("backend.api.upload.finalize_document", return_value=_finalized((10, 11))), \
+         patch("backend.api.upload.processing_owned", return_value=True), \
          patch("backend.api.upload.extract", return_value=[]), \
          patch("backend.api.upload.ingest"), \
-         patch("backend.api.upload._set_doc_status"), \
          patch("backend.api.upload._delete_document") as mock_del, \
          patch("backend.api.upload.refresh_project_memory_after_delete") as mock_refresh:
 
@@ -227,12 +239,13 @@ def test_success_cleans_up_all_old_docs():
 
 def test_no_old_doc_skips_cleanup():
     """기존 문서 없으면 _delete_document 호출 없음."""
-    with patch("backend.api.upload.get_connection", side_effect=_conn_seq((), 99)), \
-         patch("backend.api.upload.save_file", return_value="data/1/test.md"), \
-         patch("backend.api.upload.delete_file"), \
+    with patch("backend.api.upload.require_upload_user", return_value=1), \
+         patch("backend.api.upload.reserve_document", return_value=_reservation()), \
+         patch("backend.api.upload.write_reserved_file"), \
+         patch("backend.api.upload.finalize_document", return_value=_finalized()), \
+         patch("backend.api.upload.processing_owned", return_value=True), \
          patch("backend.api.upload.extract", return_value=[]), \
          patch("backend.api.upload.ingest"), \
-         patch("backend.api.upload._set_doc_status"), \
          patch("backend.api.upload._delete_document") as mock_del:
 
         resp = _client.post(_URL, files={"file": _FILE}, data=_DATA)
@@ -244,15 +257,11 @@ def test_no_old_doc_skips_cleanup():
 
 def test_upload_preserves_folder_relative_filename():
     """폴더 업로드 파일은 basename이 아니라 상대경로로 중복 판정한다."""
-    conns = _conn_seq((), 99)
-    first_cursor = conns[0].cursor.return_value.__enter__()
-    with patch("backend.api.upload.get_connection", side_effect=conns), \
-         patch("backend.api.upload.save_file", return_value="data/1/docs/README.md") as mock_save, \
-         patch("backend.api.upload.delete_file"), \
-         patch("backend.api.upload.extract", return_value=[]), \
-         patch("backend.api.upload.ingest"), \
-         patch("backend.api.upload._set_doc_status"), \
-         patch("backend.api.upload._delete_document"):
+    with patch("backend.api.upload.require_upload_user", return_value=1), \
+         patch("backend.api.upload.reserve_document", return_value=_reservation()) as reserve, \
+         patch("backend.api.upload.write_reserved_file"), \
+         patch("backend.api.upload.finalize_document", return_value=_finalized()) as finalize, \
+         patch("backend.api.upload._process_upload"):
 
         resp = _client.post(
             _URL,
@@ -261,5 +270,5 @@ def test_upload_preserves_folder_relative_filename():
         )
 
         assert resp.status_code == 201
-        assert mock_save.call_args.args[1] == "docs/README.md"
-        assert any(call.args[1] == (1, "docs/README.md") for call in first_cursor.execute.call_args_list)
+        assert reserve.call_args.kwargs["filename"] == "docs/README.md"
+        assert finalize.call_args.args[1] == "docs/README.md"

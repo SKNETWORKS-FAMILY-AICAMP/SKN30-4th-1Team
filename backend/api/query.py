@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import binascii
 import logging
@@ -5,9 +6,17 @@ import os
 from pathlib import Path
 from typing import List, Dict
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from ..db.mysql import get_connection
+from ..document_content import (
+    ALLOWED_SUFFIXES,
+    QUERY_ATTACHMENT_MAX_FILE_BYTES,
+    QUERY_ATTACHMENT_MAX_TOTAL_BYTES,
+    DocumentContentError,
+    supported_formats_label,
+    validate_document_bytes,
+)
 from ..pipeline.extractor import extract
 from ..pipeline.ingestor import ingest
 from ..graph import update_project_memory, run_qa
@@ -19,9 +28,18 @@ from ..retriever.query_intent import (
     answer_overview,
     classify_question,
 )
-from ..pipeline.converters import ConversionError, convert, supported_suffixes
-from .upload import _MAX_FILE_BYTES, _delete_document
+from ..pipeline.converters import ConversionError, ErrorCode, convert
 from .auth import require_project_access
+from ..rate_limit import RATE_LIMIT_QUERY, authenticated_user_key, limiter
+from ..quota import (
+    cleanup_failed_reservation,
+    compensate_cancelled_document,
+    delete_document as quota_delete_document,
+    fail_document,
+    finalize_document,
+    require_upload_user,
+    reserve_document,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -55,14 +73,14 @@ def _prepare_attachment_context(attachments: List[QueryAttachment]) -> tuple[str
     sections = []
     sources: List[str] = []
     used_chars = 0
+    used_bytes = 0
 
     for attachment in attachments:
         filename = Path(attachment.filename).name
-        if Path(filename).suffix.lower() not in supported_suffixes():
+        if Path(filename).suffix.lower() not in ALLOWED_SUFFIXES:
             raise HTTPException(
                 status_code=400,
-                detail="지원하지 않는 첨부 파일 형식입니다. ("
-                       + " / ".join(sorted(supported_suffixes())) + ")",
+                detail=f"지원하지 않는 첨부 파일 형식입니다. ({supported_formats_label()})",
             )
 
         try:
@@ -70,18 +88,39 @@ def _prepare_attachment_context(attachments: List[QueryAttachment]) -> tuple[str
         except (binascii.Error, ValueError):
             raise HTTPException(status_code=400, detail="첨부 파일을 읽을 수 없습니다.")
 
-        if len(data) > _MAX_FILE_BYTES:
-            raise HTTPException(status_code=413, detail="첨부 파일 크기는 10 MB를 초과할 수 없습니다.")
+        if len(data) > QUERY_ATTACHMENT_MAX_FILE_BYTES:
+            raise HTTPException(status_code=413, detail="첨부 파일 크기가 허용 한도를 초과했습니다.")
+        used_bytes += len(data)
+        if used_bytes > QUERY_ATTACHMENT_MAX_TOTAL_BYTES:
+            raise HTTPException(status_code=413, detail="전체 첨부 파일 크기가 허용 한도를 초과했습니다.")
 
         remaining = _ATTACHMENT_MAX_CHARS_TOTAL - used_chars
         if remaining <= 0:
-            break
+            continue
 
-        # 첨부 변환 실패는 질의 전체를 막지 않는다 — 나머지 첨부와 프로젝트 기억만으로도
+        # 안전성 검증 실패(MIME·인코딩·제어문자)는 질의를 중단시킨다 — 415.
+        # 관대한 정책은 "검증을 통과한 파일의 변환 실패"에만 적용된다. 모든 실패를
+        # 삼키면 main의 입력 경계 계약이 무력화된다.
+        try:
+            validate_document_bytes(filename, data)
+        except DocumentContentError as exc:
+            raise HTTPException(
+                status_code=415,
+                detail={"code": exc.code, "message": exc.message},
+            ) from exc
+
+        # 변환 실패는 질의 전체를 막지 않는다 — 나머지 첨부와 프로젝트 기억만으로도
         # 답할 수 있어야 하므로, 실패 사유를 본문에 남기고 계속 진행한다.
         try:
             text = convert(filename, data).text.strip()
         except ConversionError as exc:
+            # 추출 내용의 입력 경계 위반은 변환 실패가 아니라 검증 실패다.
+            # 관대한 placeholder 정책 대상이 아니며 415로 중단한다.
+            if exc.code == ErrorCode.INVALID_CONTENT:
+                raise HTTPException(
+                    status_code=415,
+                    detail={"code": exc.code, "message": exc.message},
+                ) from exc
             logger.info("첨부 변환 실패 filename=%s code=%s", filename, exc.code)
             text = ""
         text = text or "(텍스트를 추출할 수 없습니다.)"
@@ -99,7 +138,8 @@ def _prepare_attachment_context(attachments: List[QueryAttachment]) -> tuple[str
 
 
 @router.post("/projects/{project_id}/query")
-def query(project_id: int, body: QueryRequest):
+@limiter.limit(RATE_LIMIT_QUERY, key_func=authenticated_user_key)
+def query(request: Request, project_id: int, body: QueryRequest):
     require_project_access(project_id)
     attachment_context, attachment_sources = _prepare_attachment_context(body.attachments)
     conn = get_connection()
@@ -138,9 +178,8 @@ def query(project_id: int, body: QueryRequest):
                 # model. Keep the endpoint useful and ground the fallback in the
                 # existing hybrid semantic retriever rather than the brittle router.
                 logger.warning(
-                    "agentic Q&A 실패, semantic RAG로 폴백: project_id=%s",
-                    project_id,
-                    exc_info=True,
+                    "agentic_qa_fallback",
+                    extra={"project_id": project_id, "code": "AGENTIC_QA_FALLBACK"},
                 )
                 result = run_qa(
                     project_id=project_id,
@@ -179,8 +218,8 @@ def query(project_id: int, body: QueryRequest):
         debug["router_model_tier"] = "fast" if decision.router_stage == "llm" else None
         result["debug"] = debug
         return result
-    except Exception as e:
-        logger.error("Q&A 처리 오류: %s", e, exc_info=True)
+    except Exception:
+        logger.error("qa_request_failed", extra={"project_id": project_id, "code": "QA_FAILED"})
         raise HTTPException(status_code=503, detail="Q&A 처리 중 오류가 발생했습니다. 서버 로그를 확인하세요.")
 
 
@@ -193,24 +232,20 @@ class GitLogUpload(BaseModel):
 @router.post("/projects/{project_id}/git", status_code=201)
 def upload_git_log(project_id: int, body: GitLogUpload):
     # 동기 처리 — documents.status 추적 없음. 향후 /documents 엔드포인트로 통합 예정
-    require_project_access(project_id, min_role="member")
     if not body.content.strip():
         raise HTTPException(status_code=400, detail="content must not be empty")
 
-    conn = get_connection()
+    user_id = require_upload_user()
+    require_project_access(project_id, min_role="member")
+    reservation = reserve_document(
+        project_id, user_id, len(body.content.encode("utf-8")), "virtual"
+    )
     try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT id FROM projects WHERE id = %s", (project_id,))
-            if not cursor.fetchone():
-                raise HTTPException(status_code=404, detail="Project not found")
-            cursor.execute(
-                "INSERT INTO documents (project_id, filename, doc_type) VALUES (%s, %s, %s)",
-                (project_id, "git_log.txt", "git"),
-            )
-            doc_id = cursor.lastrowid
-        conn.commit()
-    finally:
-        conn.close()
+        finalized = finalize_document(reservation["reservation_id"], "git_log.txt", "git")
+    except BaseException:
+        cleanup_failed_reservation(reservation["reservation_id"])
+        raise
+    doc_id = finalized["doc_id"]
 
     try:
         items = extract(body.content, default_source=body.source)
@@ -222,10 +257,18 @@ def upload_git_log(project_id: int, body: GitLogUpload):
             source=body.source,
             date=body.date,
             doc_type="git",
+            processing_token=finalized["processing_token"],
         )
-    except Exception:
-        _delete_document(doc_id)
+    except asyncio.CancelledError:
+        compensate_cancelled_document(doc_id)
         raise
+    except Exception:
+        logger.error("git_ingest_failed", extra={"project_id": project_id, "code": "GIT_INGEST_FAILED"})
+        fail_document(doc_id, "GIT_INGEST_FAILED")
+        raise HTTPException(status_code=503, detail="Git 로그 처리 중 오류가 발생했습니다.")
+
+    for old_doc_id in finalized["old_doc_ids"]:
+        quota_delete_document(old_doc_id)
 
     # 프로젝트 메모리 갱신 (best-effort — 요약 실패해도 업로드는 성공 처리)
     try:
@@ -233,7 +276,8 @@ def upload_git_log(project_id: int, body: GitLogUpload):
     except Exception:
         import logging
         logging.getLogger(__name__).warning(
-            "프로젝트 메모리 갱신 실패 (git 업로드는 성공): project_id=%s", project_id, exc_info=True
+            "git_project_memory_update_failed",
+            extra={"project_id": project_id, "code": "PROJECT_MEMORY_UPDATE_FAILED"},
         )
 
     counts = {"decision": 0, "action": 0, "issue": 0, "risk": 0}

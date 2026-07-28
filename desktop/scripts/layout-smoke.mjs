@@ -84,6 +84,7 @@ function createPaimApiMockScript() {
       window.__paimLayoutApiCalls = [];
       window.__paimLayoutApiRequests = [];
       const originalFetch = window.fetch.bind(window);
+      const serverDocumentsByProject = new Map();
       const serverSessionsByProject = new Map();
       let includeSupersedingDecision = false;
       let pendingMemorySuggestions = [];
@@ -102,6 +103,13 @@ function createPaimApiMockScript() {
         sessionRequested: 0,
         sessionResolved: 0,
       };
+      const documentControl = {
+        delayMs: 0,
+        deleted: 0,
+        lastFile: null,
+        requested: 0,
+        resolved: 0,
+      };
       const smokeUser = ${JSON.stringify(SMOKE_USER)};
       const smokeAuthSession = ${JSON.stringify(AUTH_SESSION)};
       const smokeAccessToken = ${JSON.stringify(SMOKE_ACCESS_TOKEN)};
@@ -116,6 +124,7 @@ function createPaimApiMockScript() {
           JSON.stringify(smokeAuthSession),
         );
       }
+      let nextDocumentId = 7000;
       let nextProjectId = 1000;
       let nextSessionId = 1000;
 
@@ -155,6 +164,23 @@ function createPaimApiMockScript() {
         creationControl.sessionResolved = 0;
       };
       window.__paimLayoutReadCreationControl = () => ({ ...creationControl });
+      window.__paimLayoutConfigureDocument = ({ delayMs = 0 } = {}) => {
+        documentControl.delayMs = Math.max(0, Number(delayMs) || 0);
+        documentControl.deleted = 0;
+        documentControl.lastFile = null;
+        documentControl.requested = 0;
+        documentControl.resolved = 0;
+        nextDocumentId = 7000;
+        serverDocumentsByProject.clear();
+      };
+      window.__paimLayoutReadDocumentControl = () => ({
+        ...documentControl,
+        lastFile: documentControl.lastFile ? { ...documentControl.lastFile } : null,
+        serverDocumentCount: Array.from(serverDocumentsByProject.values()).reduce(
+          (count, documents) => count + documents.length,
+          0,
+        ),
+      });
 
       const json = (payload, status = 200) =>
         Promise.resolve(new Response(JSON.stringify(payload), {
@@ -250,6 +276,21 @@ function createPaimApiMockScript() {
             return json({ detail: "세션이 만료되었습니다." }, 401);
           }
           return json(smokeUser);
+        }
+
+        if (url.pathname === "/api/v1/capabilities" && method === "GET") {
+          return json({
+            schema_version: 1,
+            project_documents: {
+              extensions: ["docx", "md", "pdf", "txt"],
+              max_file_bytes: 10 * 1024 * 1024,
+            },
+            query_attachments: {
+              extensions: ["docx", "md", "pdf", "txt"],
+              max_file_bytes: 8 * 1024 * 1024,
+              max_total_bytes: 8 * 1024 * 1024,
+            },
+          });
         }
 
         if (url.pathname === "/api/v1/projects") {
@@ -485,8 +526,75 @@ function createPaimApiMockScript() {
           return empty();
         }
 
-        if (/^\\/api\\/v1\\/projects\\/\\d+\\/documents$/.test(url.pathname)) {
-          return json([]);
+        const projectDocumentsMatch = url.pathname.match(
+          /^\\/api\\/v1\\/projects\\/(\\d+)\\/documents$/,
+        );
+        if (projectDocumentsMatch && method === "GET") {
+          return json(serverDocumentsByProject.get(Number(projectDocumentsMatch[1])) || []);
+        }
+
+        if (projectDocumentsMatch && method === "POST") {
+          const projectId = Number(projectDocumentsMatch[1]);
+          const file = init?.body instanceof FormData ? init.body.get("file") : null;
+          const docId = nextDocumentId;
+          nextDocumentId += 1;
+          documentControl.requested += 1;
+          documentControl.lastFile = file instanceof File
+            ? { name: file.name, size: file.size, type: file.type }
+            : null;
+
+          if (documentControl.delayMs > 0) {
+            await new Promise((resolve) => window.setTimeout(resolve, documentControl.delayMs));
+          }
+
+          const document = {
+            id: docId,
+            filename: file instanceof File ? file.name : "drop.pdf",
+            doc_type: "pdf",
+            status: "indexed",
+            uploaded_at: "2026-01-01T00:00:00.000Z",
+          };
+          serverDocumentsByProject.set(projectId, [
+            ...(serverDocumentsByProject.get(projectId) || []),
+            document,
+          ]);
+          documentControl.resolved += 1;
+          return json({
+            doc_id: docId,
+            status: "indexed",
+            format: "pdf",
+            blocks: 1,
+            pages: 1,
+            warnings: [],
+          }, 201);
+        }
+
+        const projectDocumentStatusMatch = url.pathname.match(
+          /^\\/api\\/v1\\/projects\\/(\\d+)\\/documents\\/(\\d+)\\/status$/,
+        );
+        if (projectDocumentStatusMatch && method === "GET") {
+          return json({
+            doc_id: Number(projectDocumentStatusMatch[2]),
+            status: "indexed",
+            blocks: 1,
+            error_message: null,
+          });
+        }
+
+        const projectDocumentMatch = url.pathname.match(
+          /^\\/api\\/v1\\/projects\\/(\\d+)\\/documents\\/(\\d+)$/,
+        );
+        if (projectDocumentMatch && method === "DELETE") {
+          const projectId = Number(projectDocumentMatch[1]);
+          const docId = Number(projectDocumentMatch[2]);
+          serverDocumentsByProject.set(
+            projectId,
+            (serverDocumentsByProject.get(projectId) || []).filter(
+              (document) => document.id !== docId,
+            ),
+          );
+          documentControl.deleted += 1;
+          return empty();
         }
 
         if (/^\\/api\\/v1\\/projects\\/\\d+\\/repositories$/.test(url.pathname)) {
@@ -513,6 +621,113 @@ function createPaimApiMockScript() {
 async function installPaimApiMock(send) {
   await send("Page.addScriptToEvaluateOnNewDocument", {
     source: createPaimApiMockScript(),
+  });
+}
+
+// 실제 Tauri 창 없이도 해당 문서에서만 native file-drop 이벤트와 파일 IPC를 재현한다.
+function createPaimTauriMockScript() {
+  return `
+    (() => {
+      if (window.__paimLayoutTauriMockInstalled) {
+        return;
+      }
+
+      window.__paimLayoutTauriMockInstalled = true;
+      const callbacks = new Map();
+      const listeners = new Map();
+      let nextCallbackId = 1;
+      let nextEventId = 1;
+
+      const unregisterCallback = (callbackId) => {
+        callbacks.delete(callbackId);
+      };
+      const transformCallback = (callback, once = false) => {
+        const callbackId = nextCallbackId;
+        nextCallbackId += 1;
+        callbacks.set(callbackId, (payload) => {
+          if (once) {
+            callbacks.delete(callbackId);
+          }
+          return callback?.(payload);
+        });
+        return callbackId;
+      };
+      const unregisterListener = (event, eventId) => {
+        const eventListeners = listeners.get(event) || [];
+        const listener = eventListeners.find((candidate) => candidate.eventId === eventId);
+        if (listener) {
+          unregisterCallback(listener.callbackId);
+        }
+        listeners.set(
+          event,
+          eventListeners.filter((candidate) => candidate.eventId !== eventId),
+        );
+      };
+
+      window.__TAURI_INTERNALS__ = {
+        callbacks,
+        convertFileSrc: (path) => "asset://localhost/" + encodeURIComponent(path),
+        metadata: {
+          currentWindow: { label: "main" },
+          currentWebview: { label: "main", windowLabel: "main" },
+        },
+        transformCallback,
+        unregisterCallback,
+        invoke: async (cmd, args = {}) => {
+          if (cmd === "plugin:event|listen") {
+            const eventId = nextEventId;
+            nextEventId += 1;
+            listeners.set(args.event, [
+              ...(listeners.get(args.event) || []),
+              { callbackId: args.handler, eventId },
+            ]);
+            return eventId;
+          }
+          if (cmd === "plugin:event|unlisten") {
+            unregisterListener(args.event, args.eventId);
+            return null;
+          }
+          if (cmd === "plugin:event|emit") {
+            window.__paimLayoutEmitTauriEvent?.(args.event, args.payload);
+            return null;
+          }
+          if (cmd === "path_kind") {
+            return "file";
+          }
+          if (cmd === "read_file_base64") {
+            return "JVBERi0xLjQK";
+          }
+          if (cmd === "read_directory_children") {
+            return [];
+          }
+          if (cmd === "plugin:app|version") {
+            return "1.0.3";
+          }
+          return null;
+        },
+      };
+      window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener };
+      window.__paimLayoutEmitTauriEvent = (event, payload) => {
+        const eventListeners = [...(listeners.get(event) || [])];
+        for (const listener of eventListeners) {
+          callbacks.get(listener.callbackId)?.({
+            event,
+            id: listener.eventId,
+            payload,
+          });
+        }
+        return eventListeners.length;
+      };
+      window.__paimLayoutReadTauriMock = () => ({
+        dragDropListeners: (listeners.get("tauri://drag-drop") || []).length,
+      });
+    })();
+  `;
+}
+
+async function installPaimTauriMock(send) {
+  return send("Page.addScriptToEvaluateOnNewDocument", {
+    source: createPaimTauriMockScript(),
   });
 }
 
@@ -675,6 +890,26 @@ async function readProjectMemberPermissionSnapshot(send) {
         !request.call.includes('/api/v1/auth/login') &&
         !request.call.includes('/api/v1/auth/signup')
       );
+      const rect = (element) => {
+        if (!element) return null;
+        const box = element.getBoundingClientRect();
+        return {
+          bottom: box.bottom,
+          height: box.height,
+          left: box.left,
+          right: box.right,
+          top: box.top,
+          width: box.width,
+        };
+      };
+      const membersPage = document.querySelector('.members-page');
+      const membersHeader = document.querySelector('.members-page-header');
+      const membersBackButton = membersHeader?.querySelector('.settings-back-button');
+      const membersHeadingCopy = membersHeader?.querySelector('.settings-header-copy');
+      const membersHeading = membersHeader?.querySelector('h1');
+      const closedHeaderPopovers = Array.from(
+        membersHeader?.querySelectorAll('[popover]:not(:popover-open)') || [],
+      );
       return {
         addForm: Boolean(document.querySelector('.project-members-add-form')),
         permissionNote: Boolean(document.querySelector('.project-members-permission-note')),
@@ -682,6 +917,26 @@ async function readProjectMemberPermissionSnapshot(send) {
         roleSelects: document.querySelectorAll('.project-members-role-select').length,
         roles: Array.from(document.querySelectorAll('.project-members-role[data-role]'))
           .map((element) => element.getAttribute('data-role')),
+        memberHeader: {
+          backButton: rect(membersBackButton),
+          closedPopoverCount: closedHeaderPopovers.length,
+          closedPopoverLeakCount: closedHeaderPopovers.filter((popover) => {
+            const box = popover.getBoundingClientRect();
+            return getComputedStyle(popover).display !== 'none' ||
+              box.width > 0 ||
+              box.height > 0;
+          }).length,
+          documentScrollWidth: document.documentElement.scrollWidth,
+          header: rect(membersHeader),
+          heading: rect(membersHeading),
+          headingCopy: rect(membersHeadingCopy),
+          headingFocused: document.activeElement === membersHeading,
+          innerWidth: window.innerWidth,
+          pageClientWidth: membersPage?.clientWidth ?? 0,
+          pageOverflowX: membersPage ? getComputedStyle(membersPage).overflowX : '',
+          pageOverflowY: membersPage ? getComputedStyle(membersPage).overflowY : '',
+          pageScrollWidth: membersPage?.scrollWidth ?? 0,
+        },
         authMeBearer: requests.some((request) =>
           request.call === 'GET /api/v1/auth/me' &&
           request.authorization === ${JSON.stringify(`Bearer ${SMOKE_ACCESS_TOKEN}`)}
@@ -805,6 +1060,27 @@ async function verifyAuthAndMemberPermissions(send) {
       !value.owner?.roles.includes("owner") ||
       !value.owner?.roles.includes("member")) {
     failures.push("project Owner should be able to add, update, and remove members");
+  }
+  const ownerHeader = value.owner?.memberHeader;
+  if (!ownerHeader?.header ||
+      !ownerHeader?.backButton ||
+      !ownerHeader?.heading ||
+      !ownerHeader?.headingCopy ||
+      ownerHeader.closedPopoverCount < 1 ||
+      ownerHeader.closedPopoverLeakCount !== 0 ||
+      ownerHeader.pageOverflowX !== "hidden" ||
+      ownerHeader.pageOverflowY !== "auto" ||
+      ownerHeader.pageScrollWidth > ownerHeader.pageClientWidth + 1 ||
+      ownerHeader.documentScrollWidth > ownerHeader.innerWidth ||
+      !ownerHeader.headingFocused ||
+      Math.abs(ownerHeader.backButton.left - ownerHeader.header.left) > 0.5 ||
+      ownerHeader.heading.left < ownerHeader.backButton.right + 7 ||
+      ownerHeader.heading.width >= ownerHeader.headingCopy.width - 16 ||
+      Math.abs(
+        ownerHeader.backButton.top + ownerHeader.backButton.height / 2 -
+        (ownerHeader.headingCopy.top + ownerHeader.headingCopy.height / 2)
+      ) > 2) {
+    failures.push("member management should share the non-overlapping page header layout");
   }
   if (value.member?.addForm ||
       !value.member?.permissionNote ||
@@ -2129,6 +2405,112 @@ async function measureScenario(send, scenario) {
   return { scenario, value, failures };
 }
 
+// 앱 확대/축소는 100% 아래에서도 5% 단위로 움직이고 양 끝에서 안정적으로 멈춘다.
+async function verifyZoomShortcutGranularity(send) {
+  await send("Emulation.setDeviceMetricsOverride", {
+    width: 1280,
+    height: 820,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await setAuthScenario(send, "owner");
+  await send("Runtime.evaluate", {
+    expression: `localStorage.removeItem(${JSON.stringify(ZOOM_STORAGE_KEY)})`,
+  });
+  await openAppWithProject(send);
+  await sleep(180);
+
+  const result = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const readZoom = () => ({
+        mode: document.documentElement.dataset.pageZoomMode || '',
+        rendered: document.documentElement.style
+          .getPropertyValue('--page-zoom-render-scale')
+          .trim(),
+        stored: localStorage.getItem(${JSON.stringify(ZOOM_STORAGE_KEY)}),
+      });
+      const pressZoomKey = (key) => {
+        const event = new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          ctrlKey: true,
+          key,
+          metaKey: true,
+        });
+        window.dispatchEvent(event);
+        return event.defaultPrevented;
+      };
+
+      const initial = readZoom();
+      const firstOutPrevented = pressZoomKey('-');
+      const firstOut = readZoom();
+
+      for (let index = 0; index < 20; index += 1) {
+        pressZoomKey('-');
+      }
+      const minimum = readZoom();
+      const minimumClampPrevented = pressZoomKey('-');
+      const clampedMinimum = readZoom();
+
+      const firstInPrevented = pressZoomKey('=');
+      const firstIn = readZoom();
+      const resetPrevented = pressZoomKey('0');
+      const reset = readZoom();
+
+      return {
+        clampedMinimum,
+        firstIn,
+        firstInPrevented,
+        firstOut,
+        firstOutPrevented,
+        initial,
+        minimum,
+        minimumClampPrevented,
+        reset,
+        resetPrevented,
+      };
+    })()`,
+  });
+  const value = result.result.value;
+  const failures = [];
+
+  if (value.initial.mode !== "css" ||
+      value.initial.stored !== "1" ||
+      value.initial.rendered !== "1") {
+    failures.push("zoom shortcut test should start at the 100% CSS fallback scale");
+  }
+
+  if (!value.firstOutPrevented ||
+      value.firstOut.stored !== "0.95" ||
+      value.firstOut.rendered !== "0.95") {
+    failures.push("Cmd/Ctrl+- should reduce zoom from 100% to 95%");
+  }
+
+  if (!value.minimumClampPrevented ||
+      value.minimum.stored !== "0.5" ||
+      value.minimum.rendered !== "0.5" ||
+      value.clampedMinimum.stored !== "0.5" ||
+      value.clampedMinimum.rendered !== "0.5") {
+    failures.push("zoom out should stop at the 50% minimum");
+  }
+
+  if (!value.firstInPrevented ||
+      value.firstIn.stored !== "0.55" ||
+      value.firstIn.rendered !== "0.55") {
+    failures.push("Cmd/Ctrl++ should increase zoom from 50% to 55%");
+  }
+
+  if (!value.resetPrevented ||
+      value.reset.stored !== "1" ||
+      value.reset.rendered !== "1") {
+    failures.push("Cmd/Ctrl+0 should restore the 100% default");
+  }
+
+  debugLayout("zoom shortcut granularity", value);
+  return { value, failures };
+}
+
 // 960px 창을 200%로 본 것과 같은 480 CSS px에서도 overlay가 rail과 viewport 안에 붙는다.
 async function verifyZoomedOverlayPanelBounds(send) {
   await send("Emulation.setDeviceMetricsOverride", {
@@ -2224,11 +2606,24 @@ async function verifyZoomedProjectHomeLayout(send) {
       const home = document.querySelector('.project-home');
       const content = document.querySelector('.project-home-content');
       const main = document.querySelector('.project-home-main');
+      const mainContent = document.querySelector('.project-home-main-content');
+      const steps = document.querySelector('.project-home-steps');
       const slots = document.querySelector('.project-home-slots');
       const slotList = document.querySelector('.project-home-slot-list');
       const actions = document.querySelector('.project-home-actions');
       const buttons = Array.from(actions?.querySelectorAll('button') || []);
-      if (!shell || !sidebar || !home || !content || !main || !slots || !slotList || !actions) {
+      if (
+        !shell ||
+        !sidebar ||
+        !home ||
+        !content ||
+        !main ||
+        !mainContent ||
+        !steps ||
+        !slots ||
+        !slotList ||
+        !actions
+      ) {
         return null;
       }
 
@@ -2236,6 +2631,14 @@ async function verifyZoomedProjectHomeLayout(send) {
       const homeBox = home.getBoundingClientRect();
       const contentBox = content.getBoundingClientRect();
       const mainBox = main.getBoundingClientRect();
+      const mainContentBox = mainContent.getBoundingClientRect();
+      const mainContentStyles = getComputedStyle(mainContent);
+      const mainContentLeft =
+        mainContentBox.left + Number.parseFloat(mainContentStyles.paddingLeft);
+      const mainContentRight =
+        mainContentBox.right - Number.parseFloat(mainContentStyles.paddingRight);
+      const mainContentWidth = mainContentRight - mainContentLeft;
+      const stepsBox = steps.getBoundingClientRect();
       const slotsBox = slots.getBoundingClientRect();
       const actionBoxes = buttons.map((button) => {
         const box = button.getBoundingClientRect();
@@ -2266,16 +2669,23 @@ async function verifyZoomedProjectHomeLayout(send) {
         homeScrollWidth: home.scrollWidth,
         innerWidth,
         mainBottom: mainBox.bottom,
+        projectStage: home.getAttribute('data-stage') || '',
         railWidth: sidebar.getBoundingClientRect().width,
         sidebarCollapsed: shell.getAttribute('data-sidebar-collapsed') || '',
         sidebarPanelDisplay: sidebarPanel ? getComputedStyle(sidebarPanel).display : '',
         slotColumns: getComputedStyle(slotList).gridTemplateColumns,
         slotCount: slotList.querySelectorAll('.project-home-slot').length,
+        slotValues: Array.from(slotList.querySelectorAll('.project-home-slot strong'))
+          .map((slot) => slot.textContent.trim()),
         slotsBorderLeft: Number.parseFloat(slotsStyles.borderLeftWidth),
         slotsBorderTop: Number.parseFloat(slotsStyles.borderTopWidth),
         slotsLeft: slotsBox.left,
         slotsRight: slotsBox.right,
         slotsTop: slotsBox.top,
+        stepsCenterDelta: Math.abs(
+          stepsBox.left - mainContentLeft - (mainContentRight - stepsBox.right),
+        ),
+        stepsWidthRatio: stepsBox.width / mainContentWidth,
       };
     })()`,
   });
@@ -2303,10 +2713,18 @@ async function verifyZoomedProjectHomeLayout(send) {
       value.slotsTop < value.mainBottom - 0.5 ||
       value.slotsLeft < value.contentLeft - 0.5 ||
       value.slotsRight > value.contentRight + 0.5 ||
-      value.slotsBorderLeft !== 0 ||
+      value.slotsBorderLeft < 0.5 ||
       value.slotsBorderTop < 0.5 ||
-      value.slotCount !== 4) {
-    failures.push("200% project home should stack the memory slots below the main setup content");
+      value.slotCount !== 4 ||
+      value.slotValues.join("|") !== "1|1|1|1" ||
+      value.projectStage !== "context") {
+    failures.push("200% project home should stack the project-memory summary below the setup content");
+  }
+
+  if (!value ||
+      Math.abs(value.stepsWidthRatio - 0.6) > 0.02 ||
+      value.stepsCenterDelta > 1) {
+    failures.push("project setup steps should stay centered at 60% of the available content width");
   }
 
   if (!value ||
@@ -2587,6 +3005,19 @@ async function verifySidebarBrandTypography(send) {
         const element = document.querySelector(selector);
         return element ? Number.parseFloat(getComputedStyle(element).fontSize) : null;
       };
+      const typography = (selector) => {
+        const element = document.querySelector(selector);
+        if (!element) {
+          return null;
+        }
+        const style = getComputedStyle(element);
+        return {
+          family: style.fontFamily,
+          size: style.fontSize,
+          weight: style.fontWeight,
+          lineHeight: style.lineHeight,
+        };
+      };
       const sidebar = box('.sidebar');
       const panel = box('.sidebar-panel');
       const sideNav = document.querySelector('.sidebar-panel');
@@ -2600,7 +3031,10 @@ async function verifySidebarBrandTypography(send) {
 
       return {
         rootFont: getComputedStyle(document.documentElement).fontFamily,
+        bodyFont: getComputedStyle(document.body).fontFamily,
         codeFont: getComputedStyle(document.documentElement).getPropertyValue('--code-font-family'),
+        startHeadingTypography: typography('.project-start-copy h1'),
+        startButtonTypography: typography('.project-start-button'),
         hasSidebarBrand: Boolean(document.querySelector('.sidebar-brand')),
         hasPrompt: Boolean(document.querySelector('.prompt')),
         hasMessage: Boolean(document.querySelector('.message')),
@@ -2639,8 +3073,26 @@ async function verifySidebarBrandTypography(send) {
   const value = result.result.value;
   const failures = [];
 
-  if (!/^\s*-apple-system\b/.test(value.rootFont)) {
-    failures.push(`the macOS system UI font should be the first configured app font: ${value.rootFont}`);
+  if (!/^\s*(?:"SUIT Variable"|SUIT Variable)(?:,|$)/.test(value.rootFont) ||
+      !/^\s*(?:"SUIT Variable"|SUIT Variable)(?:,|$)/.test(value.bodyFont)) {
+    failures.push(`SUIT should be the first configured app font: ${value.rootFont} / ${value.bodyFont}`);
+  }
+
+  if (!/^\s*(?:"SUITE Variable"|SUITE Variable)(?:,|$)/.test(
+    value.startHeadingTypography?.family || "",
+  )) {
+    failures.push(`SUITE should be the first configured heading font: ${value.startHeadingTypography?.family}`);
+  }
+
+  if (value.startButtonTypography?.size !== "14px" ||
+      value.startButtonTypography?.weight !== "500" ||
+      Math.abs(Number.parseFloat(value.startButtonTypography?.lineHeight || "0") - 20) > 0.1 ||
+      !/^\s*(?:"SUIT Variable"|SUIT Variable)(?:,|$)/.test(
+        value.startButtonTypography?.family || "",
+      )) {
+    failures.push(
+      `Astryx Button typography should remain 14/500/20 SUIT: ${JSON.stringify(value.startButtonTypography)}`,
+    );
   }
 
   if (!/^\s*["']?SFMono-Regular["']?\b/.test(value.codeFont)) {
@@ -2703,6 +3155,7 @@ async function verifySidebarBrandTypography(send) {
     expression: `document.querySelector('.project-start-button')?.click()`,
   });
   await waitForSelector(send, ".project-home");
+  await sleep(180);
   const afterStartResult = await send("Runtime.evaluate", {
     returnByValue: true,
     expression: `(() => {
@@ -2714,6 +3167,24 @@ async function verifySidebarBrandTypography(send) {
       const projectHomeActions = Array.from(
         document.querySelectorAll('.project-home-actions button'),
       );
+      const projectName = document.querySelector('.project-name');
+      const projectNameStyle = projectName ? getComputedStyle(projectName) : null;
+      const analysisButton = document.querySelector('.project-home-primary');
+      const analysisButtonStyle = analysisButton ? getComputedStyle(analysisButton) : null;
+      const projectHomeMainContent = document.querySelector('.project-home-main-content');
+      const projectHomeSteps = document.querySelector('.project-home-steps');
+      const projectHomeMainContentBox = projectHomeMainContent?.getBoundingClientRect();
+      const projectHomeMainContentStyle = projectHomeMainContent
+        ? getComputedStyle(projectHomeMainContent)
+        : null;
+      const projectHomeStepsBox = projectHomeSteps?.getBoundingClientRect();
+      const projectHomeInnerLeft =
+        (projectHomeMainContentBox?.left ?? 0) +
+        Number.parseFloat(projectHomeMainContentStyle?.paddingLeft || '0');
+      const projectHomeInnerRight =
+        (projectHomeMainContentBox?.right ?? 0) -
+        Number.parseFloat(projectHomeMainContentStyle?.paddingRight || '0');
+      const projectHomeInnerWidth = projectHomeInnerRight - projectHomeInnerLeft;
       return {
         projectCount: savedState.projects?.length ?? 0,
         activeProjectName: document.querySelector('.project-item[data-active="true"]')?.getAttribute('data-project-name') || "",
@@ -2726,6 +3197,9 @@ async function verifySidebarBrandTypography(send) {
         hasProjectHome: Boolean(document.querySelector('.project-home')),
         uploadText: document.querySelector('.project-home-canvas-empty')?.textContent.trim() || "",
         analysisDisabled: Boolean(document.querySelector('.project-home-primary')?.disabled),
+        analysisCursor: analysisButtonStyle?.cursor || "",
+        projectNameFontSize: projectNameStyle?.fontSize || "",
+        projectNameFontWeight: projectNameStyle?.fontWeight || "",
         panelMenuTexts: Array.from(document.querySelectorAll('.project-panel-menu button'))
           .map((button) => button.textContent.trim()),
         hasProjectOverview: Boolean(document.querySelector('.project-overview')),
@@ -2757,6 +3231,27 @@ async function verifySidebarBrandTypography(send) {
         projectHomePrimaryDescribedBy: document.querySelector(
           '.project-home-primary',
         )?.getAttribute('aria-describedby') || '',
+        projectHomeStage: document.querySelector('.project-home')?.getAttribute('data-stage') || '',
+        projectMemorySlotLabels: Array.from(
+          document.querySelectorAll('.project-home-slots .project-home-slot span'),
+        ).map((slot) => slot.textContent.trim()),
+        projectMemorySlotCounts: Array.from(
+          document.querySelectorAll('.project-home-slots .project-home-slot strong'),
+        ).map((slot) => slot.textContent.trim()),
+        projectMemorySummaryTitle: document.querySelector(
+          '.project-home-slots-title',
+        )?.textContent.trim() || '',
+        projectHomeStepsCenterDelta: projectHomeStepsBox
+          ? Math.abs(
+              projectHomeStepsBox.left -
+                projectHomeInnerLeft -
+                (projectHomeInnerRight - projectHomeStepsBox.right),
+            )
+          : null,
+        projectHomeStepsWidthRatio:
+          projectHomeStepsBox && projectHomeInnerWidth > 0
+            ? projectHomeStepsBox.width / projectHomeInnerWidth
+            : null,
       };
     })()`,
   });
@@ -2771,7 +3266,7 @@ async function verifySidebarBrandTypography(send) {
       value.afterStart.messageCount !== 0 ||
       value.afterStart.emptyTitle !== "" ||
       !value.afterStart.hasProjectHome ||
-      !value.afterStart.uploadText.includes("자료를 여기에 끌어다 놓으세요") ||
+      !value.afterStart.uploadText.includes("자료를 추가해 프로젝트 맥락을 만드세요") ||
       !value.afterStart.analysisDisabled ||
       value.afterStart.panelMenuTexts.some((text) => text.includes("메모리")) ||
       value.afterStart.hasProjectOverview ||
@@ -2780,16 +3275,30 @@ async function verifySidebarBrandTypography(send) {
       !value.afterStart.projectCreateText.includes("새 프로젝트") ||
       value.afterStart.sidebarCollapsed !== "false" ||
       value.afterStart.sidebarPanelWidth <= 0 ||
-      value.afterStart.sidebarCollapseButtonCount !== 1) {
+      value.afterStart.sidebarCollapseButtonCount !== 1 ||
+      value.afterStart.analysisCursor !== "not-allowed" ||
+      value.afterStart.projectNameFontSize !== "13px" ||
+      value.afterStart.projectNameFontWeight !== "500" ||
+      value.afterStart.projectHomeStage !== "context" ||
+      value.afterStart.projectMemorySummaryTitle !== "추출될 항목" ||
+      value.afterStart.projectMemorySlotLabels.join("|") !== "액션|결정|이슈|리스크" ||
+      value.afterStart.projectMemorySlotCounts.length !== 4) {
     failures.push("start project button should create the first project and enter project home");
   }
 
+  if (value.afterStart.projectHomeStepsWidthRatio === null ||
+      Math.abs(value.afterStart.projectHomeStepsWidthRatio - 0.6) > 0.02 ||
+      value.afterStart.projectHomeStepsCenterDelta === null ||
+      value.afterStart.projectHomeStepsCenterDelta > 1) {
+    failures.push("project setup steps should stay centered at 60% of the available content width");
+  }
+
   if (value.afterStart.projectHomeActionOrder.join('|') !== "분석 없이 채팅|분석 시작" ||
-      value.afterStart.projectHomeActionHeights.some((height) => height > 30) ||
+      value.afterStart.projectHomeActionHeights.some((height) => height < 36 || height > 42) ||
       value.afterStart.projectHomeActionSizes.some((size) => size !== "sm") ||
       value.afterStart.projectHomeActionVariants.join('|') !== "ghost|primary" ||
       value.afterStart.projectHomeActionFontWeights.some((weight) => Number(weight) > 600) ||
-      value.afterStart.projectHomeActionIconCount !== 0 ||
+      value.afterStart.projectHomeActionIconCount !== 1 ||
       !value.afterStart.projectHomeAnalysisNote.includes("설명이나 자료를 추가하면") ||
       value.afterStart.projectHomePrimaryDescribedBy !== "project-home-analysis-note") {
     failures.push("project home actions should keep a compact secondary-to-primary hierarchy");
@@ -2945,10 +3454,26 @@ async function verifyCopyFeedback(send) {
     returnByValue: true,
     expression: `(() => {
       const copiedButton = document.querySelector('.copy-button[data-copied="true"]');
+      const projectName = document.querySelector('.project-name');
+      const historyTitle = document.querySelector('.history-title');
+      const projectNameStyle = projectName ? getComputedStyle(projectName) : null;
+      const historyTitleStyle = historyTitle ? getComputedStyle(historyTitle) : null;
       return {
         hasCopiedState: Boolean(copiedButton),
         copiedLabel: copiedButton?.getAttribute('aria-label') || "",
         copiedText: window.__paimCopiedText || "",
+        projectNameTypography: projectNameStyle ? {
+          family: projectNameStyle.fontFamily,
+          size: projectNameStyle.fontSize,
+          weight: projectNameStyle.fontWeight,
+          lineHeight: projectNameStyle.lineHeight,
+        } : null,
+        historyTitleTypography: historyTitleStyle ? {
+          family: historyTitleStyle.fontFamily,
+          size: historyTitleStyle.fontSize,
+          weight: historyTitleStyle.fontWeight,
+          lineHeight: historyTitleStyle.lineHeight,
+        } : null,
       };
     })()`,
   });
@@ -2965,6 +3490,24 @@ async function verifyCopyFeedback(send) {
 
   if (!value.copiedText.includes("저장된 응답입니다.")) {
     failures.push("copy action should write the assistant response text");
+  }
+
+  if (value.projectNameTypography?.size !== "13px" ||
+      value.projectNameTypography?.weight !== "500" ||
+      value.historyTitleTypography?.size !== "13px" ||
+      value.historyTitleTypography?.weight !== "500" ||
+      !/^\s*(?:"SUIT Variable"|SUIT Variable)(?:,|$)/.test(
+        value.projectNameTypography?.family || "",
+      ) ||
+      !/^\s*(?:"SUIT Variable"|SUIT Variable)(?:,|$)/.test(
+        value.historyTitleTypography?.family || "",
+      )) {
+    failures.push(
+      `project and history labels should share 13/500 SUIT typography: ${JSON.stringify({
+        project: value.projectNameTypography,
+        history: value.historyTitleTypography,
+      })}`,
+    );
   }
 
   return { value, failures };
@@ -3395,7 +3938,7 @@ async function verifyProjectCreationFlow(send) {
   if (value.messageCount !== 0 ||
       value.emptyTitle !== "" ||
       !value.hasProjectHome ||
-      !value.uploadText.includes("자료를 여기에 끌어다 놓으세요") ||
+      !value.uploadText.includes("자료를 추가해 프로젝트 맥락을 만드세요") ||
       !value.analysisDisabled) {
     failures.push("new project should show the project home upload step");
   }
@@ -3427,6 +3970,504 @@ async function verifyProjectCreationFlow(send) {
     failures.push("project home name editing should cancel with Escape and commit with Enter");
   }
 
+  return { value, failures };
+}
+
+// 프로젝트 홈 native drop은 로컬 행만 남기지 않고 PDF를 서버 문서로 확정해야 한다.
+async function verifyProjectHomeDroppedPdfUpload(send) {
+  const seededProjectState = createProjectStorage(
+    "project-drop-upload",
+    "Drop Upload Project",
+    [],
+    null,
+    [],
+  );
+  const tauriMockScript = await installPaimTauriMock(send);
+  const value = {};
+  const failures = [];
+
+  try {
+    await send("Emulation.setDeviceMetricsOverride", {
+      width: 960,
+      height: 680,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+    await evaluateAndNavigateToSelector(
+      send,
+      `localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(SIDEBAR_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(SIDEBAR_WIDTH_STORAGE_KEY)}, '272'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_WIDTH_STORAGE_KEY)}, '360'); localStorage.removeItem(${JSON.stringify(PROJECT_COLLAPSED_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(seededProjectState)})`,
+      APP_URL,
+      ".project-home",
+    );
+
+    const readyResult = await send("Runtime.evaluate", {
+      awaitPromise: true,
+      returnByValue: true,
+      expression: `(async () => {
+        const timeoutAt = Date.now() + 5000;
+        while (Date.now() < timeoutAt) {
+          const listenerCount =
+            window.__paimLayoutReadTauriMock?.().dragDropListeners ?? 0;
+          if (listenerCount > 0) {
+            window.__paimLayoutConfigureDocument?.({ delayMs: 150 });
+            return { listenerCount, ready: true };
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        return {
+          listenerCount: window.__paimLayoutReadTauriMock?.().dragDropListeners ?? 0,
+          ready: false,
+        };
+      })()`,
+    });
+    value.nativeReady = readyResult.result.value;
+
+    const dropResult = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `(() => {
+        const canvas = document.querySelector('.project-home-canvas');
+        if (!canvas) {
+          return { emittedListeners: 0, foundCanvas: false };
+        }
+        const rect = canvas.getBoundingClientRect();
+        const scale = window.devicePixelRatio || 1;
+        const position = {
+          x: (rect.left + rect.width / 2) * scale,
+          y: (rect.top + rect.height / 2) * scale,
+        };
+        return {
+          emittedListeners: window.__paimLayoutEmitTauriEvent?.(
+            'tauri://drag-drop',
+            { paths: ['/mock/drop.pdf'], position },
+          ) ?? 0,
+          foundCanvas: true,
+        };
+      })()`,
+    });
+    value.drop = dropResult.result.value;
+
+    const uploadResult = await send("Runtime.evaluate", {
+      awaitPromise: true,
+      returnByValue: true,
+      expression: `(async () => {
+        const timeoutAt = Date.now() + 6000;
+        while (Date.now() < timeoutAt) {
+          const control = window.__paimLayoutReadDocumentControl?.();
+          const row = document.querySelector('.project-home-source-row');
+          if (
+            control?.resolved >= 1 &&
+            (row?.getAttribute('data-status') === 'indexed' || control.deleted > 0)
+          ) {
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+
+        const savedState = JSON.parse(
+          localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}',
+        );
+        const activeProject = savedState.projects?.find(
+          (project) => project.id === savedState.selectedProjectId,
+        );
+        const storedFile = activeProject?.files?.find(
+          (file) => file.name === 'drop.pdf',
+        );
+        const apiCalls = window.__paimLayoutApiCalls || [];
+        const summary = Object.fromEntries(
+          Array.from(document.querySelectorAll('.project-home-summary-item')).map(
+            (item) => [item.getAttribute('data-kind'), item.textContent.trim()],
+          ),
+        );
+        const row = document.querySelector('.project-home-source-row');
+
+        return {
+          apiProjectId: activeProject?.apiProjectId ?? null,
+          deleteCalls: apiCalls.filter(
+            (call) => /^DELETE \\/api\\/v1\\/projects\\/\\d+\\/documents\\/\\d+$/.test(call),
+          ),
+          documentControl: window.__paimLayoutReadDocumentControl?.() ?? null,
+          documentPostCalls: apiCalls.filter(
+            (call) => /^POST \\/api\\/v1\\/projects\\/\\d+\\/documents$/.test(call),
+          ),
+          projectPostCalls: apiCalls.filter(
+            (call) => call === 'POST /api/v1/projects',
+          ),
+          rowName: row?.querySelector('.project-home-source-name')?.textContent.trim() || '',
+          rowStatus: row?.getAttribute('data-status') || '',
+          rowStatusText:
+            row?.querySelector('.project-home-source-status')?.textContent.trim() || '',
+          storedFile: storedFile
+            ? {
+                docId: storedFile.docId ?? null,
+                documentStatus: storedFile.documentStatus ?? null,
+                name: storedFile.name,
+              }
+            : null,
+          summary,
+        };
+      })()`,
+    });
+    value.upload = uploadResult.result.value;
+
+    if (!value.nativeReady.ready ||
+        value.nativeReady.listenerCount !== 1 ||
+        !value.drop.foundCanvas ||
+        value.drop.emittedListeners !== 1) {
+      failures.push("project home should register exactly one native file-drop listener");
+    }
+
+    if (value.upload.projectPostCalls.length !== 1 ||
+        value.upload.documentPostCalls.length !== 1 ||
+        value.upload.apiProjectId !== 1000) {
+      failures.push("dropping a PDF should create its server project and upload one document");
+    }
+
+    const lastFile = value.upload.documentControl?.lastFile;
+    if (value.upload.documentControl?.requested !== 1 ||
+        value.upload.documentControl?.resolved !== 1 ||
+        !lastFile ||
+        lastFile.name !== "drop.pdf" ||
+        lastFile.type !== "application/octet-stream" ||
+        lastFile.size <= 0) {
+      failures.push("native PDF drop should send one non-empty generic binary multipart file");
+    }
+
+    if (value.upload.documentControl?.deleted !== 0 ||
+        value.upload.deleteCalls.length !== 0) {
+      failures.push("a completed native PDF drop must not issue a compensating document DELETE");
+    }
+
+    if (value.upload.storedFile?.name !== "drop.pdf" ||
+        value.upload.storedFile?.docId !== 7000 ||
+        value.upload.storedFile?.documentStatus !== "indexed" ||
+        value.upload.rowName !== "drop.pdf" ||
+        value.upload.rowStatus !== "indexed" ||
+        value.upload.rowStatusText !== "완료") {
+      failures.push("a dropped PDF should remain linked to its indexed server document");
+    }
+
+    if (value.upload.summary.ready !== "1개 완료" ||
+        value.upload.summary.processing !== "0개 처리 중" ||
+        value.upload.summary.failed !== "0개 실패") {
+      failures.push("project home should count the dropped PDF as one completed document");
+    }
+  } finally {
+    await send("Page.removeScriptToEvaluateOnNewDocument", {
+      identifier: tauriMockScript.identifier,
+    });
+    await navigateAndWaitForSelector(send, APP_URL, ".app-shell");
+    const cleanupResult = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `(() => ({
+        hasTauriInternals: '__TAURI_INTERNALS__' in window,
+        hasTauriMock: Boolean(window.__paimLayoutTauriMockInstalled),
+        pageZoomMode: document.documentElement.dataset.pageZoomMode || '',
+      }))()`,
+    });
+    value.cleanup = cleanupResult.result.value;
+  }
+
+  if (value.cleanup.hasTauriInternals ||
+      value.cleanup.hasTauriMock ||
+      value.cleanup.pageZoomMode !== "css") {
+    failures.push("the native drop preload should be removed before later browser-mode scenarios");
+  }
+
+  debugLayout("project home dropped PDF upload", value);
+  return { value, failures };
+}
+
+// 사용자가 전송 중인 PDF를 명시적으로 지우면 늦게 생성된 서버 문서도 한 번만 정리한다.
+async function verifyProjectHomeDroppedPdfCancellation(send) {
+  const seededProjectState = createProjectStorage(
+    "project-drop-cancel",
+    "Drop Cancel Project",
+    [],
+    null,
+    [],
+  );
+  const tauriMockScript = await installPaimTauriMock(send);
+  const value = {};
+  const failures = [];
+
+  try {
+    await send("Emulation.setDeviceMetricsOverride", {
+      width: 960,
+      height: 680,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+    await evaluateAndNavigateToSelector(
+      send,
+      `localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(SIDEBAR_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(SIDEBAR_WIDTH_STORAGE_KEY)}, '272'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_WIDTH_STORAGE_KEY)}, '360'); localStorage.removeItem(${JSON.stringify(PROJECT_COLLAPSED_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(seededProjectState)})`,
+      APP_URL,
+      ".project-home",
+    );
+
+    const readyResult = await send("Runtime.evaluate", {
+      awaitPromise: true,
+      returnByValue: true,
+      expression: `(async () => {
+        const timeoutAt = Date.now() + 5000;
+        while (Date.now() < timeoutAt) {
+          const listenerCount =
+            window.__paimLayoutReadTauriMock?.().dragDropListeners ?? 0;
+          if (listenerCount > 0) {
+            window.__paimLayoutConfigureDocument?.({ delayMs: 2000 });
+            return { listenerCount, ready: true };
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        return {
+          listenerCount: window.__paimLayoutReadTauriMock?.().dragDropListeners ?? 0,
+          ready: false,
+        };
+      })()`,
+    });
+    value.nativeReady = readyResult.result.value;
+
+    const dropResult = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `(() => {
+        const canvas = document.querySelector('.project-home-canvas');
+        if (!canvas) {
+          return { emittedListeners: 0, foundCanvas: false };
+        }
+        const rect = canvas.getBoundingClientRect();
+        const scale = window.devicePixelRatio || 1;
+        const position = {
+          x: (rect.left + rect.width / 2) * scale,
+          y: (rect.top + rect.height / 2) * scale,
+        };
+        return {
+          emittedListeners: window.__paimLayoutEmitTauriEvent?.(
+            'tauri://drag-drop',
+            { paths: ['/mock/cancel-drop.pdf'], position },
+          ) ?? 0,
+          foundCanvas: true,
+        };
+      })()`,
+    });
+    value.drop = dropResult.result.value;
+
+    const startedResult = await send("Runtime.evaluate", {
+      awaitPromise: true,
+      returnByValue: true,
+      expression: `(async () => {
+        const timeoutAt = Date.now() + 5000;
+        while (Date.now() < timeoutAt) {
+          const control = window.__paimLayoutReadDocumentControl?.();
+          const row = document.querySelector('.project-home-source-row');
+          if (
+            control?.requested === 1 &&
+            control.resolved === 0 &&
+            row?.getAttribute('data-status') === 'uploading'
+          ) {
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        const row = document.querySelector('.project-home-source-row');
+        return {
+          control: window.__paimLayoutReadDocumentControl?.() ?? null,
+          deleteButton: Boolean(row?.querySelector('.project-home-source-delete')),
+          rowName: row?.querySelector('.project-home-source-name')?.textContent.trim() || '',
+          rowStatus: row?.getAttribute('data-status') || '',
+        };
+      })()`,
+    });
+    value.started = startedResult.result.value;
+
+    await send("Runtime.evaluate", {
+      expression: `document.querySelector('.project-home-source-delete')?.click()`,
+    });
+    const armedResult = await send("Runtime.evaluate", {
+      awaitPromise: true,
+      returnByValue: true,
+      expression: `(async () => {
+        const timeoutAt = Date.now() + 1000;
+        while (Date.now() < timeoutAt) {
+          const row = document.querySelector('.project-home-source-row');
+          if (row?.getAttribute('data-delete') === 'confirm') {
+            return {
+              armed: true,
+              control: window.__paimLayoutReadDocumentControl?.() ?? null,
+            };
+          }
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        return {
+          armed: false,
+          control: window.__paimLayoutReadDocumentControl?.() ?? null,
+        };
+      })()`,
+    });
+    value.armed = armedResult.result.value;
+
+    await send("Runtime.evaluate", {
+      expression: `document.querySelector('.project-home-source-delete')?.click()`,
+    });
+    const localCancelResult = await send("Runtime.evaluate", {
+      awaitPromise: true,
+      returnByValue: true,
+      expression: `(async () => {
+        const timeoutAt = Date.now() + 750;
+        while (
+          Date.now() < timeoutAt &&
+          document.querySelector('.project-home-source-row')
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        const savedState = JSON.parse(
+          localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}',
+        );
+        const activeProject = savedState.projects?.find(
+          (project) => project.id === savedState.selectedProjectId,
+        );
+        return {
+          control: window.__paimLayoutReadDocumentControl?.() ?? null,
+          rowGone: !document.querySelector('.project-home-source-row'),
+          storedFileCount: activeProject?.files?.length ?? -1,
+        };
+      })()`,
+    });
+    value.localCancel = localCancelResult.result.value;
+
+    const settledResult = await send("Runtime.evaluate", {
+      awaitPromise: true,
+      returnByValue: true,
+      expression: `(async () => {
+        const timeoutAt = Date.now() + 6000;
+        while (Date.now() < timeoutAt) {
+          const control = window.__paimLayoutReadDocumentControl?.();
+          if (
+            control?.resolved === 1 &&
+            control.deleted === 1 &&
+            control.serverDocumentCount === 0
+          ) {
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+
+        const savedState = JSON.parse(
+          localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}',
+        );
+        const activeProject = savedState.projects?.find(
+          (project) => project.id === savedState.selectedProjectId,
+        );
+        const apiCalls = window.__paimLayoutApiCalls || [];
+
+        return {
+          apiProjectId: activeProject?.apiProjectId ?? null,
+          canvasState:
+            document.querySelector('.project-home-canvas')?.getAttribute('data-state') || '',
+          deleteCalls: apiCalls.filter(
+            (call) => /^DELETE \\/api\\/v1\\/projects\\/\\d+\\/documents\\/\\d+$/.test(call),
+          ),
+          documentControl: window.__paimLayoutReadDocumentControl?.() ?? null,
+          documentPostCalls: apiCalls.filter(
+            (call) => /^POST \\/api\\/v1\\/projects\\/\\d+\\/documents$/.test(call),
+          ),
+          emptyText:
+            document.querySelector('.project-home-canvas-empty')?.textContent.trim() || '',
+          projectPostCalls: apiCalls.filter(
+            (call) => call === 'POST /api/v1/projects',
+          ),
+          runtimeStatus: document.querySelector('.runtime-status')?.textContent.trim() || '',
+          sourceRowCount: document.querySelectorAll('.project-home-source-row').length,
+          storedFileCount: activeProject?.files?.length ?? -1,
+        };
+      })()`,
+    });
+    value.settled = settledResult.result.value;
+
+    if (!value.nativeReady.ready ||
+        value.nativeReady.listenerCount !== 1 ||
+        !value.drop.foundCanvas ||
+        value.drop.emittedListeners !== 1) {
+      failures.push("cancel test should register and invoke exactly one native file-drop listener");
+    }
+
+    if (value.started.control?.requested !== 1 ||
+        value.started.control?.resolved !== 0 ||
+        value.started.rowName !== "cancel-drop.pdf" ||
+        value.started.rowStatus !== "uploading" ||
+        !value.started.deleteButton) {
+      failures.push("the PDF upload should be in flight before explicit deletion");
+    }
+
+    if (!value.armed.armed ||
+        value.armed.control?.resolved !== 0) {
+      failures.push("the first source delete click should arm confirmation before upload response");
+    }
+
+    if (!value.localCancel.rowGone ||
+        value.localCancel.storedFileCount !== 0 ||
+        value.localCancel.control?.resolved !== 0 ||
+        value.localCancel.control?.deleted !== 0) {
+      failures.push("the confirmed delete should remove the local row and abort before the POST resolves");
+    }
+
+    const lastFile = value.settled.documentControl?.lastFile;
+    if (value.settled.projectPostCalls.length !== 1 ||
+        value.settled.documentPostCalls.length !== 1 ||
+        value.settled.apiProjectId !== 1000 ||
+        value.settled.documentControl?.requested !== 1 ||
+        value.settled.documentControl?.resolved !== 1 ||
+        !lastFile ||
+        lastFile.name !== "cancel-drop.pdf" ||
+        lastFile.type !== "application/octet-stream" ||
+        lastFile.size <= 0) {
+      failures.push("the cancelled native drop should still receive exactly one delayed PDF POST response");
+    }
+
+    if (value.settled.documentControl?.deleted !== 1 ||
+        value.settled.documentControl?.serverDocumentCount !== 0 ||
+        value.settled.deleteCalls.length !== 1 ||
+        value.settled.deleteCalls[0] !==
+          "DELETE /api/v1/projects/1000/documents/7000") {
+      failures.push("the delayed cancelled upload should issue exactly one compensating document DELETE");
+    }
+
+    if (value.settled.storedFileCount !== 0 ||
+        value.settled.sourceRowCount !== 0 ||
+        value.settled.canvasState !== "empty" ||
+        !value.settled.emptyText.includes("자료를 추가해 프로젝트 맥락을 만드세요")) {
+      failures.push("the cancelled PDF should stay removed from project home and local storage");
+    }
+
+    if (!value.settled.runtimeStatus.includes("0개 완료") ||
+        !value.settled.runtimeStatus.includes("0개 실패") ||
+        !value.settled.runtimeStatus.includes("1개 취소")) {
+      failures.push("the upload result should report one explicit cancellation");
+    }
+  } finally {
+    await send("Page.removeScriptToEvaluateOnNewDocument", {
+      identifier: tauriMockScript.identifier,
+    });
+    await navigateAndWaitForSelector(send, APP_URL, ".app-shell");
+    const cleanupResult = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `(() => ({
+        hasTauriInternals: '__TAURI_INTERNALS__' in window,
+        hasTauriMock: Boolean(window.__paimLayoutTauriMockInstalled),
+        pageZoomMode: document.documentElement.dataset.pageZoomMode || '',
+      }))()`,
+    });
+    value.cleanup = cleanupResult.result.value;
+  }
+
+  if (value.cleanup.hasTauriInternals ||
+      value.cleanup.hasTauriMock ||
+      value.cleanup.pageZoomMode !== "css") {
+    failures.push("the cancellation test preload should be removed before later browser scenarios");
+  }
+
+  debugLayout("project home dropped PDF cancellation", value);
   return { value, failures };
 }
 
@@ -8198,6 +9239,16 @@ try {
     console.log("PASS Astryx AppShell owns the edge-to-edge PaiM frame");
   }
 
+  const zoomShortcutResult = await verifyZoomShortcutGranularity(send);
+
+  if (zoomShortcutResult.failures.length > 0) {
+    hasFailures = true;
+    console.log("FAIL zoom shortcut granularity");
+    zoomShortcutResult.failures.forEach((failure) => console.log(`  - ${failure}`));
+  } else {
+    console.log("PASS zoom shortcuts use 5% steps from the 50% minimum");
+  }
+
   const zoomedOverlayResult = await verifyZoomedOverlayPanelBounds(send);
 
   if (zoomedOverlayResult.failures.length > 0) {
@@ -8326,6 +9377,29 @@ try {
     projectCreationResult.failures.forEach((failure) => console.log(`  - ${failure}`));
   } else {
     console.log("PASS new projects are created as active workspaces");
+  }
+
+  const projectHomeDroppedPdfResult = await verifyProjectHomeDroppedPdfUpload(send);
+
+  if (projectHomeDroppedPdfResult.failures.length > 0) {
+    hasFailures = true;
+    console.log("FAIL project home native PDF drop upload");
+    projectHomeDroppedPdfResult.failures.forEach((failure) => console.log(`  - ${failure}`));
+  } else {
+    console.log("PASS project home native PDF drop uploads without cancellation");
+  }
+
+  const projectHomeDroppedPdfCancellationResult =
+    await verifyProjectHomeDroppedPdfCancellation(send);
+
+  if (projectHomeDroppedPdfCancellationResult.failures.length > 0) {
+    hasFailures = true;
+    console.log("FAIL project home native PDF drop cancellation");
+    projectHomeDroppedPdfCancellationResult.failures.forEach(
+      (failure) => console.log(`  - ${failure}`),
+    );
+  } else {
+    console.log("PASS project home native PDF drop cancellation cleans the server document once");
   }
 
   const projectBriefingResult = await verifyProjectBriefingStartsWithoutVisiblePrompt(send);

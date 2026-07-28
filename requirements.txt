@@ -11,7 +11,7 @@ google-generativeai
 pymysql
 chromadb
 
-# 문서 변환 (멀티포맷 입력)
+# 문서 파싱·변환 (멀티포맷 입력)
 pypdf
 python-docx
 

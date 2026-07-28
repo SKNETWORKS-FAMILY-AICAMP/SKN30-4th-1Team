@@ -23,6 +23,7 @@ from .cleaning import (
     drop_duplicate_blocks,
     find_repeated_edge_lines,
     is_noise_line,
+    guard_extracted_text,
     normalize_text,
     split_paragraphs,
 )
@@ -78,6 +79,10 @@ def _page_texts(reader, filename: str) -> tuple[list[str], list[ConversionWarnin
                 "텍스트 레이어가 없는 페이지입니다(이미지·스캔 가능성). 내용이 누락됩니다.",
                 location=f"page {index + 1}",
             ))
+        # 제어문자 검사는 정규화 **전**에 해야 한다. normalize_text()가 제어문자를
+        # 먼저 제거하므로 그 뒤에 검사하면 이미 사라진 뒤이고, 입력 경계 검증이
+        # 조용히 무력화된다.
+        guard_extracted_text(text)
         texts.append(text)
     return texts, warnings
 

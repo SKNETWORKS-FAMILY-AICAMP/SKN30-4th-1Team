@@ -29,6 +29,20 @@ _UNKNOWN_CHUNK_META = {
 }
 
 
+def _rollback_after_ingest_failure(conn) -> None:
+    try:
+        conn.rollback()
+    except Exception:
+        logger.error("ingest_rollback_failed", extra={"code": "INGEST_ROLLBACK_FAILED"})
+
+
+def _close_after_ingest_failure(conn) -> None:
+    try:
+        conn.close()
+    except Exception:
+        logger.error("ingest_connection_close_failed", extra={"code": "INGEST_CLOSE_FAILED"})
+
+
 def _normalize_date(date_str: Optional[str]) -> Optional[str]:
     """LLM이 반환한 다양한 날짜 형식을 MySQL DATE 타입이 수용하는 YYYY-MM-DD로 통일.
     유효하지 않은 날짜(예: 2026-02-30)는 None 반환하여 DB INSERT 오류를 방지.
@@ -187,6 +201,7 @@ def ingest(
     repo_id: Optional[int] = None,
     source_metadata: Optional[dict] = None,
     converted: Optional[ConvertedDocument] = None,
+    processing_token: Optional[str] = None,
 ):
     """추출 결과를 두 DB에 순서대로 저장.
     1단계: MySQL — items 각각을 memory + memory_sources 테이블에 INSERT (같은 트랜잭션)
@@ -202,6 +217,18 @@ def ingest(
     memory_rows = []
     try:
         with conn.cursor() as cursor:
+            if doc_id is not None and processing_token is not None:
+                cursor.execute(
+                    "SELECT status,processing_token FROM documents WHERE id=%s FOR UPDATE",
+                    (doc_id,),
+                )
+                owner = cursor.fetchone()
+                if (
+                    not owner
+                    or owner["status"] != "processing"
+                    or owner.get("processing_token") != processing_token
+                ):
+                    raise RuntimeError("DOCUMENT_PROCESSING_FENCE_LOST")
             for item in items:
                 # 본문에서 date가 추출되지 않았으면 업로드 폼의 source date를 폴백으로 저장한다.
                 # LLM 입력만이 아니라 행 자체에 보존해야, 이 항목이 미래 적재의 supersede
@@ -251,50 +278,75 @@ def ingest(
                     "completion_status_source": completion_source,
                     "source": source,
                 })
-        conn.commit()
-    except Exception:
-        conn.rollback()
+        # Repository ingest preserves the existing MySQL-first contract. Document
+        # ingest keeps the row lock and transaction through all Chroma writes.
+        if processing_token is None:
+            conn.commit()
+    except BaseException:
+        try:
+            _rollback_after_ingest_failure(conn)
+        finally:
+            _close_after_ingest_failure(conn)
         raise
-    finally:
+
+    try:
+        upsert_memory_vectors(memory_rows)
+
+        if chunks:
+            # 같은 repo 안의 source별 chunk ID 충돌을 피한다.
+            import hashlib
+            src_hash = hashlib.md5(source.encode()).hexdigest()[:6]
+            if repo_id is not None:
+                chunk_prefix = f"repo{repo_id}_{src_hash}"
+            elif doc_id is not None:
+                chunk_prefix = f"doc{doc_id}"
+            else:
+                chunk_prefix = src_hash
+
+            sm = source_metadata or {}
+            collection = get_collection()
+            collection.add(
+                ids=[f"{chunk_prefix}_chunk{i}" for i in range(len(chunks))],
+                documents=[text for text, _ in chunks],
+                metadatas=[{
+                    "project_id": project_id,
+                    "doc_id": doc_id if doc_id is not None else _NO_ID,
+                    "repo_id": repo_id if repo_id is not None else _NO_ID,
+                    "source": source,
+                    "item_type": "document",
+                    "date": date or "",
+                    "doc_type": doc_type,
+                    "source_kind": sm.get("source_kind", ""),
+                    "source_type": sm.get("source_type", ""),
+                    "source_path": sm.get("source_path", ""),
+                    "source_ref": sm.get("source_ref", ""),
+                    "source_url": sm.get("source_url", ""),
+                    # 문서 내부 출처 좌표 — 답변의 근거를 "몇 페이지 몇 번째 문단"까지 되짚는다.
+                    "source_format": converted.format if converted is not None else "",
+                    **chunk_meta,
+                } for _, chunk_meta in chunks],
+            )
+
+        if processing_token is not None:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE documents SET status='indexed',last_error=NULL,processing_token=NULL,"
+                    "lease_expires_at=NULL,progress_done=NULL,progress_total=NULL"
+                    " WHERE id=%s AND status='processing' AND processing_token=%s",
+                    (doc_id, processing_token),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("DOCUMENT_PROCESSING_FENCE_LOST")
+            conn.commit()
+    except BaseException:
+        try:
+            if processing_token is not None:
+                _rollback_after_ingest_failure(conn)
+        finally:
+            _close_after_ingest_failure(conn)
+        raise
+    else:
         conn.close()
-
-    upsert_memory_vectors(memory_rows)
-
-    if chunks:
-        # 같은 repo 안에서 commits.txt·README.md·issues.txt 등이 각자 청크를 가지므로
-        # source 이름을 해시해 청크 ID 앞부분을 다르게 만들어 ChromaDB ID 충돌 방지
-        import hashlib
-        src_hash = hashlib.md5(source.encode()).hexdigest()[:6]
-        if repo_id is not None:
-            chunk_prefix = f"repo{repo_id}_{src_hash}"
-        elif doc_id is not None:
-            chunk_prefix = f"doc{doc_id}"
-        else:
-            chunk_prefix = src_hash
-
-        sm = source_metadata or {}
-        collection = get_collection()
-        collection.add(
-            ids=[f"{chunk_prefix}_chunk{i}" for i in range(len(chunks))],
-            documents=[text for text, _ in chunks],
-            metadatas=[{
-                "project_id":  project_id,
-                "doc_id":      doc_id if doc_id is not None else _NO_ID,
-                "repo_id":     repo_id if repo_id is not None else _NO_ID,
-                "source":      source,
-                "item_type":   "document",
-                "date":        date or "",
-                "doc_type":    doc_type,
-                "source_kind": sm.get("source_kind", ""),
-                "source_type": sm.get("source_type", ""),
-                "source_path": sm.get("source_path", ""),
-                "source_ref":  sm.get("source_ref", ""),
-                "source_url":  sm.get("source_url", ""),
-                # 문서 내부 출처 좌표 — 답변의 근거를 "몇 페이지 몇 번째 문단"까지 되짚는다.
-                "source_format": converted.format if converted is not None else "",
-                **chunk_meta,
-            } for _, chunk_meta in chunks],
-        )
 
     # 계층2 supersede 판별: 이번에 적재된 신규 decision이 기존 decision을 번복하는지 LLM으로 판정해
     # pending 제안을 만든다. **모든 적재 단계(벡터 upsert + chunk add)가 성공한 뒤**에 실행해,
@@ -313,4 +365,7 @@ def ingest(
             from ..reconciler.supersede import detect_supersede
             detect_supersede(project_id, new_decisions)
         except Exception:
-            logger.warning("supersede 판별 실패(적재는 유지) project_id=%s", project_id, exc_info=True)
+            logger.warning(
+                "supersede_detection_failed",
+                extra={"project_id": project_id, "code": "SUPERSEDE_DETECTION_FAILED"},
+            )

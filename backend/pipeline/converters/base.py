@@ -27,6 +27,11 @@ class ErrorCode:
     # 구조는 정상이지만 안전 처리 한도를 넘은 경우. CORRUPT_FILE과 반드시 구분한다 —
     # "손상"이라고 알리면 사용자가 복구·재다운로드 같은 엉뚱한 조치를 하게 된다.
     FILE_TOO_LARGE = "file_too_large"
+    # 추출된 내용이 입력 경계를 위반한 경우(NUL·과다 제어문자). 변환 실패가 아니라
+    # 입력 검증 실패이므로 API 계층이 415로 매핑한다 — document_content의
+    # INVALID_DOCUMENT_CONTENT와 같은 성격이다. 값을 그쪽과 맞춰 두어 클라이언트가
+    # 경로에 따라 다른 코드를 받지 않게 한다.
+    INVALID_CONTENT = "INVALID_DOCUMENT_CONTENT"
 
 
 class WarningCode:

@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from collections import Counter
 from typing import Iterable, Optional
 
-from .base import Block, ConversionWarning, WarningCode
+from .base import Block, ConversionError, ConversionWarning, ErrorCode, WarningCode
 
 # 제로폭 문자·BOM: 눈에 보이지 않지만 토크나이저와 중복 비교를 망가뜨린다.
 _ZERO_WIDTH = re.compile("[​-‏⁠﻿]")
@@ -158,3 +159,35 @@ def split_paragraphs(text: str) -> list[str]:
     if buffer:
         paragraphs.append(buffer)
     return paragraphs
+
+
+# 입력 경계 검증 파라미터. backend/document_content.py의 _validate_text_shape와
+# 동일한 기준을 쓴다 — 같은 파일이 업로드 경로와 질의 경로에서 다르게 판정되면
+# 안 되기 때문이다.
+_MAX_CONTROL_RATIO = 0.02
+
+
+def guard_extracted_text(text: str) -> str:
+    """추출 직후 텍스트의 입력 경계를 검증한다.
+
+    **반드시 normalize_text() 이전에 호출해야 한다.** normalize_text()가 제어문자를
+    먼저 제거하므로 그 뒤에 검사하면 이미 사라진 뒤이고, 검증이 조용히 무력화된다.
+    (U+007F를 넣은 DOCX가 검사 없이는 "AB"로 정상 변환되는 것이 확인됐다.)
+
+    변환 실패가 아니라 입력 검증 실패이므로 API 계층은 이 코드를 415로 매핑한다.
+    """
+    if "\x00" in text:
+        raise ConversionError(
+            ErrorCode.INVALID_CONTENT,
+            "문서에 허용되지 않는 바이너리 내용이 있습니다.",
+        )
+    controls = sum(
+        1 for char in text
+        if char not in "\t\r\n" and unicodedata.category(char) == "Cc"
+    )
+    if text and controls / len(text) > _MAX_CONTROL_RATIO:
+        raise ConversionError(
+            ErrorCode.INVALID_CONTENT,
+            "문서에 허용되지 않는 제어 문자가 너무 많습니다.",
+        )
+    return text

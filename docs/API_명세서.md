@@ -34,7 +34,10 @@
 
 **요청 헤더**: 보호 엔드포인트는 `Authorization: Bearer <access_token>`를 부착한다.
 
-**공개 경로(토큰 불필요)**: `GET /`, `GET /health`, `POST /api/v1/auth/signup`,
+모든 HTTP 응답은 서버가 생성한 `X-Request-ID` 헤더를 포함한다. JSON 오류 응답은
+기존 `detail`과 함께 같은 값의 top-level `request_id`를 반환한다.
+
+**공개 경로(토큰 불필요)**: `GET /`, `GET /health`, `GET /health/ready`, `POST /api/v1/auth/signup`,
 `POST /api/v1/auth/login`, `GET /github/app/callback`(`/github/app/callback`
 prefix). CORS `OPTIONS` 프리플라이트도 통과.
 
@@ -53,6 +56,7 @@ prefix). CORS `OPTIONS` 프리플라이트도 통과.
 |-----------|------|-----------|
 | `POST /api/v1/auth/signup`·`/auth/login` | 공개 | — |
 | `GET /api/v1/auth/me` | 인증 | (프로젝트 무관) |
+| `GET /api/v1/capabilities` | 인증 | (프로젝트 무관) |
 | `GET·POST /api/v1/projects` | 인증 | (프로젝트 무관) |
 | `GET /api/v1/projects/{id}` | 인증 | viewer |
 | `PATCH /api/v1/projects/{id}` | 인증 | member |
@@ -98,6 +102,48 @@ prefix). CORS `OPTIONS` 프리플라이트도 통과.
 ```json
 {
   "status": "ok"
+}
+```
+
+---
+
+### `GET /health/ready`
+
+MySQL, schema, ChromaDB, upload 저장소의 준비 상태를 확인한다. 인증은 필요 없다.
+
+**응답 `200` / `503`**
+```json
+{
+  "status": "ready",
+  "components": {
+    "mysql": {"status": "ok"},
+    "schema": {"status": "ok"},
+    "chroma": {"status": "ok"},
+    "upload": {"status": "ok"}
+  },
+  "request_id": "<uuid>"
+}
+```
+
+---
+
+### `GET /api/v1/capabilities`
+
+데스크톱 앱이 사용할 문서 형식과 업로드 크기 제한을 조회한다. 인증이 필요하다.
+
+**응답 `200`**
+```json
+{
+  "schema_version": 1,
+  "project_documents": {
+    "extensions": ["docx", "md", "pdf", "txt"],
+    "max_file_bytes": 10485760
+  },
+  "query_attachments": {
+    "extensions": ["docx", "md", "pdf", "txt"],
+    "max_file_bytes": 8388608,
+    "max_total_bytes": 8388608
+  }
 }
 ```
 
@@ -368,6 +414,38 @@ prefix). CORS `OPTIONS` 프리플라이트도 통과.
 > 아니라 크기·압축률 한도를 넘은 것이므로, "손상"으로 안내하면 사용자가 복구·재다운로드
 > 같은 불필요한 조치를 하게 됩니다. HTTP 상태는 다른 변환 실패와 동일하게 `400`입니다
 > (`413`은 업로드 원본이 10 MB를 넘는 경우 전용).
+
+**응답 `415`** — 입력 경계 위반 (형식·내용 불일치)
+```json
+{
+  "detail": { "code": "INVALID_DOCUMENT_CONTENT",
+              "message": "PDF 확장자와 실제 파일 형식이 일치하지 않습니다." },
+  "request_id": "<uuid>"
+}
+```
+
+`400`(변환 실패)과 **성격이 다릅니다.** `415`는 파일을 파서에 넘기기 **전에** 걸러낸
+경우입니다.
+
+| 상황 | 예 |
+|------|-----|
+| 확장자와 실제 형식 불일치 | `.pdf`인데 `%PDF-`로 시작하지 않음, `.docx`인데 ZIP이 아님 |
+| 지원하지 않는 문자 인코딩 | `.txt`/`.md`가 UTF-8·CP949 어느 쪽으로도 디코딩되지 않음 |
+| 바이너리·과다 제어 문자 | NUL 포함, 제어 문자 비율 2% 초과 |
+
+`415`의 `detail`은 **객체**(`{code, message}`)이고 `400`의 `detail`은 **문자열**입니다.
+두 형식이 다른 것은 의도된 것이며, 데스크톱 클라이언트(`desktop/src/paimApi.ts`)는
+양쪽을 모두 읽습니다.
+
+**구분 기준**: 매직 바이트 검사를 통과했는지가 경계입니다.
+
+| 입력 | 결과 |
+|------|------|
+| `%PDF-`로 시작하지 않는 `.pdf` | `415` |
+| `%PDF-`는 맞으나 내부 파싱 실패 | `400 corrupt_file` |
+| `PK\x03\x04`로 시작하지 않는 `.docx` | `415` |
+| ZIP은 맞으나 DOCX 구조 손상 | `400 corrupt_file` |
+| ZIP은 맞으나 압축 해제 한도 초과 | `400 file_too_large` |
 
 > **`detail`을 객체로 바꾸지 마세요.** 데스크톱 클라이언트(`desktop/src/paimApi.ts`)는
 > `detail`이 문자열이 아니면 사유를 버리고 `"PaiM API 요청 실패"`만 표시합니다.
@@ -1164,7 +1242,7 @@ Git 로그 텍스트를 동기 처리해 메모리로 추출·적재한다. (최
 |------|------|------|------|
 | `question` | string | ✅ | 질문 |
 | `history` | array | - | `{role, content}` 대화 이력 |
-| `attachments` | array | - | 첨부 자료 `{filename, content_base64}`. `.md`/`.markdown`/`.txt`/`.docx`/`.pdf`, 파일당 최대 10 MB |
+| `attachments` | array | - | 첨부 자료 `{filename, content_base64}`. `.md`/`.markdown`/`.txt`/`.docx`/`.pdf`, **파일당 최대 8 MB · 전체 합계 8 MB** |
 
 > **`attachments`**: 첨부가 있으면 라우터를 우회해 항상 `route: "semantic"`으로
 > 처리된다. 형식 미지원 시 **400**, 10 MB 초과 시 **413**.
@@ -1389,6 +1467,7 @@ GitHub 설치 완료 후 리다이렉트되는 콜백. **공개(무인증)이나
 |-----------|------|
 | `GET /` | ✅ 구현 완료 |
 | `GET /health` | ✅ 구현 완료 |
+| `GET /health/ready` | ✅ 구현 완료 |
 | `POST /api/v1/projects` | ✅ 구현 완료 (DEV user 시 project_members 자동 등록) |
 | `GET /api/v1/projects` | ✅ 구현 완료 (DEV user 시 membership JOIN 필터) |
 | `GET /api/v1/projects/{id}` | ✅ 구현 완료 |

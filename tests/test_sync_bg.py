@@ -12,7 +12,8 @@ def test_sync_bg_success_sets_indexed():
             "metadata": {"source_type": "readme", "source_path": "README.md", "source_ref": "abc1234", "source_url": ""},
         }
     }
-    with patch("backend.api.repository._collect_repo_sources", return_value=(sources, "abc1234", [])), \
+    with patch("backend.api.repository._precheck_repository"), \
+         patch("backend.api.repository._collect_repo_sources", return_value=(sources, "abc1234", [])), \
          patch("backend.api.repository._get_last_reconciled_pr", return_value=None), \
          patch("backend.api.repository._collect_merged_prs", return_value=[]), \
          patch("backend.api.repository._clear_repo_indexed_data") as mock_clear, \
@@ -33,7 +34,8 @@ def test_sync_bg_success_sets_indexed():
 
 def test_sync_bg_empty_sources_preserves_index():
     """sources 빈 결과 → 기존 index 삭제 없음, status='failed', last_error 기록."""
-    with patch("backend.api.repository._get_last_reconciled_pr", return_value=None), \
+    with patch("backend.api.repository._precheck_repository"), \
+         patch("backend.api.repository._get_last_reconciled_pr", return_value=None), \
          patch("backend.api.repository._collect_repo_sources", return_value=({}, None, [])), \
          patch("backend.api.repository._clear_repo_indexed_data") as mock_clear, \
          patch("backend.api.repository._set_repo_status") as mock_status:
@@ -46,14 +48,14 @@ def test_sync_bg_empty_sources_preserves_index():
 
 def test_sync_bg_network_exception_sets_failed():
     """GitHub API 예외 → status='failed', last_error 기록."""
-    with patch("backend.api.repository._get_last_reconciled_pr", return_value=None), \
+    with patch("backend.api.repository._precheck_repository"), \
+         patch("backend.api.repository._get_last_reconciled_pr", return_value=None), \
          patch("backend.api.repository._collect_repo_sources", side_effect=RuntimeError("timeout")), \
          patch("backend.api.repository._set_repo_status") as mock_status:
 
         _sync_bg(project_id=1, repo_id=10, full_name="owner/repo", branch="main", token=None)
 
-        mock_status.assert_called_once_with(10, "failed", last_error=ANY)
-        assert "timeout" in mock_status.call_args.kwargs["last_error"]
+        mock_status.assert_called_once_with(10, "failed", last_error="REPOSITORY_SYNC_FAILED")
 
 
 def test_sync_bg_partial_failure_sets_warning():
@@ -65,7 +67,8 @@ def test_sync_bg_partial_failure_sets_warning():
         }
     }
     warnings = [{"source_type": "issues", "reason": "GitHub API 응답 오류"}]
-    with patch("backend.api.repository._collect_repo_sources", return_value=(sources, "abc", warnings)), \
+    with patch("backend.api.repository._precheck_repository"), \
+         patch("backend.api.repository._collect_repo_sources", return_value=(sources, "abc", warnings)), \
          patch("backend.api.repository._get_last_reconciled_pr", return_value=None), \
          patch("backend.api.repository._collect_merged_prs", return_value=[]), \
          patch("backend.api.repository._clear_repo_indexed_data"), \
@@ -90,7 +93,8 @@ def test_sync_bg_all_success_no_warning():
             "metadata": {"source_type": "readme", "source_path": "README.md", "source_ref": "", "source_url": ""},
         }
     }
-    with patch("backend.api.repository._collect_repo_sources", return_value=(sources, None, [])), \
+    with patch("backend.api.repository._precheck_repository"), \
+         patch("backend.api.repository._collect_repo_sources", return_value=(sources, None, [])), \
          patch("backend.api.repository._get_last_reconciled_pr", return_value=None), \
          patch("backend.api.repository._collect_merged_prs", return_value=[]), \
          patch("backend.api.repository._clear_repo_indexed_data"), \

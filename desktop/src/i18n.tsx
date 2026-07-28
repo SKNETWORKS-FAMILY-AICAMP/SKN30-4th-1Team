@@ -125,8 +125,8 @@ const en: Record<string, string> = {
   "시스템 설정을 따르거나 PaiM 화면만 고정합니다.": "Follow the system setting or pin PaiM to one theme.",
   "테마 선택": "Theme",
   "화면 확대": "Interface zoom",
-  "텍스트와 인터페이스를 100%에서 200%까지 확대합니다.":
-    "Scale text and interface from 100% to 200%.",
+  "텍스트와 인터페이스를 50%에서 200%까지 5% 단위로 조절합니다.":
+    "Adjust text and interface from 50% to 200% in 5% increments.",
   "시스템": "System",
   "다크": "Dark",
   "라이트": "Light",
@@ -197,6 +197,7 @@ const en: Record<string, string> = {
   "다시 삭제": "Delete again",
   "한 번 더 누르면 이 채팅과 대화 기록을 삭제합니다": "Press again to delete this chat and its conversation history",
   "다시 연결": "Reconnect",
+  "오프라인 · 저장된 프로젝트 사용 중": "Offline · using saved projects",
   "PaiM 서버에 연결할 수 없습니다 — 마지막 저장 상태를 표시 중": "Cannot connect to the PaiM server — showing the last saved state",
   "브리핑 받기": "Get briefing",
   "닫기": "Close",
@@ -258,9 +259,19 @@ const en: Record<string, string> = {
   "{project} · {chat}에서 응답을 생성 중입니다": "Generating a response in {project} · {chat}",
   "최신 메시지": "Latest message",
   "프로젝트 시작 화면": "Project start screen",
+  "프로젝트 시작 단계": "Project setup steps",
+  "맥락 추가": "Add context",
+  "분석": "Analyze",
+  "첫 질문": "First question",
   "프로젝트 이름": "Project name",
   "프로젝트 설명": "Project description",
   "프로젝트 설명을 적어두면 PaiM이 맥락을 잡는 데 도움이 됩니다.": "Describe the project so PaiM can understand the context.",
+  "프로젝트 맥락 추가": "Add project context",
+  "회의록, README, PDF, 스펙 문서 등 관련 자료를 추가해 주세요.":
+    "Add relevant notes, READMEs, PDFs, specs, and other sources.",
+  "자료를 추가해 프로젝트 맥락을 만드세요": "Add sources to build project context",
+  "파일을 드래그하거나 아래 버튼을 이용해 추가할 수 있습니다.":
+    "Drag files here or use the buttons below.",
   "자료를 추가하거나 설명만으로 바로 대화를 시작하세요": "Add sources, or start chatting with only a description.",
   "{count}개 자료가 연결되었습니다": "{count} sources connected",
   "자료를 여기에 끌어다 놓으세요": "Drop sources here",
