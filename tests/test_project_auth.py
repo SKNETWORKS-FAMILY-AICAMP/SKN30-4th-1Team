@@ -122,17 +122,18 @@ def test_delete_project_cleans_children_and_external_assets():
             [{"id": 5}],
         ],
     )
-    collection = MagicMock()
-
     with patch("backend.api.project.require_project_access"), \
          patch("backend.api.project._project_upload_users", return_value=set()), \
          patch("backend.api.project.get_connection", return_value=conn), \
-         patch("backend.db.chroma.get_collection", return_value=collection), \
+         patch("backend.db.chroma.delete_from_existing_collection") as chroma_delete, \
          patch("backend.api.project.delete_managed_file") as delete_file:
         resp = _client.delete("/api/v1/projects/1")
 
     assert resp.status_code == 204
-    collection.delete.assert_called_once_with(where={"project_id": 1})
+    # 삭제는 metadata 조건만 쓰므로 임베딩 클라이언트를 만드는 get_collection() 이 아니라
+    # delete_from_existing_collection 을 타야 한다 — 전자는 OPENAI_API_KEY 가 없으면
+    # 프로젝트 삭제 전체를 500으로 실패시킨다. 단언 내용(project_id 조건 삭제)은 동일하다.
+    chroma_delete.assert_called_once_with(where={"project_id": 1})
     delete_file.assert_called_once_with("data/uploads/1/spec.md", 1)
 
     sql_calls = [call.args[0] for call in cursor.execute.call_args_list]
