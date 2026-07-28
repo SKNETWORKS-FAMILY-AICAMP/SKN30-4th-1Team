@@ -754,3 +754,43 @@ async def test_lifespan_collects_watchdog_before_executor_shutdown(monkeypatch):
 
     assert cancelled.is_set()
     assert shutdown_calls == [{"wait": True, "cancel_futures": True}]
+
+
+def test_json_formatter_survives_exc_info_without_active_exception():
+    """활성 예외가 없을 때의 exc_info=True로 포매터가 죽지 않아야 한다.
+
+    logging은 활성 예외가 없으면 exc_info=True를 sys.exc_info()인 (None,None,None)으로
+    정규화한다. 이 튜플은 truthy라 그대로 통과시키면 None.__name__에서 AttributeError가
+    나고, 포매터가 죽으면 그 로그 라인이 통째로 유실된다. 1차 소비자는 configure_logging이
+    root JSON 핸들러로 propagate시키는 uvicorn 등 서드파티 로거다."""
+    record = logging.LogRecord(
+        "t", logging.WARNING, "x.py", 1, "msg", None, (None, None, None)
+    )
+    payload = json.loads(JsonFormatter().format(record))
+    assert payload["event"] == "msg"
+    assert "exception_type" not in payload
+
+
+def test_json_formatter_keeps_extra_exception_type_when_exc_info_is_empty():
+    """exc_info가 비어 있으면 extra로 넘어온 exception_type을 덮어쓰지 않고 보존한다.
+
+    exception_type은 extra(main.py의 예외 핸들러)와 exc_info 두 경로로 들어오는데,
+    exc_info 쪽이 무조건 덮어쓰는 구조였다. 빈 exc_info를 걸러내면서 extra 값이 살아난다."""
+    record = logging.LogRecord(
+        "t", logging.ERROR, "x.py", 1, "msg", None, (None, None, None)
+    )
+    record.exception_type = "ValueError"
+    payload = json.loads(JsonFormatter().format(record))
+    assert payload["exception_type"] == "ValueError"
+
+
+def test_json_formatter_still_reports_real_exception_type():
+    """정상 경로(활성 예외 안의 exc_info)는 그대로 동작해야 한다 — 가드가 과하지 않은지 고정."""
+    try:
+        raise KeyError("boom")
+    except KeyError:
+        record = logging.LogRecord(
+            "t", logging.ERROR, "x.py", 1, "msg", None, sys.exc_info()
+        )
+    payload = json.loads(JsonFormatter().format(record))
+    assert payload["exception_type"] == "KeyError"
