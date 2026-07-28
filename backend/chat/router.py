@@ -99,7 +99,12 @@ def _to_langchain_messages(final_prompt_messages: List[dict]):
 
 
 # --- [1] POST /projects/{project_id}/sessions (세션 생성) ---
-@router.post("", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=SessionResponse,
+    status_code=status.HTTP_201_CREATED,
+    deprecated=True,
+)
 def create_chat_session(project_id: int, request: SessionCreateRequest, db=Depends(get_db)):
     require_project_access(project_id, min_role="member")
     session_id = f"sess_{uuid.uuid4().hex[:12]}"
@@ -119,7 +124,7 @@ def create_chat_session(project_id: int, request: SessionCreateRequest, db=Depen
 
 
 # --- [2] GET /projects/{project_id}/sessions (세션 목록 조회) ---
-@router.get("", response_model=List[SessionResponse])
+@router.get("", response_model=List[SessionResponse], deprecated=True)
 def get_chat_session_list(project_id: int, db=Depends(get_db)):
     require_project_access(project_id)
     current_user_id = get_current_user_id()
@@ -141,7 +146,7 @@ def get_chat_session_list(project_id: int, db=Depends(get_db)):
 
 
 # --- [3] PATCH /projects/{project_id}/sessions/{session_id} (세션 수정) ---
-@router.patch("/{session_id}", response_model=SessionResponse)
+@router.patch("/{session_id}", response_model=SessionResponse, deprecated=True)
 def update_chat_session(project_id: int, session_id: str, request: SessionUpdateRequest, db=Depends(get_db)):
     require_project_access(project_id, min_role="member")
     with db.cursor() as cursor:
@@ -159,7 +164,11 @@ def update_chat_session(project_id: int, session_id: str, request: SessionUpdate
 
 
 # --- [4] DELETE /projects/{project_id}/sessions/{session_id} (세션 삭제) ---
-@router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{session_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    deprecated=True,
+)
 def delete_chat_session(project_id: int, session_id: str, db=Depends(get_db)):
     require_project_access(project_id, min_role="member")
     with db.cursor() as cursor:
@@ -174,7 +183,11 @@ def delete_chat_session(project_id: int, session_id: str, db=Depends(get_db)):
 
 
 # --- [5] GET /projects/{project_id}/sessions/{session_id}/messages (메시지 이력 조회) ---
-@router.get("/{session_id}/messages", response_model=List[MessageResponse])
+@router.get(
+    "/{session_id}/messages",
+    response_model=List[MessageResponse],
+    deprecated=True,
+)
 def get_session_message_history(project_id: int, session_id: str, db=Depends(get_db)):
     require_project_access(project_id)
     with db.cursor() as cursor:
@@ -348,7 +361,7 @@ def handle_session_query(
     }
 
 
-@router.post("/{session_id}/query")
+@router.post("/{session_id}/query", deprecated=True)
 @limiter.limit(RATE_LIMIT_CHAT, key_func=authenticated_user_key)
 def rate_limited_session_query(
     request: Request,

@@ -67,8 +67,8 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 │   │   ├── delta.py                 # "지난 확인 이후" 델타 브리핑 조회/생성
 │   │   └── query.py                 # Q&A 질의 엔드포인트 (+첨부파일 임시 컨텍스트)
 │   │
-│   ├── chat/                        # 세션형 대화 (암호화 대화 이력)
-│   │   ├── router.py                # /projects/{id}/sessions — 세션 CRUD, 세션 내 질의
+│   ├── chat/                        # 구형 서버 세션 API (폐기 예정)
+│   │   ├── router.py                # /projects/{id}/sessions — 구형 클라이언트 호환
 │   │   ├── session_store.py         # 세션·메시지 암호화 저장/조회
 │   │   └── context_builder.py       # tiktoken 기반 프롬프트 컨텍스트 조립(토큰 예산 관리)
 │   │
@@ -180,8 +180,8 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 | `repository.py` | `POST /projects/{id}/repositories`, `.../sync` | GitHub repo 연결, 동기화 트리거 |
 | `suggestion.py` | `.../suggestions/{id}/accept|reject` | 완료 제안 승인/거절 (상태 변경은 항상 사람) |
 | `delta.py` | `GET/POST /projects/{id}/delta`, `.../briefing/delta` | 델타 브리핑 |
-| `query.py` | `POST /projects/{id}/query`, `.../git` | 1회성 Q&A 질의 (첨부파일 임시 컨텍스트 지원) |
-| `chat/router.py` | `/projects/{id}/sessions/...` | 세션 CRUD, 세션 내 질의(`.../{session_id}/query`) — 암호화 대화 이력 |
+| `query.py` | `POST /projects/{id}/query`, `.../git` | 비영속 Q&A 질의 (로컬 최근 대화·첨부파일 임시 컨텍스트 지원) |
+| `chat/router.py` | `/projects/{id}/sessions/...` | 구형 클라이언트용 세션 API — 폐기 예정 |
 | `github/router.py` | `/github/app/sessions`, `/callback` | GitHub App 설치 플로우, JWT 서명, repo preview |
 | `auth.py` | — | 개발용 임시 사용자 인증 (`DEV_USER_ID`) |
 
@@ -228,10 +228,12 @@ State(TypedDict)를 노드 간 계약으로 고정하고, 노드는 `pipeline`/`
 - **적재 그래프**: 문서 → [저장] → [메모리] → END
 - **질의 그래프**: 질문 → [섹션(stub)] → [Q&A] → [검증] → (부족 시 재검색 루프, `MAX_RETRY=1`) → [계획 제안] → [검증] → (부족 시 재기획 루프) → [응답] → END — 계획 생성이 실패해도 답변 자체는 유지되는 best-effort 설계
 
-### 3.7 chat — 암호화 세션 대화
+### 3.7 chat — 구형 서버 세션 호환
 
-- `session_store.py`: 세션·메시지를 `security/session_crypto.py`(AES-256-GCM, `SESSION_MEMORY_KEY`)로 암호화 저장
-- `context_builder.py`: tiktoken으로 토큰 수를 계산해 시스템 프롬프트+요약+최근 메시지를 토큰 예산 안에서 조립
+- 새 데스크톱의 개인 대화는 계정·서버별 로컬 저장소에만 보관한다.
+- 답변 생성 시 필요한 최근 대화만 `api/query.py`에 일시적으로 전달하며 서버 세션에는 저장하지 않는다.
+- `session_store.py`와 `context_builder.py`는 구형 클라이언트 호환용이며 폐기 예정이다.
+- 자세한 저장 범위는 `docs/CHAT_STORAGE_POLICY.md`를 따른다.
 
 ### 3.8 llm — 프로바이더 추상화
 
@@ -290,7 +292,7 @@ Tauri 2(Rust 셸) 위에 React 19 + TypeScript로 구성된 공식 사용자 UI�
 - `memory.date` = 회의/문서의 기록 날짜, `memory.due_date` = 마감일 (별개 컬럼, migrate_v4)
 - `memory.is_user_verified` = 사용자가 수정한 기록 보호 플래그 — LLM 재처리가 덮어쓰지 않음
 - `memory_suggestions` = Reconciler가 만든 완료 제안, 근거·승인 이력과 함께 보존 (migrate_v5)
-- `chat_sessions`/`chat_messages`/`chat_summaries` = AES-256-GCM 암호화 세션 대화
+- `chat_sessions`/`chat_messages`/`chat_summaries` = 구형 서버 세션 호환 테이블(폐기 예정)
 - `project_memory` = 조망형 질문에 쓰이는 응축 요약
 
 ## 8. 핵심 흐름
@@ -320,13 +322,13 @@ repo 연결/동기화 (api/repository.py: POST .../sync)
 ### 8.3 질문 → 답변
 
 ```
-사용자 질문 (api/query.py 또는 chat/router.py 세션 질의)
+사용자 질문 + 로컬 최근 대화 (api/query.py)
   → retriever/query_intent.py: 의도 분류
       ├─ 조회형 → mysql_search.py → SQL 직조회 → 결정론 템플릿
       ├─ 조망형 → project_memory 응축 요약 직접 사용
       └─ 탐색형 → qa_engine.py → 멀티쿼리 + BM25/dense RRF → LLM 생성 → graph.py 검증 루프
-  → (세션 질의의 경우) context_builder.py 로 암호화 대화 이력과 함께 컨텍스트 조립
   → 답변 + 출처 반환
+  → 질문·답변은 데스크톱 로컬 저장소에만 보관
 ```
 
 ### 8.4 델타 브리핑
@@ -343,7 +345,7 @@ repo 연결/동기화 (api/repository.py: POST .../sync)
 - **정확도 > 재현율**: Reconciler의 완료 매칭은 애매하면 보고하지 않음(high/medium 확신 + 근거 필수). 놓친 제안은 다음 동기화나 사람이 잡을 수 있지만, 틀린 완료 처리는 신뢰를 무너뜨림.
 - **파괴적 변경은 제안-승인, 추가는 자동**: 메모리 적재는 자동이지만 완료 처리처럼 상태를 바꾸는 일은 반드시 사람의 승인을 거침 (human-in-the-loop).
 - **자기검증하는 답변 그래프**: 탐색형 Q&A는 검색 → 답변 → 검증 → (부족하면) 질의 확장 후 재검색 → 계획 제안까지 도는 LangGraph. 계획 생성 실패해도 답변은 유지(best-effort).
-- **로컬 우선 + 암호화**: 백엔드는 `127.0.0.1`에만 바인딩, 세션 대화는 AES-256-GCM 암호화 저장.
+- **개인 대화 로컬 우선**: 새 데스크톱의 채팅과 초안은 계정·서버 범위의 WebView 로컬 저장소에 보관하고, 서버에는 저장하지 않음. 앱 전용 암호화 저장소 전환은 후속 과제.
 
 ## 10. CI/CD
 

@@ -29,6 +29,8 @@ const AUTH_SESSION = {
 const PROJECT_STORAGE_KEY = `paim.projects.v8.account.${encodeURIComponent(
   `${API_SERVER_A}|${SMOKE_USER.id}|${SMOKE_USER.email}`,
 )}`;
+const PROJECT_DRAFT_STORAGE_KEY = `${PROJECT_STORAGE_KEY}.drafts`;
+const SERVER_PROJECTS_OVERRIDE_STORAGE_KEY = "paim.smoke.serverProjectsOverride.v1";
 const SIDEBAR_STORAGE_KEY = "paim.sidebarCollapsed.v1";
 const SIDEBAR_WIDTH_STORAGE_KEY = "paim.sidebarWidth.v1";
 const PROJECT_PANEL_COLLAPSED_STORAGE_KEY = "paim.projectPanelCollapsed.v2";
@@ -85,13 +87,13 @@ function createPaimApiMockScript() {
       window.__paimLayoutApiRequests = [];
       const originalFetch = window.fetch.bind(window);
       const serverDocumentsByProject = new Map();
-      const serverSessionsByProject = new Map();
       let includeSupersedingDecision = false;
       let pendingMemorySuggestions = [];
       let nextSuggestionResolutionStatus = null;
       const queryControl = {
         aborted: 0,
         delayMs: 0,
+        lastBody: null,
         requested: 0,
         resolved: 0,
       };
@@ -99,9 +101,6 @@ function createPaimApiMockScript() {
         projectDelayMs: 0,
         projectRequested: 0,
         projectResolved: 0,
-        sessionDelayMs: 0,
-        sessionRequested: 0,
-        sessionResolved: 0,
       };
       const documentControl = {
         delayMs: 0,
@@ -126,7 +125,6 @@ function createPaimApiMockScript() {
       }
       let nextDocumentId = 7000;
       let nextProjectId = 1000;
-      let nextSessionId = 1000;
 
       window.__paimLayoutSeedSupersedeSuggestion = (suggestionId = 901) => {
         includeSupersedingDecision = true;
@@ -151,17 +149,15 @@ function createPaimApiMockScript() {
       window.__paimLayoutConfigureQuery = ({ delayMs = 0 } = {}) => {
         queryControl.aborted = 0;
         queryControl.delayMs = Math.max(0, Number(delayMs) || 0);
+        queryControl.lastBody = null;
         queryControl.requested = 0;
         queryControl.resolved = 0;
       };
       window.__paimLayoutReadQueryControl = () => ({ ...queryControl });
-      window.__paimLayoutConfigureCreation = ({ projectDelayMs = 0, sessionDelayMs = 0 } = {}) => {
+      window.__paimLayoutConfigureCreation = ({ projectDelayMs = 0 } = {}) => {
         creationControl.projectDelayMs = Math.max(0, Number(projectDelayMs) || 0);
         creationControl.projectRequested = 0;
         creationControl.projectResolved = 0;
-        creationControl.sessionDelayMs = Math.max(0, Number(sessionDelayMs) || 0);
-        creationControl.sessionRequested = 0;
-        creationControl.sessionResolved = 0;
       };
       window.__paimLayoutReadCreationControl = () => ({ ...creationControl });
       window.__paimLayoutConfigureDocument = ({ delayMs = 0 } = {}) => {
@@ -197,6 +193,13 @@ function createPaimApiMockScript() {
       };
       const readStoredServerProjects = () => {
         try {
+          const override = localStorage.getItem(
+            ${JSON.stringify(SERVER_PROJECTS_OVERRIDE_STORAGE_KEY)},
+          );
+          if (override !== null) {
+            return JSON.parse(override);
+          }
+
           const savedState = JSON.parse(
             localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || "{}",
           );
@@ -290,6 +293,11 @@ function createPaimApiMockScript() {
               max_file_bytes: 8 * 1024 * 1024,
               max_total_bytes: 8 * 1024 * 1024,
             },
+            desktop_chat: {
+              storage: "local_only",
+              server_persistence: false,
+              legacy_session_api: "deprecated",
+            },
           });
         }
 
@@ -340,51 +348,8 @@ function createPaimApiMockScript() {
           ]);
         }
 
-        const projectSessionMatch = url.pathname.match(/^\\/api\\/v1\\/projects\\/(\\d+)\\/sessions$/);
-        if (projectSessionMatch && method === "GET") {
-          return json(serverSessionsByProject.get(Number(projectSessionMatch[1])) || []);
-        }
-
-        if (projectSessionMatch && method === "POST") {
-          creationControl.sessionRequested += 1;
-          const body = await readJson(init);
-          const projectId = Number(projectSessionMatch[1]);
-          const id = "smoke-session-" + nextSessionId;
-          nextSessionId += 1;
-          const session = {
-            id,
-            project_id: projectId,
-            title: body.title || "New Chat",
-          };
-          serverSessionsByProject.set(projectId, [
-            ...(serverSessionsByProject.get(projectId) || []),
-            session,
-          ]);
-          if (creationControl.sessionDelayMs > 0) {
-            await new Promise((resolve) => window.setTimeout(resolve, creationControl.sessionDelayMs));
-          }
-          creationControl.sessionResolved += 1;
-          return json(session);
-        }
-
-        const sessionPathMatch = url.pathname.match(
-          /^\\/api\\/v1\\/projects\\/(\\d+)\\/sessions\\/([^/]+)$/,
-        );
-        if (sessionPathMatch && method === "PATCH") {
-          const body = await readJson(init);
-          return json({
-            id: decodeURIComponent(sessionPathMatch[2]),
-            project_id: Number(sessionPathMatch[1]),
-            title: body.title || "New Chat",
-          });
-        }
-
-        if (sessionPathMatch && method === "DELETE") {
-          return empty();
-        }
-
-        if (/^\\/api\\/v1\\/projects\\/\\d+\\/sessions\\/[^/]+\\/messages$/.test(url.pathname)) {
-          return json([]);
+        if (/^\\/api\\/v1\\/projects\\/\\d+\\/sessions(?:\\/|$)/.test(url.pathname)) {
+          return json({ detail: "Desktop personal chats are local-only." }, 410);
         }
 
         if (/^\\/api\\/v1\\/projects\\/\\d+\\/query$/.test(url.pathname) && method === "POST") {
@@ -395,6 +360,7 @@ function createPaimApiMockScript() {
             : "좋아요. 이 내용을 프로젝트 메모로 정리할 수 있습니다.";
 
           queryControl.requested += 1;
+          queryControl.lastBody = body;
           if (queryControl.delayMs > 0) {
             const signal = init?.signal ||
               (typeof Request !== "undefined" && input instanceof Request ? input.signal : undefined);
@@ -816,10 +782,9 @@ async function setSmokeServerUrl(send, serverUrl) {
 async function openAppWithProject(send) {
   const seededProjectState = createDefaultSmokeProjectStorage();
 
-  await navigateAndWaitForSelector(send, APP_URL, ".app-shell");
   await evaluateAndNavigateToSelector(
     send,
-    `localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(SIDEBAR_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(SIDEBAR_WIDTH_STORAGE_KEY)}, '272'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_WIDTH_STORAGE_KEY)}, '360'); localStorage.removeItem(${JSON.stringify(PROJECT_COLLAPSED_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(seededProjectState)})`,
+    `localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)}); localStorage.removeItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}); localStorage.removeItem(${JSON.stringify(SERVER_PROJECTS_OVERRIDE_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(SIDEBAR_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(SIDEBAR_WIDTH_STORAGE_KEY)}, '272'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_WIDTH_STORAGE_KEY)}, '360'); localStorage.removeItem(${JSON.stringify(PROJECT_COLLAPSED_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(seededProjectState)})`,
     APP_URL,
     ".project-panel-menu",
   );
@@ -2877,6 +2842,7 @@ async function verifyStorageSanitization(send) {
       id: "session-storage-smoke",
       title: "Storage smoke",
       createdAt: Date.now(),
+      serverSessionId: "legacy-server-session",
       messages: [
         {
           id: "assistant-storage-smoke",
@@ -2906,27 +2872,33 @@ async function verifyStorageSanitization(send) {
     deviceScaleFactor: 1,
     mobile: false,
   });
-  await send("Page.navigate", { url: APP_URL });
-  await sleep(700);
   const seededProjectState = createProjectStorage(
     "project-storage-smoke",
     "Storage Smoke",
     seededSessions,
   );
-  await send("Runtime.evaluate", {
-    expression: `localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(seededProjectState)})`,
-  });
-  await send("Page.navigate", { url: APP_URL });
+  await evaluateAndNavigateToSelector(
+    send,
+    `localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)}); localStorage.removeItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(seededProjectState)})`,
+    APP_URL,
+    ".project-panel-menu",
+  );
   await sleep(700);
 
   const result = await send("Runtime.evaluate", {
     returnByValue: true,
     expression: `(() => {
       const savedValue = localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || "";
+      const savedState = JSON.parse(savedValue || "{}");
+      const savedSession = savedState.projects?.[0]?.sessions?.[0];
       return {
+        apiCalls: window.__paimLayoutApiCalls || [],
         containsPreviewUrl: savedValue.includes("previewUrl"),
         containsDataUrl: savedValue.includes("data:image"),
+        containsServerSessionId: savedValue.includes("serverSessionId"),
         attachmentVisible: document.body.textContent.includes("preview.png"),
+        title: savedSession?.title || "",
+        messageContents: savedSession?.messages?.map((message) => message.content) || [],
       };
     })()`,
   });
@@ -2937,8 +2909,25 @@ async function verifyStorageSanitization(send) {
     failures.push("stored sessions should not include attachment preview data URLs");
   }
 
+  if (value.containsServerSessionId) {
+    failures.push("legacy serverSessionId should be removed when local-only chat state is loaded");
+  }
+
   if (!value.attachmentVisible) {
     failures.push("stored attachment name should remain visible after sanitization");
+  }
+
+  if (value.title !== "Storage smoke" ||
+      !value.messageContents.includes("저장된 응답입니다.") ||
+      !value.messageContents.includes("첨부 저장 테스트")) {
+    failures.push("legacy chat cleanup should preserve the local title and messages");
+  }
+
+  const sessionApiCalls = value.apiCalls.filter((call) =>
+    /\/api\/v1\/projects\/\d+\/sessions(?:\/|$)/.test(call),
+  );
+  if (sessionApiCalls.length !== 0) {
+    failures.push("loading legacy local chat state should never call the server session API");
   }
 
   return { value, failures };
@@ -5083,10 +5072,9 @@ async function verifyInterruptibleBackgroundQuery(send) {
     deviceScaleFactor: 1,
     mobile: false,
   });
-  await navigateAndWaitForSelector(send, APP_URL, ".app-shell");
   await evaluateAndNavigateToSelector(
     send,
-    `localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(SIDEBAR_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(SIDEBAR_WIDTH_STORAGE_KEY)}, '272'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_WIDTH_STORAGE_KEY)}, '360'); localStorage.removeItem(${JSON.stringify(PROJECT_COLLAPSED_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(delayedQueryState)})`,
+    `localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)}); localStorage.removeItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(SIDEBAR_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(SIDEBAR_WIDTH_STORAGE_KEY)}, '272'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_WIDTH_STORAGE_KEY)}, '360'); localStorage.removeItem(${JSON.stringify(PROJECT_COLLAPSED_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(delayedQueryState)})`,
     APP_URL,
     ".prompt textarea:not(:disabled)",
   );
@@ -5199,7 +5187,7 @@ async function verifyInterruptibleBackgroundQuery(send) {
   return { value, failures };
 }
 
-// Stop은 생성 POST의 서버 ID를 회수하되, 그 뒤 query는 시작하지 않아야 한다.
+// Stop은 프로젝트 생성 POST의 서버 ID를 회수하되, 그 뒤 query는 시작하지 않아야 한다.
 async function verifyCancelledPreflightIdCommit(send) {
   const now = Date.now();
   const failures = [];
@@ -5261,10 +5249,9 @@ async function verifyCancelledPreflightIdCommit(send) {
     deviceScaleFactor: 1,
     mobile: false,
   });
-  await navigateAndWaitForSelector(send, APP_URL, ".app-shell");
   await evaluateAndNavigateToSelector(
     send,
-    `localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(SIDEBAR_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(SIDEBAR_WIDTH_STORAGE_KEY)}, '272'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_WIDTH_STORAGE_KEY)}, '360'); localStorage.removeItem(${JSON.stringify(PROJECT_COLLAPSED_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(projectCreationState)})`,
+    `localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)}); localStorage.removeItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(SIDEBAR_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(SIDEBAR_WIDTH_STORAGE_KEY)}, '272'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_WIDTH_STORAGE_KEY)}, '360'); localStorage.removeItem(${JSON.stringify(PROJECT_COLLAPSED_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(projectCreationState)})`,
     APP_URL,
     ".prompt textarea:not(:disabled)",
   );
@@ -5279,72 +5266,22 @@ async function verifyCancelledPreflightIdCommit(send) {
     expression: `(() => {
       const state = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
       const project = state.projects?.find((item) => item.id === 'project-preflight-create');
-      const session = project?.sessions?.find((item) => item.id === 'session-preflight-project');
       return {
         apiCalls: window.__paimLayoutApiCalls || [],
         apiProjectId: project?.apiProjectId ?? null,
         creation: window.__paimLayoutReadCreationControl(),
         query: window.__paimLayoutReadQueryControl(),
-        serverSessionId: session?.serverSessionId ?? null,
         stopVisible: Boolean(document.querySelector('button[aria-label="응답 중지"]')),
       };
     })()`,
   });
   value.project = projectResult.result.value;
 
-  const sessionCreationState = createProjectStorage(
-    "project-preflight-session",
-    "Preflight Session",
-    [
-      {
-        createdAt: now + 1,
-        id: "session-preflight-session",
-        messages: [],
-        title: "New Chat",
-      },
-    ],
-    "session-preflight-session",
-    [],
-    { apiProjectId: 1 },
-  );
-
-  await evaluateAndNavigateToSelector(
-    send,
-    `localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(sessionCreationState)})`,
-    APP_URL,
-    ".prompt textarea:not(:disabled)",
-  );
-  await send("Runtime.evaluate", {
-    expression: `window.__paimLayoutConfigureCreation({ sessionDelayMs: 650 }); window.__paimLayoutConfigureQuery({ delayMs: 0 })`,
-  });
-  await submitAndStop("세션 생성 중 중지", "sessionRequested");
-  await sleep(850);
-
-  const sessionResult = await send("Runtime.evaluate", {
-    returnByValue: true,
-    expression: `(() => {
-      const state = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
-      const project = state.projects?.find((item) => item.id === 'project-preflight-session');
-      const session = project?.sessions?.find((item) => item.id === 'session-preflight-session');
-      return {
-        apiCalls: window.__paimLayoutApiCalls || [],
-        apiProjectId: project?.apiProjectId ?? null,
-        creation: window.__paimLayoutReadCreationControl(),
-        query: window.__paimLayoutReadQueryControl(),
-        serverSessionId: session?.serverSessionId ?? null,
-        stopVisible: Boolean(document.querySelector('button[aria-label="응답 중지"]')),
-      };
-    })()`,
-  });
-  value.session = sessionResult.result.value;
-
   const projectQueryCalls = value.project.apiCalls.filter((call) => /POST \/api\/v1\/projects\/\d+\/query/.test(call));
-  const projectSessionCalls = value.project.apiCalls.filter((call) => /POST \/api\/v1\/projects\/\d+\/sessions/.test(call));
+  const projectSessionCalls = value.project.apiCalls.filter((call) => /\/api\/v1\/projects\/\d+\/sessions(?:\/|$)/.test(call));
   if (value.project.apiProjectId !== 1000 ||
-      value.project.serverSessionId !== null ||
       value.project.creation.projectRequested !== 1 ||
       value.project.creation.projectResolved !== 1 ||
-      value.project.creation.sessionRequested !== 0 ||
       value.project.query.requested !== 0 ||
       projectQueryCalls.length !== 0 ||
       projectSessionCalls.length !== 0 ||
@@ -5352,23 +5289,11 @@ async function verifyCancelledPreflightIdCommit(send) {
     failures.push("Stop during project creation should retain the committed project id without creating a session or query");
   }
 
-  const sessionQueryCalls = value.session.apiCalls.filter((call) => /POST \/api\/v1\/projects\/\d+\/query/.test(call));
-  if (value.session.apiProjectId !== 1 ||
-      value.session.serverSessionId !== "smoke-session-1000" ||
-      value.session.creation.projectRequested !== 0 ||
-      value.session.creation.sessionRequested !== 1 ||
-      value.session.creation.sessionResolved !== 1 ||
-      value.session.query.requested !== 0 ||
-      sessionQueryCalls.length !== 0 ||
-      value.session.stopVisible) {
-    failures.push("Stop during session creation should retain the committed session id without starting a query");
-  }
-
   debugLayout("cancelled preflight id commit", value);
   return { value, failures };
 }
 
-// Stop 직후 재전송은 진행 중인 생성 Promise를 공유하고 두 번째 query만 실행한다.
+// Stop 직후 재전송은 진행 중인 프로젝트 생성 Promise를 공유하고 두 번째 query만 실행한다.
 async function verifyPreflightRetrySharesCreation(send) {
   const now = Date.now();
   const failures = [];
@@ -5439,10 +5364,9 @@ async function verifyPreflightRetrySharesCreation(send) {
     deviceScaleFactor: 1,
     mobile: false,
   });
-  await navigateAndWaitForSelector(send, APP_URL, ".app-shell");
   await evaluateAndNavigateToSelector(
     send,
-    `localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(SIDEBAR_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(SIDEBAR_WIDTH_STORAGE_KEY)}, '272'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_WIDTH_STORAGE_KEY)}, '360'); localStorage.removeItem(${JSON.stringify(PROJECT_COLLAPSED_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(projectRetryState)})`,
+    `localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)}); localStorage.removeItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(SIDEBAR_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(SIDEBAR_WIDTH_STORAGE_KEY)}, '272'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_WIDTH_STORAGE_KEY)}, '360'); localStorage.removeItem(${JSON.stringify(PROJECT_COLLAPSED_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(projectRetryState)})`,
     APP_URL,
     ".prompt textarea:not(:disabled)",
   );
@@ -5466,7 +5390,6 @@ async function verifyPreflightRetrySharesCreation(send) {
     expression: `(() => {
       const state = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
       const project = state.projects?.find((item) => item.id === 'project-preflight-retry');
-      const session = project?.sessions?.find((item) => item.id === 'session-preflight-project-retry');
       return {
         apiCalls: window.__paimLayoutApiCalls || [],
         apiProjectId: project?.apiProjectId ?? null,
@@ -5474,7 +5397,6 @@ async function verifyPreflightRetrySharesCreation(send) {
         creation: window.__paimLayoutReadCreationControl(),
         errorCount: document.querySelectorAll('.message[data-role="error"]').length,
         query: window.__paimLayoutReadQueryControl(),
-        serverSessionId: session?.serverSessionId ?? null,
         userCount: document.querySelectorAll('.message[data-role="user"]').length,
       };
     })()`,
@@ -5484,102 +5406,22 @@ async function verifyPreflightRetrySharesCreation(send) {
     done: projectDoneResult.result.value,
   };
 
-  const sessionRetryState = createProjectStorage(
-    "project-session-retry",
-    "Preflight Session Retry",
-    [
-      {
-        createdAt: now + 1,
-        id: "session-preflight-retry",
-        messages: [],
-        title: "New Chat",
-      },
-    ],
-    "session-preflight-retry",
-    [],
-    { apiProjectId: 1 },
-  );
-
-  await evaluateAndNavigateToSelector(
-    send,
-    `localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(sessionRetryState)})`,
-    APP_URL,
-    ".prompt textarea:not(:disabled)",
-  );
-  await send("Runtime.evaluate", {
-    expression: `window.__paimLayoutConfigureCreation({ sessionDelayMs: 750 }); window.__paimLayoutConfigureQuery({ delayMs: 0 })`,
-  });
-  await stopAndRetry("세션 생성 첫 요청", "세션 생성 재요청", "sessionRequested");
-
-  const sessionDuringResult = await send("Runtime.evaluate", {
-    returnByValue: true,
-    expression: `(() => ({
-      creation: window.__paimLayoutReadCreationControl(),
-      query: window.__paimLayoutReadQueryControl(),
-      userCount: document.querySelectorAll('.message[data-role="user"]').length,
-    }))()`,
-  });
-  await waitForRuntime(`window.__paimLayoutReadQueryControl()?.resolved === 1`);
-  await sleep(120);
-  const sessionDoneResult = await send("Runtime.evaluate", {
-    returnByValue: true,
-    expression: `(() => {
-      const state = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
-      const project = state.projects?.find((item) => item.id === 'project-session-retry');
-      const session = project?.sessions?.find((item) => item.id === 'session-preflight-retry');
-      return {
-        apiCalls: window.__paimLayoutApiCalls || [],
-        apiProjectId: project?.apiProjectId ?? null,
-        assistantCount: document.querySelectorAll('.message[data-role="assistant"]').length,
-        creation: window.__paimLayoutReadCreationControl(),
-        errorCount: document.querySelectorAll('.message[data-role="error"]').length,
-        query: window.__paimLayoutReadQueryControl(),
-        serverSessionId: session?.serverSessionId ?? null,
-        userCount: document.querySelectorAll('.message[data-role="user"]').length,
-      };
-    })()`,
-  });
-  value.session = {
-    during: sessionDuringResult.result.value,
-    done: sessionDoneResult.result.value,
-  };
-
   const projectCalls = value.project.done.apiCalls;
   if (value.project.during.userCount !== 2 ||
       value.project.during.creation.projectRequested !== 1 ||
       value.project.during.creation.projectResolved !== 0 ||
       value.project.during.query.requested !== 0 ||
       projectCalls.filter((call) => call === "POST /api/v1/projects").length !== 1 ||
-      projectCalls.filter((call) => /POST \/api\/v1\/projects\/\d+\/sessions/.test(call)).length !== 1 ||
+      projectCalls.filter((call) => /\/api\/v1\/projects\/\d+\/sessions(?:\/|$)/.test(call)).length !== 0 ||
       projectCalls.filter((call) => /POST \/api\/v1\/projects\/\d+\/query/.test(call)).length !== 1 ||
       value.project.done.creation.projectRequested !== 1 ||
       value.project.done.query.requested !== 1 ||
       value.project.done.query.resolved !== 1 ||
       value.project.done.apiProjectId !== 1000 ||
-      value.project.done.serverSessionId !== "smoke-session-1000" ||
       value.project.done.userCount !== 2 ||
       value.project.done.assistantCount !== 1 ||
       value.project.done.errorCount !== 0) {
     failures.push("retry during project creation should share one project POST and complete exactly one query");
-  }
-
-  const sessionCalls = value.session.done.apiCalls;
-  if (value.session.during.userCount !== 2 ||
-      value.session.during.creation.sessionRequested !== 1 ||
-      value.session.during.creation.sessionResolved !== 0 ||
-      value.session.during.query.requested !== 0 ||
-      sessionCalls.filter((call) => call === "POST /api/v1/projects").length !== 0 ||
-      sessionCalls.filter((call) => /POST \/api\/v1\/projects\/\d+\/sessions/.test(call)).length !== 1 ||
-      sessionCalls.filter((call) => /POST \/api\/v1\/projects\/\d+\/query/.test(call)).length !== 1 ||
-      value.session.done.creation.sessionRequested !== 1 ||
-      value.session.done.query.requested !== 1 ||
-      value.session.done.query.resolved !== 1 ||
-      value.session.done.apiProjectId !== 1 ||
-      value.session.done.serverSessionId !== "smoke-session-1000" ||
-      value.session.done.userCount !== 2 ||
-      value.session.done.assistantCount !== 1 ||
-      value.session.done.errorCount !== 0) {
-    failures.push("retry during session creation should share one session POST and complete exactly one query");
   }
 
   debugLayout("preflight retry shares creation", value);
@@ -6148,7 +5990,7 @@ async function verifySupersedeSuggestionFlow(send) {
   return { value, failures };
 }
 
-// 새 구조에서는 기본 채팅 입력이 바로 데모 응답 흐름으로 이어진다.
+// 개인 채팅은 서버 세션 API 없이 로컬 이력을 stateless query에 전달하고 로컬에 보존한다.
 async function verifyProjectChatQuestion(send) {
   await send("Emulation.setDeviceMetricsOverride", {
     width: 960,
@@ -6157,6 +5999,10 @@ async function verifyProjectChatQuestion(send) {
     mobile: false,
   });
   await openAppWithProject(send);
+  await waitForSelector(send, '.prompt textarea:not([aria-disabled="true"])');
+  await send("Runtime.evaluate", {
+    expression: `window.__paimLayoutConfigureQuery({ delayMs: 0 })`,
+  });
 
   await send("Runtime.evaluate", {
     expression: `(() => {
@@ -6181,10 +6027,13 @@ async function verifyProjectChatQuestion(send) {
       const activeSession = activeProject?.sessions.find((session) => session.id === savedState.selectedSessionId);
 
       return {
+        apiCalls: window.__paimLayoutApiCalls || [],
         sessionCount: activeProject?.sessions.length ?? 0,
-          activeTitle: activeSession?.title || "",
-          hasPrompt: Boolean(document.querySelector('.prompt')),
-          hasOverview: Boolean(document.querySelector('.project-overview')),
+        activeTitle: activeSession?.title || "",
+        hasPrompt: Boolean(document.querySelector('.prompt')),
+        hasOverview: Boolean(document.querySelector('.project-overview')),
+        messageCount: activeSession?.messages?.length ?? 0,
+        query: window.__paimLayoutReadQueryControl(),
         conversationText: document.querySelector('.conversation')?.textContent || "",
       };
     })()`,
@@ -6196,16 +6045,355 @@ async function verifyProjectChatQuestion(send) {
     failures.push("chat question should stay in the active chat session");
   }
 
-    if (!value.hasPrompt || value.hasOverview) {
-      failures.push("chat question should stay in the chat view");
-    }
+  if (!value.hasPrompt || value.hasOverview) {
+    failures.push("chat question should stay in the chat view");
+  }
 
   if (!value.conversationText.includes("이번 주 액션 알려줘") ||
         !value.conversationText.includes("좋아요. 이 내용을 프로젝트 메모로 정리할 수 있습니다.")) {
-      failures.push("chat question should submit through the demo chat flow");
-    }
+    failures.push("chat question should submit through the demo chat flow");
+  }
+
+  const sessionApiCalls = value.apiCalls.filter((call) =>
+    /\/api\/v1\/projects\/\d+\/sessions(?:\/|$)/.test(call),
+  );
+  const projectQueryCalls = value.apiCalls.filter((call) =>
+    /POST \/api\/v1\/projects\/\d+\/query/.test(call),
+  );
+  if (sessionApiCalls.length !== 0 ||
+      projectQueryCalls.length !== 1 ||
+      value.query.requested !== 1 ||
+      value.query.resolved !== 1 ||
+      value.query.lastBody?.question !== "이번 주 액션 알려줘" ||
+      value.query.lastBody?.history?.length !== 1 ||
+      value.query.lastBody?.history?.[0]?.role !== "assistant" ||
+      value.query.lastBody?.history?.[0]?.content !== "저장된 응답입니다." ||
+      value.messageCount !== 3) {
+    failures.push("chat should use one stateless query with local history and never call the server session API");
+  }
 
   debugLayout("project chat question", value);
+  return { value, failures };
+}
+
+// 앱을 다시 시작해도 로컬 대화가 복원되고 후속 질문의 history로만 전송되는지 확인한다.
+async function verifyLocalChatReloadAndFollowup(send) {
+  await send("Emulation.setDeviceMetricsOverride", {
+    width: 960,
+    height: 680,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await openAppWithProject(send);
+  await waitForSelector(send, '.prompt textarea:not([aria-disabled="true"])');
+  await send("Runtime.evaluate", {
+    expression: `window.__paimLayoutConfigureQuery({ delayMs: 0 })`,
+  });
+
+  async function submitQuestion(question) {
+    await send("Runtime.evaluate", {
+      expression: `(() => {
+        const input = document.querySelector('.prompt textarea');
+        const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+        valueSetter?.call(input, ${JSON.stringify(question)});
+        input?.dispatchEvent(new Event('input', { bubbles: true }));
+      })()`,
+    });
+    await sleep(100);
+    await send("Runtime.evaluate", {
+      expression: `document.querySelector('button[aria-label="메시지 보내기"]')?.click()`,
+    });
+    await sleep(1200);
+  }
+
+  async function readLocalChat() {
+    const result = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `(() => {
+        const savedState = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
+        const project = savedState.projects?.find((item) => item.id === savedState.selectedProjectId);
+        const session = project?.sessions?.find((item) => item.id === savedState.selectedSessionId);
+        return {
+          apiCalls: window.__paimLayoutApiCalls || [],
+          title: session?.title || "",
+          messages: session?.messages?.map(({ role, content }) => ({ role, content })) || [],
+          conversationText: document.querySelector('.conversation')?.textContent || "",
+          query: window.__paimLayoutReadQueryControl(),
+        };
+      })()`,
+    });
+    return result.result.value;
+  }
+
+  await submitQuestion("배포 주기는 2주야");
+  const beforeReload = await readLocalChat();
+
+  await navigateAndWaitForSelector(send, APP_URL, ".project-panel-menu");
+  await waitForSelector(send, ".prompt textarea:not(:disabled)");
+  await waitForSelector(send, '.prompt textarea:not([aria-disabled="true"])');
+  await sleep(250);
+  const restored = await readLocalChat();
+
+  await send("Runtime.evaluate", {
+    expression: `window.__paimLayoutConfigureQuery({ delayMs: 0 })`,
+  });
+  await submitQuestion("그건 왜 바뀌었어?");
+  const afterFollowup = await readLocalChat();
+
+  const value = { beforeReload, restored, afterFollowup };
+  const failures = [];
+  const expectedAnswer = "좋아요. 이 내용을 프로젝트 메모로 정리할 수 있습니다.";
+  const sessionApiCalls = [...beforeReload.apiCalls, ...afterFollowup.apiCalls].filter((call) =>
+    /\/api\/v1\/projects\/\d+\/sessions(?:\/|$)/.test(call),
+  );
+
+  if (beforeReload.messages.length !== 3 ||
+      beforeReload.query.lastBody?.question !== "배포 주기는 2주야" ||
+      beforeReload.query.lastBody?.history?.length !== 1 ||
+      beforeReload.query.lastBody?.history?.[0]?.content !== "저장된 응답입니다.") {
+    failures.push("the first turn should be stored locally and use the existing local history");
+  }
+
+  if (restored.title !== "Smoke Chat" ||
+      restored.messages.length !== 3 ||
+      !restored.messages.some((message) => message.content === "배포 주기는 2주야") ||
+      !restored.messages.some((message) => message.content === expectedAnswer) ||
+      !restored.conversationText.includes("배포 주기는 2주야") ||
+      !restored.conversationText.includes(expectedAnswer)) {
+    failures.push("reload should restore the local title, question, and answer in storage and the UI");
+  }
+
+  const history = afterFollowup.query.lastBody?.history || [];
+  if (afterFollowup.query.lastBody?.question !== "그건 왜 바뀌었어?" ||
+      afterFollowup.query.requested !== 1 ||
+      afterFollowup.query.resolved !== 1 ||
+      history.length !== 3 ||
+      history[0]?.role !== "assistant" ||
+      history[0]?.content !== "저장된 응답입니다." ||
+      history[1]?.role !== "user" ||
+      history[1]?.content !== "배포 주기는 2주야" ||
+      history[2]?.role !== "assistant" ||
+      history[2]?.content !== expectedAnswer ||
+      history.some((message) => message.content === "그건 왜 바뀌었어?") ||
+      afterFollowup.messages.length !== 5) {
+    failures.push("follow-up after reload should send only the three restored prior messages as history");
+  }
+
+  if (sessionApiCalls.length !== 0) {
+    failures.push("startup, reload, and follow-up should never call the server session API");
+  }
+
+  debugLayout("local chat reload and follow-up", value);
+  return { value, failures };
+}
+
+// 작성 중인 개인 초안도 계정·서버 범위의 로컬 저장소에서 재시작 후 복원한다.
+async function verifyLocalDraftReload(send) {
+  await send("Emulation.setDeviceMetricsOverride", {
+    width: 960,
+    height: 680,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await openAppWithProject(send);
+  await waitForSelector(send, '.prompt textarea:not([aria-disabled="true"])');
+
+  await send("Runtime.evaluate", {
+    expression: `(() => {
+      const input = document.querySelector('.prompt textarea');
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      valueSetter?.call(input, '재시작 후에도 남는 개인 초안');
+      input?.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`,
+  });
+  await sleep(200);
+
+  const beforeReloadResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => ({
+      apiCalls: window.__paimLayoutApiCalls || [],
+      draftRaw: localStorage.getItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}) || '',
+      prompt: document.querySelector('.prompt textarea')?.value || '',
+    }))()`,
+  });
+
+  await navigateAndWaitForSelector(send, APP_URL, ".project-panel-menu");
+  await waitForSelector(send, '.prompt textarea:not([aria-disabled="true"])');
+  await sleep(200);
+
+  const restoredResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => ({
+      apiCalls: window.__paimLayoutApiCalls || [],
+      draftRaw: localStorage.getItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}) || '',
+      prompt: document.querySelector('.prompt textarea')?.value || '',
+      query: window.__paimLayoutReadQueryControl(),
+    }))()`,
+  });
+
+  const value = {
+    beforeReload: beforeReloadResult.result.value,
+    restored: restoredResult.result.value,
+  };
+  const failures = [];
+  const expectedDraft = "재시작 후에도 남는 개인 초안";
+  const sessionApiCalls = [
+    ...value.beforeReload.apiCalls,
+    ...value.restored.apiCalls,
+  ].filter((call) => /\/api\/v1\/projects\/\d+\/sessions(?:\/|$)/.test(call));
+
+  if (value.beforeReload.prompt !== expectedDraft ||
+      !value.beforeReload.draftRaw.includes(expectedDraft)) {
+    failures.push("typing should persist the active draft in the scoped local draft store");
+  }
+
+  if (value.restored.prompt !== expectedDraft ||
+      !value.restored.draftRaw.includes(expectedDraft)) {
+    failures.push("reloading the app should restore the active local draft");
+  }
+
+  if (sessionApiCalls.length !== 0 ||
+      value.restored.query.requested !== 0) {
+    failures.push("restoring a draft should not call a server chat or query endpoint");
+  }
+
+  debugLayout("local draft reload", value);
+  return { value, failures };
+}
+
+// 서버에서 삭제되거나 권한이 회수된 프로젝트의 개인 초안은 계정 캐시에 남기지 않는다.
+async function verifyRemovedProjectDraftCleanup(send) {
+  const now = Date.now();
+  const survivorProjectId = "project-draft-survivor";
+  const survivorSessionId = "session-draft-survivor";
+  const removedProjectId = "project-draft-removed";
+  const removedSessionId = "session-draft-removed";
+  const survivorDraft = "계속 보관할 개인 초안";
+  const removedDraft = "권한 회수 후 삭제할 개인 초안";
+  const seededProjectState = createProjectStorageState(
+    [
+      {
+        apiProjectId: 1,
+        createdAt: now,
+        files: [],
+        id: survivorProjectId,
+        name: "Draft Survivor",
+        sessions: [
+          {
+            createdAt: now,
+            id: survivorSessionId,
+            messages: [],
+            title: "Survivor Chat",
+          },
+        ],
+      },
+      {
+        apiProjectId: 2,
+        createdAt: now + 1,
+        files: [],
+        id: removedProjectId,
+        name: "Draft Removed",
+        sessions: [
+          {
+            createdAt: now + 1,
+            id: removedSessionId,
+            messages: [],
+            title: "Removed Chat",
+          },
+        ],
+      },
+    ],
+    removedProjectId,
+    removedSessionId,
+  );
+  const seededDrafts = {
+    [`${survivorProjectId}\u0000${survivorSessionId}`]: {
+      attachments: [],
+      prompt: survivorDraft,
+    },
+    [`${removedProjectId}\u0000${removedSessionId}`]: {
+      attachments: [],
+      prompt: removedDraft,
+    },
+  };
+  const serverProjects = [
+    {
+      created_at: new Date(now).toISOString(),
+      id: 1,
+      name: "Draft Survivor",
+    },
+  ];
+
+  await send("Emulation.setDeviceMetricsOverride", {
+    width: 960,
+    height: 680,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await evaluateAndNavigateToSelector(
+    send,
+    `localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(seededProjectState)}); localStorage.setItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}, ${JSON.stringify(JSON.stringify(seededDrafts))}); localStorage.setItem(${JSON.stringify(SERVER_PROJECTS_OVERRIDE_STORAGE_KEY)}, ${JSON.stringify(JSON.stringify(serverProjects))})`,
+    APP_URL,
+    ".project-panel-menu",
+  );
+
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 4000) {
+    const syncResult = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `(() => {
+        const state = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
+        return state.projects?.length === 1 &&
+          state.selectedProjectId === ${JSON.stringify(survivorProjectId)};
+      })()`,
+    });
+    if (syncResult.result.value) {
+      break;
+    }
+    await sleep(50);
+  }
+  await sleep(200);
+
+  const result = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const state = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
+      const drafts = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}) || '{}');
+      localStorage.removeItem(${JSON.stringify(SERVER_PROJECTS_OVERRIDE_STORAGE_KEY)});
+      return {
+        apiCalls: window.__paimLayoutApiCalls || [],
+        draftKeys: Object.keys(drafts),
+        draftValues: Object.values(drafts).map((draft) => draft?.prompt || ''),
+        projectIds: (state.projects || []).map((project) => project.id),
+        prompt: document.querySelector('.prompt textarea')?.value || '',
+        selectedProjectId: state.selectedProjectId || '',
+      };
+    })()`,
+  });
+  const value = result.result.value;
+  const failures = [];
+  const sessionApiCalls = value.apiCalls.filter((call) =>
+    /\/api\/v1\/projects\/\d+\/sessions(?:\/|$)/.test(call),
+  );
+
+  if (value.projectIds.length !== 1 ||
+      value.projectIds[0] !== survivorProjectId ||
+      value.selectedProjectId !== survivorProjectId) {
+    failures.push("server sync should remove a project that is no longer visible to the account");
+  }
+
+  if (value.draftKeys.some((key) => key.startsWith(`${removedProjectId}\u0000`)) ||
+      value.draftValues.includes(removedDraft) ||
+      !value.draftValues.includes(survivorDraft) ||
+      value.prompt !== survivorDraft) {
+    failures.push("server sync should delete only the removed project drafts and show the surviving draft");
+  }
+
+  if (sessionApiCalls.length !== 0) {
+    failures.push("pruning removed project drafts should never call the server session API");
+  }
+
+  debugLayout("removed project draft cleanup", value);
   return { value, failures };
 }
 
@@ -6303,10 +6491,9 @@ async function verifyProjectOverviewFiles(send) {
     deviceScaleFactor: 1,
     mobile: false,
   });
-  await navigateAndWaitForSelector(send, APP_URL, ".app-shell");
   await evaluateAndNavigateToSelector(
     send,
-    `localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(SIDEBAR_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(SIDEBAR_WIDTH_STORAGE_KEY)}, '272'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_WIDTH_STORAGE_KEY)}, '360'); localStorage.removeItem(${JSON.stringify(PROJECT_COLLAPSED_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(seededProjectState)})`,
+    `localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)}); localStorage.removeItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}); localStorage.removeItem(${JSON.stringify(SERVER_PROJECTS_OVERRIDE_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(SIDEBAR_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(SIDEBAR_WIDTH_STORAGE_KEY)}, '272'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_WIDTH_STORAGE_KEY)}, '360'); localStorage.removeItem(${JSON.stringify(PROJECT_COLLAPSED_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(seededProjectState)})`,
     APP_URL,
     ".project-panel-menu",
   );
@@ -9209,6 +9396,31 @@ try {
   await navigateAndWaitForSelector(send, APP_URL, ".app-shell");
 
   let hasFailures = false;
+  const layoutFocus = process.env.PAIM_LAYOUT_FOCUS;
+
+  if (layoutFocus === "local-chat") {
+    const focusedChecks = [
+      ["storage sanitization", await verifyStorageSanitization(send)],
+      ["project chat question", await verifyProjectChatQuestion(send)],
+      ["local chat reload and follow-up", await verifyLocalChatReloadAndFollowup(send)],
+      ["local draft reload", await verifyLocalDraftReload(send)],
+      ["removed project draft cleanup", await verifyRemovedProjectDraftCleanup(send)],
+    ];
+
+    for (const [label, result] of focusedChecks) {
+      if (result.failures.length > 0) {
+        hasFailures = true;
+        console.log(`FAIL ${label}`);
+        result.failures.forEach((failure) => console.log(`  - ${failure}`));
+      } else {
+        console.log(`PASS ${label}`);
+      }
+    }
+  } else {
+    if (layoutFocus) {
+      throw new Error(`Unsupported PAIM_LAYOUT_FOCUS: ${layoutFocus}`);
+    }
+
   const measuredNoticeStackResult = await verifyMeasuredNoticeStackClearance(send);
 
   if (measuredNoticeStackResult.failures.length > 0) {
@@ -9469,7 +9681,7 @@ try {
     console.log("FAIL cancelled query preflight id commit");
     cancelledPreflightIdCommitResult.failures.forEach((failure) => console.log(`  - ${failure}`));
   } else {
-    console.log("PASS cancelled query preflight retains committed project/session ids without querying");
+    console.log("PASS cancelled query preflight retains the committed project id without querying");
   }
 
   const preflightRetrySharesCreationResult = await verifyPreflightRetrySharesCreation(send);
@@ -9479,7 +9691,7 @@ try {
     console.log("FAIL preflight retry creation ownership");
     preflightRetrySharesCreationResult.failures.forEach((failure) => console.log(`  - ${failure}`));
   } else {
-    console.log("PASS immediate retry shares in-flight project/session creation and completes one query");
+    console.log("PASS immediate retry shares in-flight project creation and completes one query");
   }
 
   const projectPanelMenuResult = await verifyProjectPanelMenu(send);
@@ -9509,7 +9721,39 @@ try {
     console.log("FAIL project chat question");
     chatQuestionResult.failures.forEach((failure) => console.log(`  - ${failure}`));
   } else {
-    console.log("PASS project chat question uses the demo response flow");
+    console.log("PASS project chat stays local and uses one stateless query with local history");
+  }
+
+  const localChatReloadResult = await verifyLocalChatReloadAndFollowup(send);
+
+  if (localChatReloadResult.failures.length > 0) {
+    hasFailures = true;
+    console.log("FAIL local chat reload and follow-up");
+    localChatReloadResult.failures.forEach((failure) => console.log(`  - ${failure}`));
+  } else {
+    console.log("PASS local chat survives reload and supplies restored history to a follow-up");
+  }
+
+  const localDraftReloadResult = await verifyLocalDraftReload(send);
+
+  if (localDraftReloadResult.failures.length > 0) {
+    hasFailures = true;
+    console.log("FAIL local draft reload");
+    localDraftReloadResult.failures.forEach((failure) => console.log(`  - ${failure}`));
+  } else {
+    console.log("PASS local draft survives reload without a server chat request");
+  }
+
+  const removedProjectDraftCleanupResult = await verifyRemovedProjectDraftCleanup(send);
+
+  if (removedProjectDraftCleanupResult.failures.length > 0) {
+    hasFailures = true;
+    console.log("FAIL removed project draft cleanup");
+    removedProjectDraftCleanupResult.failures.forEach((failure) =>
+      console.log(`  - ${failure}`),
+    );
+  } else {
+    console.log("PASS removed project drafts are pruned without affecting surviving drafts");
   }
 
   const overviewFilesResult = await verifyProjectOverviewFiles(send);
@@ -9630,6 +9874,7 @@ try {
     console.log(
       `PASS ${state} prompt=${result.value.prompt.left.toFixed(1)}-${result.value.prompt.right.toFixed(1)} scroll=${result.value.scrollWidth}`,
     );
+  }
   }
 
   if (hasFailures) {

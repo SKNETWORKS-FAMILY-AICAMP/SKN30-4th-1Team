@@ -143,6 +143,11 @@ MySQL, schema, ChromaDB, upload 저장소의 준비 상태를 확인한다. 인�
     "extensions": ["docx", "md", "pdf", "txt"],
     "max_file_bytes": 8388608,
     "max_total_bytes": 8388608
+  },
+  "desktop_chat": {
+    "storage": "local_only",
+    "server_persistence": false,
+    "legacy_session_api": "deprecated"
   }
 }
 ```
@@ -1085,7 +1090,8 @@ Git 로그 텍스트를 동기 처리해 메모리로 추출·적재한다. (최
 
 ## 채팅 세션
 
-> **경로 확정 (2026-07-02)**: 세션 엔드포인트는 `/api/v1/projects/{id}/sessions/*` 로 확정되었습니다.
+> **폐기 예정**: 세션 엔드포인트는 구형 클라이언트 호환을 위해서만 유지됩니다.
+> 새 데스크톱은 개인 대화를 로컬에 저장하며 이 API를 호출하지 않습니다.
 
 ### `POST /api/v1/projects/{project_id}/sessions`
 
@@ -1241,11 +1247,11 @@ Git 로그 텍스트를 동기 처리해 메모리로 추출·적재한다. (최
 | 필드 | 타입 | 필수 | 설명 |
 |------|------|------|------|
 | `question` | string | ✅ | 질문 |
-| `history` | array | - | `{role, content}` 대화 이력 |
+| `history` | array | - | `{role, content}` 로컬 대화 이력. 질의 처리에만 사용하며 서버 세션에 저장하지 않음 |
 | `attachments` | array | - | 첨부 자료 `{filename, content_base64}`. `.md`/`.markdown`/`.txt`/`.docx`/`.pdf`, **파일당 최대 8 MB · 전체 합계 8 MB** |
 
 > **`attachments`**: 첨부가 있으면 라우터를 우회해 항상 `route: "semantic"`으로
-> 처리된다. 형식 미지원 시 **400**, 8 MB 초과 시 **413**.
+> 처리된다. 형식 미지원 시 **400**, 파일당 또는 전체 합계 8 MB 초과 시 **413**.
 > 첨부 상한(`QUERY_ATTACHMENT_MAX_FILE_BYTES` = 8 MB)은 문서 업로드 상한
 > (`PROJECT_DOCUMENT_MAX_FILE_BYTES` = 10 MB)과 다른 값이다.
 
@@ -1487,13 +1493,13 @@ GitHub 설치 완료 후 리다이렉트되는 콜백. **공개(무인증)이나
 | `POST /api/v1/projects/{id}/memory` | ✅ 구현 완료 |
 | `PATCH /api/v1/projects/{id}/memory/{memory_id}` | ✅ 구현 완료 |
 | `DELETE /api/v1/projects/{id}/memory/{memory_id}` | ✅ 구현 완료 |
-| `POST /api/v1/projects/{id}/query` | ✅ 구현 완료 |
-| `POST /api/v1/projects/{id}/sessions` | ✅ 구현 완료 (require_project_access member) |
-| `GET /api/v1/projects/{id}/sessions` | ✅ 구현 완료 (require_project_access viewer) |
-| `PATCH /api/v1/projects/{id}/sessions/{sid}` | ✅ 구현 완료 |
-| `DELETE /api/v1/projects/{id}/sessions/{sid}` | ✅ 구현 완료 (messages + summaries cascade) |
-| `GET /api/v1/projects/{id}/sessions/{sid}/messages` | ✅ 구현 완료 (AES-256-GCM 복호화) |
-| `POST /api/v1/projects/{id}/sessions/{sid}/query` | ✅ 구현 완료 (롤링 요약, 토큰 예산 관리) |
+| `POST /api/v1/projects/{id}/query` | ✅ 구현 완료 (서버 채팅 비영속) |
+| `POST /api/v1/projects/{id}/sessions` | ⚠️ 구형 클라이언트 호환·폐기 예정 (member) |
+| `GET /api/v1/projects/{id}/sessions` | ⚠️ 구형 클라이언트 호환·폐기 예정 (viewer) |
+| `PATCH /api/v1/projects/{id}/sessions/{sid}` | ⚠️ 구형 클라이언트 호환·폐기 예정 |
+| `DELETE /api/v1/projects/{id}/sessions/{sid}` | ⚠️ 구형 클라이언트 호환·폐기 예정 |
+| `GET /api/v1/projects/{id}/sessions/{sid}/messages` | ⚠️ 구형 클라이언트 호환·폐기 예정 |
+| `POST /api/v1/projects/{id}/sessions/{sid}/query` | ⚠️ 구형 클라이언트 호환·폐기 예정 |
 | `POST /api/v1/auth/signup` | ✅ 구현 완료 (공개) |
 | `POST /api/v1/auth/login` | ✅ 구현 완료 (공개) |
 | `GET /api/v1/auth/me` | ✅ 구현 완료 (인증) |
