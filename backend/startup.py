@@ -82,6 +82,11 @@ def ensure_runtime_schema() -> None:
                         "ALTER TABLE memory ADD COLUMN completion_status_source"
                         " VARCHAR(20) NULL AFTER completion_status"
                     )
+                if not _column_exists(cursor, "repositories", "sync_started_at"):
+                    cursor.execute(
+                        "ALTER TABLE repositories ADD COLUMN sync_started_at"
+                        " DATETIME NULL AFTER connected_at"
+                    )
                 # 기존 NULL을 미완료로 추측하지 않는다. 확인 가능한 완료 행만 보존한다.
                 cursor.execute(
                     "UPDATE memory SET completion_status = 'completed',"
@@ -292,8 +297,12 @@ def backfill_dev_user_membership() -> None:
 def recover_stale_tasks() -> None:
     """서버 재시작 시 stale processing/syncing 작업을 failed로 전환.
 
-    cutoff보다 오래된 in-progress 작업만 대상.
-    최근 등록된 작업은 현재 서버에서 막 시작된 것일 수 있으므로 건드리지 않음.
+    stale 판정 기준이 두 테이블에서 다르지만, 축은 같다 — 둘 다 '이 작업이 언제
+    시작했는가'를 본다:
+    - documents: lease_expires_at 기반(NULL이거나 만료된 것). 임계값은 lease를 발급하는
+      쪽의 LEASE_MINUTES(quota.py)이며 아래 cutoff와 무관하다.
+    - repositories: sync_started_at이 cutoff보다 오래된 것(NULL 포함 — 컬럼 도입 전부터
+      syncing으로 남아 있던 행은 서버 재시작으로 이미 죽은 작업이므로 정리 대상이다).
 
     BACKGROUND_TASK_STALE_MINUTES <= 0 이면 recovery 비활성화.
     timestamp 기준: documents.uploaded_at, repositories.connected_at.
@@ -323,7 +332,8 @@ def recover_stale_tasks() -> None:
                 cursor.execute(
                     "UPDATE repositories SET status='failed', last_error=%s"
                     " WHERE status='syncing'"
-                    " AND connected_at < NOW() - INTERVAL %s MINUTE",
+                    " AND (sync_started_at IS NULL"
+                    "      OR sync_started_at < NOW() - INTERVAL %s MINUTE)",
                     (_STALE_REPO_ERROR, stale_minutes),
                 )
                 repo_count = cursor.rowcount

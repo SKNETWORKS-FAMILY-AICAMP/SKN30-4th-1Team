@@ -169,3 +169,46 @@ def test_backfill_db_failure_does_not_raise():
     with patch("backend.startup.get_connection", side_effect=Exception("DB down")), \
          patch("backend.api.auth.ensure_dev_user", return_value=1):
         backfill_dev_user_membership()  # must not raise
+
+
+def test_repository_staleness_uses_sync_start_not_connect_time():
+    """저장소 stale 판정은 sync_started_at 기준이어야 한다.
+
+    connected_at은 연결 시각이라 재동기화 때 갱신되지 않는다. 그걸 기준으로 삼으면
+    연결한 지 cutoff보다 오래된 저장소는 동기화를 시작하자마자(진행도와 무관하게)
+    워치독에 failed로 뒤집힌다 — 사실상 모든 재동기화가 실패로 표시됐다.
+    NULL은 컬럼 도입 전부터 syncing으로 남아 있던 행이라 정리 대상으로 남긴다."""
+    conn, cursor = _make_conn()
+    with patch("backend.startup.get_connection", return_value=conn), \
+         patch.dict("os.environ", {"BACKGROUND_TASK_STALE_MINUTES": "30"}):
+        recover_stale_tasks()
+
+    repo_sql = next(
+        c[0][0] for c in cursor.execute.call_args_list
+        if "UPDATE repositories" in c[0][0]
+    )
+    assert "sync_started_at" in repo_sql
+    assert "sync_started_at IS NULL" in repo_sql   # 도입 전 잔존 행도 회수한다
+    assert "connected_at" not in repo_sql          # 연결 시각을 기준으로 쓰지 않는다
+
+
+def test_sync_start_is_recorded_when_sync_begins():
+    """동기화 시작 시 sync_started_at을 남긴다 — 위 판정의 기준값이라 없으면 무의미하다."""
+    from backend.api import repository as repository_module
+
+    conn, cursor = _make_conn()
+    cursor.fetchone.return_value = {
+        "id": 7, "project_id": 1, "repository_url": "https://github.com/o/r",
+        "branch": "main", "status": "connected",
+    }
+    background = MagicMock()
+    with patch.object(repository_module, "get_connection", return_value=conn), \
+         patch.object(repository_module, "require_project_access"), \
+         patch.object(repository_module, "_get_github_token", return_value=None):
+        repository_module.sync_repository(1, 7, background)
+
+    syncing_sql = next(
+        c[0][0] for c in cursor.execute.call_args_list
+        if "status='syncing'" in c[0][0]
+    )
+    assert "sync_started_at=NOW()" in syncing_sql

@@ -337,8 +337,12 @@ def _clear_repo_indexed_data(repo_id: int, refresh_project_memory: bool = False)
     finally:
         conn.close()
     try:
-        from ..db.chroma import get_collection
-        get_collection().delete(where={"repo_id": repo_id})
+        # get_collection() 이 아니라 delete_from_existing_collection 을 쓴다 — 전자는
+        # 임베딩 클라이언트를 만들려고 OPENAI_API_KEY 를 요구하는데, metadata 조건
+        # 삭제에는 임베딩이 필요 없다. 키가 없거나 placeholder 면 벡터가 조용히
+        # 남아 삭제된 저장소 내용이 계속 검색에 잡힌다.
+        from ..db.chroma import delete_from_existing_collection
+        delete_from_existing_collection(where={"repo_id": repo_id})
     except Exception:
         logger.warning("기존 ChromaDB vector 정리 실패 repo_id=%s", repo_id, exc_info=True)
     if refresh_project_memory and project_id is not None:
@@ -365,8 +369,9 @@ def _delete_repo_data(repo_id: int):
         conn.close()
 
     try:
-        from ..db.chroma import get_collection
-        get_collection().delete(where={"repo_id": repo_id})
+        # 위와 같은 이유로 키 불필요 경로를 쓴다.
+        from ..db.chroma import delete_from_existing_collection
+        delete_from_existing_collection(where={"repo_id": repo_id})
     except Exception:
         logger.warning("ChromaDB vector cleanup failed for repo_id=%s", repo_id, exc_info=True)
     if project_id is not None:
@@ -657,8 +662,12 @@ def sync_repository(
     try:
         with conn.cursor() as cursor:
             repo_row = _repo_or_404(cursor, project_id, repo_id)
+            # sync_started_at을 여기서 찍는다 — stale 판정의 기준 시각이다. connected_at은
+            # 연결 시각이라 재동기화 때 갱신되지 않아, 이걸 안 남기면 워치독이 방금 시작한
+            # 동기화를 곧바로 stale로 실패 처리한다.
             cursor.execute(
-                "UPDATE repositories SET status='syncing', last_error=NULL, sync_warning=NULL WHERE id=%s",
+                "UPDATE repositories SET status='syncing', sync_started_at=NOW(),"
+                " last_error=NULL, sync_warning=NULL WHERE id=%s",
                 (repo_id,),
             )
         conn.commit()

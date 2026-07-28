@@ -99,14 +99,6 @@ def _convert_upload(filename: str, data: bytes) -> ConvertedDocument:
 
 # ── 내부 헬퍼 ─────────────────────────────────────────────────────
 
-def _delete_chroma_vectors(doc_id: int):
-    try:
-        from ..db.chroma import get_collection
-        get_collection().delete(where={"doc_id": doc_id})
-    except Exception:
-        logger.warning("ChromaDB vector cleanup failed for doc_id=%s", doc_id)
-
-
 def _delete_document(doc_id: int, refresh_project_memory: bool = True):
     """Transfer document accounting to durable cleanup, then retry cleanup."""
     project_id = quota_delete_document(doc_id)
@@ -306,11 +298,20 @@ async def upload_document(
         )
     doc_type = _infer_doc_type(filename)
 
+    # 인증·인가를 본문 소비보다 먼저 한다. 이 순서가 뒤집혀 있으면 AuthMiddleware 를
+    # 통과한 사용자가 "해당 프로젝트의 구성원이 아니어도" 본문 전체를 Python 메모리로
+    # 올릴 수 있다. 크기 상한 검사도 read() 뒤에 있으면 상한 초과 요청조차 전부 읽은
+    # 뒤에야 413 이 나가므로 상한이 소비 차단 역할을 못 한다.
+    #
+    # 한계: FastAPI 는 UploadFile 의존성을 만들려고 엔드포인트 진입 전에 multipart 를
+    # 파싱·스풀한다. 따라서 이 순서는 "메모리로 다시 읽는 것"을 막을 뿐 네트워크 수신과
+    # 임시 파일 스풀은 이미 일어난다. 스트리밍 단계 상한은 별도 ASGI/프록시 작업이다.
+    user_id = require_upload_user()
+    require_project_access(project_id, min_role="member")
+
     data = await file.read()
     if len(data) > _MAX_FILE_BYTES:
         raise HTTPException(status_code=413, detail="파일 크기는 10 MB를 초과할 수 없습니다.")
-    user_id = require_upload_user()
-    require_project_access(project_id, min_role="member")
 
     # 안전성 검증(MIME·인코딩·제어문자)이 먼저다 — 415.
     try:
