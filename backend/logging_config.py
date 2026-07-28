@@ -29,7 +29,12 @@ class JsonFormatter(logging.Formatter):
             value = getattr(record, key, None)
             if value is not None:
                 payload[key] = value
-        if record.exc_info:
+        # exc_info[0] is not None까지 확인 — logging은 활성 예외가 없을 때 exc_info=True를
+        # sys.exc_info()인 (None,None,None)으로 정규화하는데, 이 튜플은 truthy라 그냥
+        # 통과시키면 None.__name__에서 포매터가 죽고 그 로그 라인이 통째로 유실된다.
+        # (1차 소비자는 propagate 설정된 uvicorn 등 서드파티 로거다.)
+        # 값이 없으면 위 루프가 넣은 extra의 exception_type을 그대로 살려 둔다.
+        if record.exc_info and record.exc_info[0] is not None:
             payload["exception_type"] = record.exc_info[0].__name__
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
