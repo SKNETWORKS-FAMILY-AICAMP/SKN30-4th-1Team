@@ -3,10 +3,11 @@ import logging
 import os
 
 from .db.mysql import get_connection
+from .storage import delete_managed_file, validate_managed_file
 
 logger = logging.getLogger(__name__)
 
-_STALE_DOC_ERROR = "Background task interrupted or stale after server restart."
+_STALE_DOC_ERROR = "UPLOAD_PROCESSING_STALE"
 _STALE_REPO_ERROR = "Repository sync interrupted or stale after server restart."
 
 
@@ -145,6 +146,111 @@ def ensure_schema_v8() -> None:
         )
 
 
+def ensure_schema_v9() -> None:
+    """Install v9 quota schema and finish filesystem-aware legacy backfill.
+
+    Unlike older best-effort migrations, quota accounting is a startup gate: serving
+    requests with a partially migrated table could undercount storage.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            additions = (
+                ("size_bytes", "BIGINT UNSIGNED NULL AFTER progress_total"),
+                ("uploaded_by", "INT NULL AFTER size_bytes"),
+                ("processing_token", "CHAR(36) NULL AFTER uploaded_by"),
+                ("lease_expires_at", "DATETIME NULL AFTER processing_token"),
+            )
+            for name, definition in additions:
+                if not _column_exists(cursor, "documents", name):
+                    cursor.execute(f"ALTER TABLE documents ADD COLUMN {name} {definition}")
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS upload_quota_reservations (
+                    reservation_id CHAR(36) PRIMARY KEY, user_id INT NOT NULL,
+                    project_id INT NOT NULL, kind VARCHAR(20) NOT NULL,
+                    size_bytes BIGINT UNSIGNED NOT NULL, target_path VARCHAR(500) NULL,
+                    temp_path VARCHAR(500) NULL, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    expires_at DATETIME NOT NULL,
+                    CONSTRAINT fk_quota_reservation_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
+                    CONSTRAINT fk_quota_reservation_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE RESTRICT,
+                    INDEX idx_quota_reservations_user (user_id),
+                    INDEX idx_quota_reservations_project (project_id),
+                    INDEX idx_quota_reservations_expiry (expires_at)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS storage_cleanup_pending (
+                    cleanup_id CHAR(36) PRIMARY KEY, source_kind VARCHAR(20) NOT NULL,
+                    source_id VARCHAR(64) NOT NULL, user_id INT NULL, project_id INT NOT NULL,
+                    document_id INT NULL, file_path VARCHAR(500) NULL,
+                    size_bytes BIGINT UNSIGNED NOT NULL, count_units INT UNSIGNED NOT NULL DEFAULT 1,
+                    needs_chroma TINYINT(1) NOT NULL DEFAULT 0,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, last_attempt_at DATETIME NULL,
+                    UNIQUE KEY uq_cleanup_source (source_kind, source_id),
+                    INDEX idx_cleanup_user (user_id), INDEX idx_cleanup_project (project_id)
+                )
+                """
+            )
+            cursor.execute(
+                "SELECT d.id,d.project_id,d.status,d.file_path,p.owner_user_id"
+                " FROM documents d JOIN projects p ON p.id=d.project_id"
+                " WHERE d.size_bytes IS NULL ORDER BY d.id FOR UPDATE"
+            )
+            legacy_rows = cursor.fetchall()
+            for row in legacy_rows:
+                file_path = row.get("file_path")
+                if row["status"] == "failed":
+                    if file_path:
+                        delete_managed_file(file_path, row["project_id"])
+                    size_bytes = 0
+                    file_path = None
+                elif file_path:
+                    path = validate_managed_file(file_path, row["project_id"])
+                    size_bytes = path.stat(follow_symlinks=False).st_size
+                else:
+                    size_bytes = 0
+                cursor.execute(
+                    "UPDATE documents SET size_bytes=%s,uploaded_by=%s,file_path=%s WHERE id=%s AND size_bytes IS NULL",
+                    (size_bytes, row.get("owner_user_id"), file_path, row["id"]),
+                )
+            cursor.execute("SELECT COUNT(*) AS count FROM documents WHERE size_bytes IS NULL")
+            if cursor.fetchone()["count"]:
+                raise RuntimeError("v9 document backfill incomplete")
+            cursor.execute(
+                "SELECT IS_NULLABLE FROM information_schema.COLUMNS"
+                " WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='documents' AND COLUMN_NAME='size_bytes'"
+            )
+            column = cursor.fetchone()
+            if column and column["IS_NULLABLE"] == "YES":
+                cursor.execute(
+                    "ALTER TABLE documents MODIFY COLUMN size_bytes BIGINT UNSIGNED NOT NULL DEFAULT 0"
+                )
+            cursor.execute(
+                "SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE()"
+                " AND TABLE_NAME='documents' AND INDEX_NAME='idx_documents_uploaded_by'"
+            )
+            if not cursor.fetchone():
+                cursor.execute("ALTER TABLE documents ADD INDEX idx_documents_uploaded_by (uploaded_by)")
+            cursor.execute(
+                "SELECT 1 FROM information_schema.TABLE_CONSTRAINTS WHERE TABLE_SCHEMA=DATABASE()"
+                " AND TABLE_NAME='documents' AND CONSTRAINT_NAME='fk_documents_uploaded_by'"
+            )
+            if not cursor.fetchone():
+                cursor.execute(
+                    "ALTER TABLE documents ADD CONSTRAINT fk_documents_uploaded_by"
+                    " FOREIGN KEY (uploaded_by) REFERENCES users(id) ON DELETE SET NULL"
+                )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def backfill_dev_user_membership() -> None:
     """DEV_USER_ID가 설정된 경우, project_members row가 없는 기존 프로젝트에 owner 멤버십을 보장.
 
@@ -209,12 +315,10 @@ def recover_stale_tasks() -> None:
         try:
             with conn.cursor() as cursor:
                 cursor.execute(
-                    "UPDATE documents SET status='failed', last_error=%s"
-                    " WHERE status='processing'"
-                    " AND uploaded_at < NOW() - INTERVAL %s MINUTE",
-                    (_STALE_DOC_ERROR, stale_minutes),
+                    "SELECT id,processing_token FROM documents WHERE status='processing'"
+                    " AND (lease_expires_at IS NULL OR lease_expires_at<NOW())",
                 )
-                doc_count = cursor.rowcount
+                stale_documents = cursor.fetchall()
 
                 cursor.execute(
                     "UPDATE repositories SET status='failed', last_error=%s"
@@ -226,6 +330,18 @@ def recover_stale_tasks() -> None:
             conn.commit()
         finally:
             conn.close()
+
+        from .quota import fail_stale_document
+        for document in stale_documents:
+            token = document.get("processing_token")
+            if token:
+                fail_stale_document(document["id"], token)
+            else:
+                # v8 legacy processing rows have no owner token. Assigning no new
+                # owner is safe; migrate them through the ordinary failed path.
+                from .quota import fail_document
+                fail_document(document["id"], _STALE_DOC_ERROR)
+        doc_count = len(stale_documents)
 
         if doc_count or repo_count:
             logger.warning(
@@ -240,10 +356,31 @@ def recover_stale_tasks() -> None:
         logger.error("Startup recovery 실패 — 앱은 계속 기동됩니다", exc_info=True)
 
 
+def recover_quota_tasks() -> bool:
+    """Recover quota ownership independently from the stale-task policy."""
+    try:
+        from .quota import recover_quota_state
+
+        recover_quota_state()
+        return True
+    except Exception:
+        logger.error("quota_recovery_failed", extra={"code": "QUOTA_RECOVERY_FAILED"})
+        return False
+
+
 _WATCHDOG_INTERVAL_SECONDS = 60  # 1분마다 stale 체크
 
 
-async def stale_watchdog() -> None:
+def _run_recovery_cycle() -> None:
+    """Run one serialized runtime recovery cycle outside the event loop."""
+    recover_quota_tasks()
+    try:
+        recover_stale_tasks()
+    except Exception:
+        logger.error("Watchdog recover_stale_tasks 실패", exc_info=True)
+
+
+async def stale_watchdog(executor) -> None:
     """런타임 워치독 — 서버가 살아있는 동안 주기적으로 stale 작업을 failed로 전환.
 
     서버 재시작 없이 백그라운드 작업이 멈춘 경우에도 프론트가 무한 폴링하지 않도록 보장.
@@ -251,7 +388,4 @@ async def stale_watchdog() -> None:
     """
     while True:
         await asyncio.sleep(_WATCHDOG_INTERVAL_SECONDS)
-        try:
-            recover_stale_tasks()
-        except Exception:
-            logger.error("Watchdog recover_stale_tasks 실패", exc_info=True)
+        await asyncio.get_running_loop().run_in_executor(executor, _run_recovery_cycle)

@@ -18,10 +18,19 @@ _GITHUB_API_VERSION = "2022-11-28"
 _SUPPORTED_PROVIDERS = {"github"}
 
 
+class GitHubAPIError(RuntimeError):
+    """GitHub 응답 실패. 토큰이나 응답 본문은 보관하지 않는다."""
+
+    def __init__(self, kind: str, source: str = "metadata"):
+        super().__init__(kind)
+        self.kind = kind
+        self.source = source
+
+
 # ── GitHub API 헬퍼 ───────────────────────────────────────────────
 
-def _gh_get(path: str, token: str | None = None):
-    """GitHub API GET. token 있으면 인증 요청. 실패 시 빈 값 반환 (로그 후 흡수)."""
+def _gh_get(path: str, token: str | None = None, source: str = "metadata"):
+    """GitHub API GET. 정상 빈 응답과 전송/권한/404 실패를 구분한다."""
     url = path if path.startswith("https://") else f"{_GITHUB_API}{path}"
     headers = {
         "Accept": "application/vnd.github+json",
@@ -35,17 +44,56 @@ def _gh_get(path: str, token: str | None = None):
             payload = resp.read().decode("utf-8")
             return json.loads(payload) if payload else {}
     except error.HTTPError as exc:
-        if exc.code in (401, 403):
-            logger.warning("GitHub API 인증 오류 %s: %s (비공개 저장소거나 토큰 권한 부족)", exc.code, path)
-        else:
-            logger.warning("GitHub API HTTP 오류 %s: %s", exc.code, path)
-        return {}
+        kind = {401: "auth", 403: "permission", 404: "not_found"}.get(
+            exc.code, "unavailable"
+        )
+        logger.warning("GitHub API HTTP 오류 %s: %s", exc.code, path)
+        raise GitHubAPIError(kind, source) from exc
     except error.URLError as exc:
         logger.warning("GitHub API 네트워크 오류: %s — %s", path, exc.reason)
-        return {}
-    except Exception:
+        raise GitHubAPIError("unavailable", source) from exc
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         logger.warning("GitHub API 예외: %s", path, exc_info=True)
-        return {}
+        raise GitHubAPIError("unavailable", source) from exc
+    except Exception as exc:
+        # socket timeout 등 urllib이 URLError로 감싸지 않는 전송 실패도 같은
+        # 안정된 unavailable 계약으로 변환한다. 토큰/응답 본문은 남기지 않는다.
+        logger.warning("GitHub API 전송 예외: %s", path, exc_info=True)
+        raise GitHubAPIError("unavailable", source) from exc
+
+
+def _require_list(payload, source: str) -> list:
+    if not isinstance(payload, list):
+        logger.warning("GitHub API 응답 형식 오류 source=%s", source)
+        raise GitHubAPIError("unavailable", source)
+    return payload
+
+
+def _sync_failure_code(exc: GitHubAPIError, source: str) -> str:
+    if exc.kind == "auth":
+        return f"GITHUB_AUTH_FAILED:{source}"
+    if exc.kind == "permission":
+        return f"GITHUB_PERMISSION_DENIED:{source}"
+    if exc.kind == "not_found":
+        if source == "metadata":
+            return "GITHUB_REPOSITORY_NOT_FOUND:metadata"
+        if source == "commits":
+            return "GITHUB_BRANCH_NOT_FOUND:commits"
+        return f"GITHUB_SOURCE_NOT_FOUND:{source}"
+    return f"GITHUB_UNAVAILABLE:{source}"
+
+
+def _connect_failure(exc: GitHubAPIError) -> HTTPException:
+    status_code, code = {
+        "not_found": (404, "GITHUB_REPOSITORY_NOT_FOUND"),
+        "auth": (401, "GITHUB_AUTH_FAILED"),
+        "permission": (403, "GITHUB_PERMISSION_DENIED"),
+        "unavailable": (503, "GITHUB_UNAVAILABLE"),
+    }[exc.kind]
+    return HTTPException(
+        status_code=status_code,
+        detail={"code": code, "message": "GitHub 저장소를 확인할 수 없습니다."},
+    )
 
 
 def _get_github_token(state: str | None) -> str | None:
@@ -56,7 +104,12 @@ def _get_github_token(state: str | None) -> str | None:
         from ..github.router import _installation_token
         return _installation_token(state)
     except HTTPException as exc:
-        raise HTTPException(status_code=401, detail=f"GitHub App 세션 오류: {exc.detail}")
+        # state/session 오류와 installation-token upstream 실패를 repository API의
+        # 안정된 계약으로 변환한다. 원 detail은 response·DB·log로 전달하지 않는다.
+        kind = "permission" if exc.status_code == 403 else (
+            "auth" if exc.status_code in {401, 404, 409} else "unavailable"
+        )
+        raise _connect_failure(GitHubAPIError(kind, "token")) from exc
 
 
 def _parse_github_full_name(url: str) -> str:
@@ -87,10 +140,15 @@ def _collect_repo_sources(
     warnings: list[dict] = []
 
     # Commits (sha를 먼저 확보해 README metadata에 활용)
-    commits = _gh_get(f"/repos/{full_name}/commits?sha={parse.quote(branch)}&per_page=20", token=token)
-    if not isinstance(commits, list):
-        warnings.append({"source_type": "commits", "reason": "GitHub API 응답 오류 (인증/네트워크 문제일 수 있음)"})
-    elif commits:
+    commits = _require_list(
+        _gh_get(
+            f"/repos/{full_name}/commits?sha={parse.quote(branch)}&per_page=20",
+            token=token,
+            source="commits",
+        ),
+        "commits",
+    )
+    if commits:
         latest_sha = commits[0].get("sha")
         lines = []
         for c in commits:
@@ -111,7 +169,12 @@ def _collect_repo_sources(
             }
 
     # README (404는 README 없는 저장소로 정상 — warning 생략)
-    readme = _gh_get(f"/repos/{full_name}/readme", token=token)
+    try:
+        readme = _gh_get(f"/repos/{full_name}/readme", token=token, source="readme")
+    except GitHubAPIError as exc:
+        if exc.kind != "not_found":
+            raise
+        readme = {}
     if isinstance(readme, dict) and readme.get("content"):
         try:
             decoded = base64.b64decode(readme["content"]).decode("utf-8", errors="replace")
@@ -132,44 +195,52 @@ def _collect_repo_sources(
             pass
 
     # Issues (PR 제외)
-    issues = _gh_get(f"/repos/{full_name}/issues?state=open&per_page=20", token=token)
-    if not isinstance(issues, list):
-        warnings.append({"source_type": "issues", "reason": "GitHub API 응답 오류 (인증/네트워크 문제일 수 있음)"})
-    else:
-        issue_texts = [
-            f"Issue #{i.get('number')} ({i.get('state', 'open')}): {i.get('title', '')}\n{i.get('body') or ''}"
-            for i in issues if not i.get("pull_request")
-        ]
-        if issue_texts:
-            sources["issues.txt"] = {
-                "content": "\n\n".join(issue_texts),
-                "metadata": {
-                    "source_type": "issues",
-                    "source_path": "issues.txt",
-                    "source_ref": latest_sha or "",
-                    "source_url": "",
-                },
-            }
+    issues = _require_list(
+        _gh_get(
+            f"/repos/{full_name}/issues?state=open&per_page=20",
+            token=token,
+            source="issues",
+        ),
+        "issues",
+    )
+    issue_texts = [
+        f"Issue #{i.get('number')} ({i.get('state', 'open')}): {i.get('title', '')}\n{i.get('body') or ''}"
+        for i in issues if not i.get("pull_request")
+    ]
+    if issue_texts:
+        sources["issues.txt"] = {
+            "content": "\n\n".join(issue_texts),
+            "metadata": {
+                "source_type": "issues",
+                "source_path": "issues.txt",
+                "source_ref": latest_sha or "",
+                "source_url": "",
+            },
+        }
 
     # Pull Requests
-    pulls = _gh_get(f"/repos/{full_name}/pulls?state=open&per_page=20", token=token)
-    if not isinstance(pulls, list):
-        warnings.append({"source_type": "pulls", "reason": "GitHub API 응답 오류 (인증/네트워크 문제일 수 있음)"})
-    else:
-        pr_texts = [
-            f"PR #{p.get('number')} ({p.get('state', 'open')}): {p.get('title', '')}\n{p.get('body') or ''}"
-            for p in pulls
-        ]
-        if pr_texts:
-            sources["pulls.txt"] = {
-                "content": "\n\n".join(pr_texts),
-                "metadata": {
-                    "source_type": "pulls",
-                    "source_path": "pulls.txt",
-                    "source_ref": latest_sha or "",
-                    "source_url": "",
-                },
-            }
+    pulls = _require_list(
+        _gh_get(
+            f"/repos/{full_name}/pulls?state=open&per_page=20",
+            token=token,
+            source="pulls",
+        ),
+        "pulls",
+    )
+    pr_texts = [
+        f"PR #{p.get('number')} ({p.get('state', 'open')}): {p.get('title', '')}\n{p.get('body') or ''}"
+        for p in pulls
+    ]
+    if pr_texts:
+        sources["pulls.txt"] = {
+            "content": "\n\n".join(pr_texts),
+            "metadata": {
+                "source_type": "pulls",
+                "source_path": "pulls.txt",
+                "source_ref": latest_sha or "",
+                "source_url": "",
+            },
+        }
 
     return sources, latest_sha, warnings
 
@@ -198,13 +269,14 @@ def _collect_merged_prs(full_name: str, last_reconciled_pr: int | None, token: s
     merged = []
     page = 1
     while True:
-        pulls = _gh_get(
-            f"/repos/{full_name}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page={page}",
-            token=token,
+        pulls = _require_list(
+            _gh_get(
+                f"/repos/{full_name}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page={page}",
+                token=token,
+                source="merged_pulls",
+            ),
+            "merged_pulls",
         )
-        if not isinstance(pulls, list):
-            logger.warning("merged PR 수집 실패 full_name=%s page=%s", full_name, page)
-            return []
         for pr in pulls:
             number = pr.get("number")
             if not number or int(number) <= watermark or not pr.get("merged_at"):
@@ -353,6 +425,12 @@ def _get_last_reconciled_pr(repo_id: int) -> int | None:
         conn.close()
 
 
+def _precheck_repository(full_name: str, token: str | None) -> None:
+    repo_meta = _gh_get(f"/repos/{full_name}", token=token, source="metadata")
+    if not isinstance(repo_meta, dict) or not repo_meta.get("id"):
+        raise GitHubAPIError("unavailable", "metadata")
+
+
 # ── 백그라운드 처리 ───────────────────────────────────────────────
 
 def _sync_bg(project_id: int, repo_id: int, full_name: str, branch: str, token: str | None):
@@ -361,6 +439,7 @@ def _sync_bg(project_id: int, repo_id: int, full_name: str, branch: str, token: 
     from ..pipeline.ingestor import ingest
 
     try:
+        _precheck_repository(full_name, token)
         last_reconciled_pr = _get_last_reconciled_pr(repo_id)
         sources, latest_sha, warnings = _collect_repo_sources(full_name, branch, token=token)
 
@@ -388,7 +467,10 @@ def _sync_bg(project_id: int, repo_id: int, full_name: str, branch: str, token: 
                     source_kind=_extract_source_kind(src_metadata.get("source_type")),
                 )
             except Exception:
-                logger.warning("extract 실패 — source=%s repo_id=%s", source_name, repo_id, exc_info=True)
+                logger.warning(
+                    "repository_extract_failed",
+                    extra={"project_id": project_id, "code": "REPOSITORY_EXTRACT_FAILED"},
+                )
                 items = []
             try:
                 ingest(
@@ -404,7 +486,10 @@ def _sync_bg(project_id: int, repo_id: int, full_name: str, branch: str, token: 
                 )
                 indexed += 1
             except Exception:
-                logger.warning("ingest 실패 — source=%s repo_id=%s", source_name, repo_id, exc_info=True)
+                logger.warning(
+                    "repository_ingest_failed",
+                    extra={"project_id": project_id, "code": "REPOSITORY_INGEST_FAILED"},
+                )
 
         from ..graph import refresh_project_memory_after_delete
         refresh_project_memory_after_delete(project_id)
@@ -412,7 +497,10 @@ def _sync_bg(project_id: int, repo_id: int, full_name: str, branch: str, token: 
         import json as _json
         sync_warning = _json.dumps(warnings, ensure_ascii=False) if warnings else None
         if warnings:
-            logger.warning("repo sync partial failure repo_id=%s warnings=%s", repo_id, warnings)
+            logger.warning(
+                "repository_sync_partial",
+                extra={"project_id": project_id, "code": "REPOSITORY_SYNC_PARTIAL"},
+            )
 
         _set_repo_status(
             repo_id, "indexed",
@@ -423,14 +511,18 @@ def _sync_bg(project_id: int, repo_id: int, full_name: str, branch: str, token: 
         )
 
         try:
-            result = reconcile_repository_prs(project_id, repo_id, merged_prs)
-            logger.info("reconciler 완료 repo_id=%s result=%s", repo_id, result)
+            reconcile_repository_prs(project_id, repo_id, merged_prs)
+            logger.info("repository_reconciler_completed")
         except Exception:
-            logger.warning("reconciler 실패 (sync는 성공 유지) repo_id=%s", repo_id, exc_info=True)
+            logger.warning("repository_reconciler_failed")
 
-    except Exception as exc:
-        logger.error("sync_bg 실패 repo_id=%s", repo_id, exc_info=True)
-        _set_repo_status(repo_id, "failed", last_error=str(exc))
+    except GitHubAPIError as exc:
+        code = _sync_failure_code(exc, exc.source)
+        logger.error("sync_bg GitHub 실패 repo_id=%s code=%s", repo_id, code)
+        _set_repo_status(repo_id, "failed", last_error=code)
+    except Exception:
+        logger.error("repository_sync_failed", extra={"code": "REPOSITORY_SYNC_FAILED"})
+        _set_repo_status(repo_id, "failed", last_error="REPOSITORY_SYNC_FAILED")
 
 
 # ── Endpoints ────────────────────────────────────────────────────
@@ -445,7 +537,10 @@ def connect_repository(project_id: int, body: RepositoryConnect):
     token = _get_github_token(body.state)
 
     # 저장소 존재 확인 + default branch 조회
-    repo_meta = _gh_get(f"/repos/{full_name}", token=token)
+    try:
+        repo_meta = _gh_get(f"/repos/{full_name}", token=token, source="metadata")
+    except GitHubAPIError as exc:
+        raise _connect_failure(exc) from exc
     if not isinstance(repo_meta, dict) or not repo_meta.get("id"):
         detail = "저장소를 찾을 수 없습니다."
         if not token:

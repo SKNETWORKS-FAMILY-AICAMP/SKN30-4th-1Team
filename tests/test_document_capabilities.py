@@ -7,12 +7,12 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from backend.api import query as query_api
-from backend.document_formats import (
+from backend.document_content import (
     DOCUMENT_PARSERS,
     PROJECT_DOCUMENT_MAX_FILE_BYTES,
     QUERY_ATTACHMENT_MAX_FILE_BYTES,
     QUERY_ATTACHMENT_MAX_TOTAL_BYTES,
-    parse_document,
+    extract_document_text,
 )
 from backend.main import app
 
@@ -145,10 +145,10 @@ def test_query_total_size_is_checked_after_text_context_is_full(monkeypatch):
 
 
 def test_advertised_parsers_extract_content():
-    assert parse_document("notes.md", b"markdown body") == "markdown body"
-    assert parse_document("notes.txt", b"text body") == "text body"
-    assert "PDF body" in parse_document("notes.pdf", _make_pdf("PDF body"))
-    docx_text = parse_document("meeting.docx", _make_docx("DOCX 본문 추출 성공"))
+    assert extract_document_text("notes.md", b"markdown body") == "markdown body"
+    assert extract_document_text("notes.txt", b"text body") == "text body"
+    assert "PDF body" in extract_document_text("notes.pdf", _make_pdf("PDF body"))
+    docx_text = extract_document_text("meeting.docx", _make_docx("DOCX 본문 추출 성공"))
     assert "DOCX 본문 추출 성공" in docx_text
     assert "담당 | 김개발" in docx_text
 

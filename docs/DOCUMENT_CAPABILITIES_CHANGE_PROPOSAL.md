@@ -56,7 +56,7 @@ DOCX는 실제 파서와 회귀 테스트가 포함된 경우에만 capabilities
 ## 3. 제안 구조
 
 ```text
-backend/document_formats.py
+backend/document_content.py
  ├─ DOCUMENT_PARSERS
  ├─ 프로젝트/질의 크기 제한
  ├─ 확장자 검증과 오류 문구
@@ -153,7 +153,7 @@ DOCX는 ZIP/XML 형식이므로 UTF-8 텍스트처럼 decode하지 않는다. `p
 - 유효한 ZIP인지 사전 검사
 - 단일 압축 항목과 전체 전개 크기 제한
 - 비정상 압축률 제한
-- 손상된 DOCX를 400으로 정규화
+- 손상된 DOCX를 구조화된 415 오류로 정규화
 - 실제 DOCX 본문 및 표 추출 테스트
 
 현재 제한:
@@ -181,7 +181,7 @@ DOCX를 정식 지원으로 확정하기 전 KDH 변환기의 출처 추적 구�
 
 ### 백엔드 PR
 
-- `backend/document_formats.py`
+- `backend/document_content.py`
 - `backend/api/capabilities.py`
 - `backend/api/upload.py`
 - `backend/api/query.py`
@@ -254,5 +254,5 @@ env: unsetenv nset=DB_NAME: Invalid argument
 - capabilities와 8 MiB 제한은 우선 반영한다.
 - DOCX는 실제 테스트를 통과했지만 정식 지원 선언 전 KDH 출처 추적 통합 여부를
   리뷰한다.
-- endpoint를 API 명세에 추가한 뒤 임시 `include_in_schema=False`를 제거한다.
+- capabilities endpoint를 API 명세와 OpenAPI에 함께 노출한다.
 - 백엔드와 프론트 PR을 분리하고 백엔드를 먼저 병합한다.

@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from ..document_formats import (
+from ..document_content import (
     PROJECT_DOCUMENT_MAX_FILE_BYTES,
     QUERY_ATTACHMENT_MAX_FILE_BYTES,
     QUERY_ATTACHMENT_MAX_TOTAL_BYTES,
@@ -10,7 +10,7 @@ from ..document_formats import (
 router = APIRouter()
 
 
-@router.get("/capabilities", include_in_schema=False)
+@router.get("/capabilities")
 def get_capabilities():
     extensions = supported_extensions()
     return {

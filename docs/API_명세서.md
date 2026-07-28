@@ -34,7 +34,10 @@
 
 **요청 헤더**: 보호 엔드포인트는 `Authorization: Bearer <access_token>`를 부착한다.
 
-**공개 경로(토큰 불필요)**: `GET /`, `GET /health`, `POST /api/v1/auth/signup`,
+모든 HTTP 응답은 서버가 생성한 `X-Request-ID` 헤더를 포함한다. JSON 오류 응답은
+기존 `detail`과 함께 같은 값의 top-level `request_id`를 반환한다.
+
+**공개 경로(토큰 불필요)**: `GET /`, `GET /health`, `GET /health/ready`, `POST /api/v1/auth/signup`,
 `POST /api/v1/auth/login`, `GET /github/app/callback`(`/github/app/callback`
 prefix). CORS `OPTIONS` 프리플라이트도 통과.
 
@@ -53,6 +56,7 @@ prefix). CORS `OPTIONS` 프리플라이트도 통과.
 |-----------|------|-----------|
 | `POST /api/v1/auth/signup`·`/auth/login` | 공개 | — |
 | `GET /api/v1/auth/me` | 인증 | (프로젝트 무관) |
+| `GET /api/v1/capabilities` | 인증 | (프로젝트 무관) |
 | `GET·POST /api/v1/projects` | 인증 | (프로젝트 무관) |
 | `GET /api/v1/projects/{id}` | 인증 | viewer |
 | `PATCH /api/v1/projects/{id}` | 인증 | member |
@@ -98,6 +102,48 @@ prefix). CORS `OPTIONS` 프리플라이트도 통과.
 ```json
 {
   "status": "ok"
+}
+```
+
+---
+
+### `GET /health/ready`
+
+MySQL, schema, ChromaDB, upload 저장소의 준비 상태를 확인한다. 인증은 필요 없다.
+
+**응답 `200` / `503`**
+```json
+{
+  "status": "ready",
+  "components": {
+    "mysql": {"status": "ok"},
+    "schema": {"status": "ok"},
+    "chroma": {"status": "ok"},
+    "upload": {"status": "ok"}
+  },
+  "request_id": "<uuid>"
+}
+```
+
+---
+
+### `GET /api/v1/capabilities`
+
+데스크톱 앱이 사용할 문서 형식과 업로드 크기 제한을 조회한다. 인증이 필요하다.
+
+**응답 `200`**
+```json
+{
+  "schema_version": 1,
+  "project_documents": {
+    "extensions": ["docx", "md", "pdf", "txt"],
+    "max_file_bytes": 10485760
+  },
+  "query_attachments": {
+    "extensions": ["docx", "md", "pdf", "txt"],
+    "max_file_bytes": 8388608,
+    "max_total_bytes": 8388608
+  }
 }
 ```
 
@@ -1323,6 +1369,7 @@ GitHub 설치 완료 후 리다이렉트되는 콜백. **공개(무인증)이나
 |-----------|------|
 | `GET /` | ✅ 구현 완료 |
 | `GET /health` | ✅ 구현 완료 |
+| `GET /health/ready` | ✅ 구현 완료 |
 | `POST /api/v1/projects` | ✅ 구현 완료 (DEV user 시 project_members 자동 등록) |
 | `GET /api/v1/projects` | ✅ 구현 완료 (DEV user 시 membership JOIN 필터) |
 | `GET /api/v1/projects/{id}` | ✅ 구현 완료 |

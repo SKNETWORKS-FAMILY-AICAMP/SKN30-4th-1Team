@@ -16,6 +16,20 @@ deploy/stack.sh <prod|rehearsal|restore> <compose args...>
 | `rehearsal` | `paim-rehearsal` | `deploy/.env.rehearsal` | 8080/8443 | 로컬 검증 |
 | `restore` | `paim-restore` | `deploy/.env.restore` | 8081/8444 | 복구 리허설 |
 
+각 프로필은 Caddy↔backend 전용 proxy subnet을 고정한다. Caddy만 edge
+네트워크와 호스트 포트에 연결되고, DB는 backend와 data network만 공유한다.
+
+| 프로필 | proxy subnet | Caddy | backend | 신뢰 프록시 |
+|---|---|---|---|---|
+| `prod` | `172.30.12.0/24` | `.10` | `.20` | `172.30.12.10/32` |
+| `rehearsal` | `172.30.13.0/24` | `.10` | `.20` | `172.30.13.10/32` |
+| `restore` | `172.30.14.0/24` | `.10` | `.20` | `172.30.14.10/32` |
+
+`up`, `create`, `run`은 Docker network와 호스트 route의 CIDR 중첩을
+fail-closed로 검사한다. 현재 project가 이미 만든 동일 network만 재사용하며,
+`down`, `logs`, `exec`, `ps`, `stop`, `start`, `restart` 같은 관리 명령은 기존
+스택을 복구·진단할 수 있도록 충돌 검사로 막지 않는다.
+
 ---
 
 ## ⛔ production rollout 선행 조건 (배포 완료 게이트)
@@ -30,7 +44,8 @@ deploy/stack.sh <prod|rehearsal|restore> <compose args...>
 | `http://<도메인>/health` → HTTPS 리다이렉트 | `curl -I` 로 301/308 확인 |
 | 인증서 hostname·만료일 정상, 갱신 가능 상태 | `openssl s_client -connect <도메인>:443` |
 | **디스크 여유 임계치 알람 실제 구성 + 수신 확인** | CloudWatch 알람 생성 후 테스트 알림 수신 |
-| **TASK-012 PASS** — rate limit, 심층 readiness, CORS 운영값, **사용자·프로젝트별 저장량 quota** | 해당 태스크 validator PASS |
+| **TASK-012A PASS** — rate limit, proxy trust, 파일 검증, fail-fast, GitHub 오류 계약 | 해당 태스크 validator PASS |
+| **TASK-012B PASS** — 심층 readiness, CORS 운영값, 사용자·프로젝트별 저장량 quota | 해당 태스크 validator PASS |
 | **TASK-013 PASS** — 동일 파일명 재업로드 원자 교체 | 해당 태스크 validator PASS |
 | **GitHub App 완전 설정 + 인증 상태 preview/connect/sync 확인** | 아래 "GitHub App" 절 참조 |
 | **내용이 다른 이전 이미지로 실제 롤백 실증** | 서버에서 이전 git sha 태그로 되돌려 health·데이터 정상 확인 (로컬 리허설은 동일 이미지 alias라 전환 경로까지만 검증) |
@@ -141,7 +156,7 @@ docker image prune -f          # 사용하지 않는 이미지 정리 (태그 �
 ```
 
 업로드는 건당 10MB 상한만 있고 **보존 정책이 없어 단조 증가한다.** 사용자·프로젝트별
-저장량 quota는 TASK-012 범위이며, 그 전까지는 이 수동 확인이 유일한 방어선이다.
+저장량 quota는 TASK-012B 범위이며, 그 전까지는 이 수동 확인이 유일한 방어선이다.
 
 ---
 
@@ -151,13 +166,20 @@ docker image prune -f          # 사용하지 않는 이미지 정리 (태그 �
 
 ### 항상 필수
 
-`DB_USER` `DB_PASSWORD` `DB_NAME` `PAIM_JWT_SECRET` `SESSION_MEMORY_KEY` `OPENAI_API_KEY`
+`PAIM_AUTH_MODE` `PAIM_JWT_SECRET` `OPENAI_API_KEY` `SESSION_MEMORY_KEY`
+`DB_HOST` `DB_PORT` `DB_USER` `DB_PASSWORD` `DB_NAME`, 다섯 `RATE_LIMIT_*`,
+`FORWARDED_ALLOW_IPS`, `PAIM_PROXY_SUBNET`, `PAIM_CADDY_PROXY_IP`,
+`PAIM_BACKEND_PROXY_IP`가 필수다.
 
 `SESSION_MEMORY_KEY`와 `OPENAI_API_KEY`는 **lazy 경로**다. 누락돼도 서버는 뜨고
 `/health`도 200을 반환한 뒤, 채팅·문서 적재·검색에서야 실패한다. 그래서 preflight가
 기동 전에 잡는다.
 
 `OPENAI_API_KEY`는 `LLM_PROVIDER`와 **무관하게** 필요하다 — 벡터 임베딩 전용이다.
+
+non-dev 시작 시 앱도 같은 계약을 DB/schema 작업보다 먼저 검증한다. DB 포트,
+32바이트 Base64 세션 키, placeholder, 승인된 요청 제한값과 Caddy `/32`가 맞지
+않으면 비밀값을 출력하지 않고 기동을 중단한다.
 
 ### LLM provider
 
@@ -215,7 +237,7 @@ deploy/stack.sh prod stop backend
 # 2. MySQL — 단일 일관 시점.
 #    셸이 아니라 컨테이너 안에서 환경변수를 읽으므로 argv에 비밀번호가 없다.
 deploy/stack.sh prod exec -T db sh -c \
-  'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqldump -uroot --single-transaction "$MYSQL_DATABASE"' \
+  'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqldump -uroot --single-transaction --add-drop-table "$MYSQL_DATABASE"' \
   > "$BACKUP/mysql.sql"
 
 # 3. 볼륨 아카이브

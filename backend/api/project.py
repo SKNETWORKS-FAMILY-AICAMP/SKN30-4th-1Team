@@ -3,7 +3,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from ..db.mysql import get_connection
-from ..storage import delete_file
+from ..storage import delete_managed_file
 from .auth import get_current_user_id, ensure_dev_user, require_project_access
 
 router = APIRouter()
@@ -28,12 +28,27 @@ def _delete_project_chroma(project_id: int, has_indexed_children: bool) -> None:
     get_collection().delete(where={"project_id": project_id})
 
 
-def _delete_project_files(document_rows: list[dict]) -> None:
+def _delete_project_files(project_id: int, document_rows: list[dict]) -> None:
     """documents.file_path에 기록된 원본 파일을 기존 storage 헬퍼로 삭제한다."""
     for row in document_rows:
         file_path = row.get("file_path")
         if file_path:
-            delete_file(file_path, strict=True)
+            delete_managed_file(file_path, project_id)
+
+
+def _project_upload_users(project_id: int) -> set[int]:
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT uploaded_by AS user_id FROM documents"
+                " WHERE project_id=%s AND uploaded_by IS NOT NULL"
+                " UNION SELECT user_id FROM upload_quota_reservations WHERE project_id=%s",
+                (project_id, project_id),
+            )
+            return {int(row["user_id"]) for row in cursor.fetchall()}
+    finally:
+        conn.close()
 
 
 def _delete_project_rows(cursor, project_id: int) -> None:
@@ -151,7 +166,10 @@ def update_project(project_id: int, body: ProjectUpdate):
         raise
     except Exception:
         conn.rollback()
-        logger.exception("Project update failed project_id=%s", project_id)
+        logger.error(
+            "project_update_failed",
+            extra={"project_id": project_id, "code": "PROJECT_UPDATE_FAILED"},
+        )
         raise HTTPException(status_code=500, detail="Project update failed")
     finally:
         conn.close()
@@ -161,30 +179,102 @@ def update_project(project_id: int, body: ProjectUpdate):
 def delete_project(project_id: int):
     # 프로젝트 삭제는 공유 멤버 전체의 데이터를 지우므로 owner 전용
     require_project_access(project_id, min_role="owner")
-    conn = get_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT id FROM projects WHERE id = %s", (project_id,))
-            if not cursor.fetchone():
-                raise HTTPException(status_code=404, detail="Project not found")
-            cursor.execute("SELECT id, file_path FROM documents WHERE project_id = %s", (project_id,))
-            document_rows = cursor.fetchall()
-            cursor.execute("SELECT id FROM repositories WHERE project_id = %s", (project_id,))
-            repository_rows = cursor.fetchall()
-            cursor.execute("SELECT id FROM memory WHERE project_id = %s LIMIT 1", (project_id,))
-            memory_rows = cursor.fetchall()
-
+    user_ids = _project_upload_users(project_id)
+    for _attempt in range(3):
+        conn = get_connection()
         try:
-            _delete_project_chroma(project_id, bool(document_rows or repository_rows or memory_rows))
-            _delete_project_files(document_rows)
             with conn.cursor() as cursor:
+                for user_id in sorted(user_ids):
+                    cursor.execute("SELECT id FROM users WHERE id=%s FOR UPDATE", (user_id,))
+                    cursor.fetchone()
+                cursor.execute("SELECT id FROM projects WHERE id=%s FOR UPDATE", (project_id,))
+                if not cursor.fetchone():
+                    raise HTTPException(status_code=404, detail="Project not found")
+                # Document ingest owns the document row before inserting memory,
+                # whose project FK then needs the project row. Waiting for every
+                # document here would invert that order (project -> document) and
+                # can deadlock. A consistent read sees the last committed
+                # processing state without waiting for the ingest row lock.
+                cursor.execute(
+                    "SELECT 1 FROM documents"
+                    " WHERE project_id=%s AND status='processing' LIMIT 1",
+                    (project_id,),
+                )
+                if cursor.fetchone():
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code": "PROJECT_UPLOAD_IN_PROGRESS",
+                            "message": "진행 중인 업로드가 있습니다.",
+                        },
+                    )
+                cursor.execute(
+                    "SELECT id,file_path,uploaded_by,status FROM documents"
+                    " WHERE project_id=%s FOR UPDATE",
+                    (project_id,),
+                )
+                document_rows = cursor.fetchall()
+                cursor.execute(
+                    "SELECT reservation_id,user_id FROM upload_quota_reservations"
+                    " WHERE project_id=%s FOR UPDATE",
+                    (project_id,),
+                )
+                reservations = cursor.fetchall()
+                actual_users = {
+                    int(row["uploaded_by"])
+                    for row in document_rows
+                    if row.get("uploaded_by") is not None
+                } | {int(row["user_id"]) for row in reservations}
+                if not actual_users.issubset(user_ids):
+                    conn.rollback()
+                    user_ids |= actual_users
+                    continue
+                cursor.execute(
+                    "SELECT cleanup_id FROM storage_cleanup_pending"
+                    " WHERE project_id=%s LIMIT 1 FOR UPDATE",
+                    (project_id,),
+                )
+                if cursor.fetchone():
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code": "PROJECT_STORAGE_CLEANUP_PENDING",
+                            "message": "저장소 정리 완료 후 프로젝트를 다시 삭제해주세요.",
+                        },
+                    )
+                if reservations or any(row["status"] == "processing" for row in document_rows):
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code": "PROJECT_UPLOAD_IN_PROGRESS",
+                            "message": "진행 중인 업로드가 있습니다.",
+                        },
+                    )
+                cursor.execute("SELECT id FROM repositories WHERE project_id=%s", (project_id,))
+                repository_rows = cursor.fetchall()
+                cursor.execute("SELECT id FROM memory WHERE project_id=%s LIMIT 1", (project_id,))
+                memory_rows = cursor.fetchall()
+
+                _delete_project_chroma(
+                    project_id, bool(document_rows or repository_rows or memory_rows)
+                )
+                _delete_project_files(project_id, document_rows)
                 _delete_project_rows(cursor, project_id)
             conn.commit()
+            return
+        except HTTPException:
+            conn.rollback()
+            raise
         except Exception:
             conn.rollback()
-            logger.exception("Project delete cleanup failed project_id=%s", project_id)
+            logger.error(
+                "project_delete_failed",
+                extra={"project_id": project_id, "code": "PROJECT_DELETE_FAILED"},
+            )
             raise HTTPException(status_code=500, detail="Project delete failed")
-    except HTTPException:
-        raise
-    finally:
-        conn.close()
+        finally:
+            conn.close()
+    raise HTTPException(
+        status_code=409,
+        detail={"code": "PROJECT_UPLOAD_IN_PROGRESS", "message": "업로드 상태가 변경 중입니다."},
+    )

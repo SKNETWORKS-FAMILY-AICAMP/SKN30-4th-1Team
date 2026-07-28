@@ -1,6 +1,7 @@
 import base64
 import calendar
 import json
+import logging
 import os
 import secrets
 import time
@@ -15,6 +16,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/github/app", tags=["github"])
+logger = logging.getLogger(__name__)
 
 
 class SessionExpiredException(Exception):
@@ -67,10 +69,26 @@ def _json_request(method: str, path: str, token: str | None = None, body: dict[s
             payload = response.read().decode("utf-8")
             return json.loads(payload) if payload else {}
     except error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise HTTPException(status_code=exc.code, detail=detail[:500])
+        # GitHub 원문은 토큰·조직 정책 등 민감한 진단을 포함할 수 있으므로 읽거나
+        # 전달하지 않는다. 호출자는 status/code만으로 안정적으로 분기한다.
+        status_code, code = {
+            401: (401, "GITHUB_APP_AUTH_FAILED"),
+            403: (403, "GITHUB_APP_PERMISSION_DENIED"),
+            404: (404, "GITHUB_APP_RESOURCE_NOT_FOUND"),
+        }.get(exc.code, (503, "GITHUB_APP_UNAVAILABLE"))
+        logger.warning("GitHub App API HTTP 오류 status=%s path=%s", exc.code, path)
+        raise HTTPException(
+            status_code=status_code,
+            detail={"code": code, "message": "GitHub App 요청에 실패했습니다."},
+        ) from exc
     except error.URLError as exc:
-        raise HTTPException(status_code=502, detail=str(exc.reason))
+        # reason에도 upstream hostname/transport 진단이 들어갈 수 있어 외부 응답과
+        # 로그에 싣지 않는다.
+        logger.warning("GitHub App API 네트워크 오류 path=%s", path)
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "GITHUB_APP_UNAVAILABLE", "message": "GitHub App 요청에 실패했습니다."},
+        ) from exc
 
 
 def _private_key_pem() -> str:

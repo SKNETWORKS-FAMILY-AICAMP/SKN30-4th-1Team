@@ -251,7 +251,8 @@ def test_sync_bg_passes_source_metadata_to_ingest():
                          "source_ref": "abc", "source_url": "https://github.com/o/r/blob/abc/README.md"},
         }
     }
-    with patch("backend.api.repository._collect_repo_sources", return_value=(sources, "abc", [])), \
+    with patch("backend.api.repository._precheck_repository"), \
+         patch("backend.api.repository._collect_repo_sources", return_value=(sources, "abc", [])), \
          patch("backend.api.repository._get_last_reconciled_pr", return_value=None), \
          patch("backend.api.repository._collect_merged_prs", return_value=[]), \
          patch("backend.api.repository._clear_repo_indexed_data"), \
