@@ -56,10 +56,9 @@ def _dedupe_rows(rows: list[dict]) -> list[dict]:
 
 
 def _row_evidence(row: dict) -> str:
-    line = qa_engine._format_mysql_row(row)
-    if row.get("reason"):
-        line += f" 이유: {row['reason']}"
-    return line
+    # reason 은 _format_mysql_row -> _row_line_body 가 이미 붙인다.
+    # 여기서 또 붙이면 structured tool 출력에만 "이유: X 이유: X" 가 생긴다.
+    return qa_engine._format_mysql_row(row)
 
 
 def _compact_retrieval_debug(debug: dict) -> dict:
