@@ -94,6 +94,10 @@ CREATE TABLE IF NOT EXISTS repositories (
     sync_warning   TEXT         DEFAULT NULL,
     last_reconciled_pr INT      NULL,
     connected_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+    -- 이 저장소의 '현재 동기화가 시작된 시각'. connected_at(연결 시각)과 축이 다르다.
+    -- stale 판정은 이 값을 기준으로 한다 — connected_at은 재동기화 때 갱신되지 않아
+    -- 연결한 지 오래된 저장소의 정상 동기화가 곧바로 stale로 오판됐다.
+    sync_started_at DATETIME NULL,
     FOREIGN KEY (project_id) REFERENCES projects(id)
 );
 
