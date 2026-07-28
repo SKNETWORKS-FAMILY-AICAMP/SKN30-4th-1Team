@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="ko" xml:lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>문서 적재 E2E 검증 보고서</title>
+  <style type="text/css">
+      code{white-space: pre-wrap;}
+      span.smallcaps{font-variant: small-caps;}
+      span.underline{text-decoration: underline;}
+      div.column{display: inline-block; vertical-align: top; width: 50%;}
+  </style>
+  <style type="text/css">
+a.sourceLine { display: inline-block; line-height: 1.25; }
+a.sourceLine { pointer-events: none; color: inherit; text-decoration: inherit; }
+a.sourceLine:empty { height: 1.2em; position: absolute; }
+.sourceCode { overflow: visible; }
+code.sourceCode { white-space: pre; position: relative; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+code.sourceCode { white-space: pre-wrap; }
+a.sourceLine { text-indent: -1em; padding-left: 1em; }
+}
+pre.numberSource a.sourceLine
+  { position: relative; }
+pre.numberSource a.sourceLine:empty
+  { position: absolute; }
+pre.numberSource a.sourceLine::before
+  { content: attr(data-line-number);
+    position: absolute; left: -5em; text-align: right; vertical-align: baseline;
+    border: none; pointer-events: all;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+    color: #aaaaaa;
+  }
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa;  padding-left: 4px; }
+div.sourceCode
+  {  }
+@media screen {
+a.sourceLine::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } /* Alert */
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } /* Annotation */
+code span.at { color: #7d9029; } /* Attribute */
+code span.bn { color: #40a070; } /* BaseN */
+code span.bu { } /* BuiltIn */
+code span.cf { color: #007020; font-weight: bold; } /* ControlFlow */
+code span.ch { color: #4070a0; } /* Char */
+code span.cn { color: #880000; } /* Constant */
+code span.co { color: #60a0b0; font-style: italic; } /* Comment */
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } /* CommentVar */
+code span.do { color: #ba2121; font-style: italic; } /* Documentation */
+code span.dt { color: #902000; } /* DataType */
+code span.dv { color: #40a070; } /* DecVal */
+code span.er { color: #ff0000; font-weight: bold; } /* Error */
+code span.ex { } /* Extension */
+code span.fl { color: #40a070; } /* Float */
+code span.fu { color: #06287e; } /* Function */
+code span.im { } /* Import */
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } /* Information */
+code span.kw { color: #007020; font-weight: bold; } /* Keyword */
+code span.op { color: #666666; } /* Operator */
+code span.ot { color: #007020; } /* Other */
+code span.pp { color: #bc7a00; } /* Preprocessor */
+code span.sc { color: #4070a0; } /* SpecialChar */
+code span.ss { color: #bb6688; } /* SpecialString */
+code span.st { color: #4070a0; } /* String */
+code span.va { color: #19177c; } /* Variable */
+code span.vs { color: #4070a0; } /* VerbatimString */
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warning */
+  </style>
+  <!--[if lt IE 9]>
+    <script src="//cdnjs.cloudflare.com/ajax/libs/html5shiv/3.7.3/html5shiv-printshiv.min.js"></script>
+  <![endif]-->
+  <style>
+    :root {
+      --fg: #1a1d21;
+      --muted: #5c6672;
+      --line: #dfe3e8;
+      --accent: #0b6bcb;
+      --code-bg: #f5f7f9;
+      --warn-bg: #fff8e6;
+      --warn-line: #e0b23c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Noto Sans CJK KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+      font-size: 15px;
+      line-height: 1.75;
+      color: var(--fg);
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 48px 32px 96px;
+      word-break: keep-all;
+      overflow-wrap: anywhere;
+    }
+    h1 {
+      font-size: 1.9em; line-height: 1.35; margin: 0 0 8px;
+      padding-bottom: 14px; border-bottom: 3px solid var(--fg);
+    }
+    h2 {
+      font-size: 1.35em; margin: 2.4em 0 0.7em;
+      padding-bottom: 6px; border-bottom: 1px solid var(--line);
+    }
+    h3 {
+      font-size: 1.08em; margin: 1.9em 0 0.6em; color: var(--accent);
+    }
+    p { margin: 0.7em 0; }
+    ul, ol { padding-left: 1.4em; }
+    li { margin: 0.35em 0; }
+    strong { font-weight: 700; }
+    code {
+      font-family: "Noto Sans Mono CJK KR", ui-monospace, monospace;
+      font-size: 0.88em;
+      background: var(--code-bg);
+      border: 1px solid var(--line);
+      border-radius: 3px;
+      padding: 0.1em 0.35em;
+    }
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--line);
+      border-left: 3px solid var(--accent);
+      border-radius: 4px;
+      padding: 12px 14px;
+      overflow-x: auto;
+      line-height: 1.55;
+    }
+    pre code { background: none; border: none; padding: 0; font-size: 0.85em; }
+    blockquote {
+      margin: 1.2em 0;
+      padding: 12px 16px;
+      background: var(--warn-bg);
+      border-left: 4px solid var(--warn-line);
+      color: #4a3f22;
+    }
+    blockquote p { margin: 0.25em 0; }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 1.1em 0;
+      font-size: 0.93em;
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 7px 11px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #eef2f6; font-weight: 700; }
+    tr:nth-child(even) td { background: #fafbfc; }
+    hr { border: none; border-top: 1px solid var(--line); margin: 2.2em 0; }
+    a { color: var(--accent); }
+    @media print {
+      body { max-width: none; padding: 0; font-size: 10.5pt; }
+      h2, h3 { break-after: avoid; }
+      pre, table, blockquote { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+<h1 id="문서-적재-e2e-검증-보고서--docxpdf--project-memory">문서 적재 E2E 검증 보고서 — DOCX·PDF → Project Memory</h1>
+<blockquote>
+<p>대상: <code>backend/pipeline/converters/</code> 멀티포맷 입력 + 출처 추적 청킹 (PR #1) 환경: MySQL 8.0(docker) · ChromaDB(임베디드) · OpenAI <code>gpt-4.1-mini</code> · <code>PAIM_AUTH_MODE=dev</code> 전처리 규칙은 <a href="DOCUMENT_INGESTION_POLICY.md">문서 전처리 정책서</a>, 응답 계약은 <a href="API_명세서.md">API 명세서</a> 참고.</p>
+</blockquote>
+<h2 id="1-검증-조건">1. 검증 조건</h2>
+<p><code>origin/main</code>(<code>#7</code> 운영 하드닝 · <code>#6</code> 포맷 동기화) 병합으로 업로드 경로가 재작성 수준으로 바뀌어, 병합 전후 두 번 실행했다. <strong>결정론적 산출물은 동일했다.</strong></p>
+<table>
+<thead>
+<tr class="header">
+<th>지표</th>
+<th style="text-align: right;">병합 전 <code>d73bd04</code></th>
+<th style="text-align: right;">병합 후 <code>5e124a4</code></th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>파일 <code>indexed</code> / <code>documents</code></td>
+<td style="text-align: right;">9 / 9</td>
+<td style="text-align: right;">9 / 9</td>
+</tr>
+<tr class="even">
+<td><strong>문서 청크</strong></td>
+<td style="text-align: right;"><strong>74</strong></td>
+<td style="text-align: right;"><strong>74</strong></td>
+</tr>
+<tr class="odd">
+<td><strong>출처 metadata 완비</strong></td>
+<td style="text-align: right;"><strong>74/74</strong></td>
+<td style="text-align: right;"><strong>74/74</strong></td>
+</tr>
+<tr class="even">
+<td><code>memory</code></td>
+<td style="text-align: right;">90</td>
+<td style="text-align: right;">88</td>
+</tr>
+</tbody>
+</table>
+<p><code>memory</code> 차이는 LLM(<code>gpt-4.1-mini</code>) 추출 편차다. 변환·청킹 산출물이 같으므로 병합이 파이프라인에 영향을 주지 않았다고 판단한다(독립 리뷰가 <code>extractor.py</code> blob 동일까지 확인). <strong>아래 결과는 병합 후 기준이다.</strong></p>
+<p>DB·ChromaDB를 완전히 비운 상태에서 시작했다.</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode bash"><code class="sourceCode bash"><a class="sourceLine" id="cb1-1" data-line-number="1"><span class="ex">docker</span> compose down -v      # MySQL 볼륨 삭제</a>
+<a class="sourceLine" id="cb1-2" data-line-number="2"><span class="fu">rm</span> -rf .chroma              # 벡터 제거</a>
+<a class="sourceLine" id="cb1-3" data-line-number="3"><span class="ex">docker</span> compose up -d        # 스키마 자동 재적용</a>
+<a class="sourceLine" id="cb1-4" data-line-number="4"><span class="co"># 기동 직후: 테이블 15개, projects/documents/memory 모두 0행 확인</span></a></code></pre></div>
+<h3 id="결과--완료-조건-충족">결과 — 완료 조건 충족</h3>
+<pre><code>파일 9건 전부 indexed 도달
+projects 9 · documents 9 · memory 88 · memory_sources 88 · project_memory 9
+ChromaDB 162 벡터 = 문서 청크 74 + 메모리 항목 88
+출처 metadata 완비 74/74
+source_format 분포: docx 40 / pdf 34
+action 45건 전부 owner 보유
+빈 파일 → 400 empty_document
+</code></pre>
+<table>
+<thead>
+<tr class="header">
+<th>파일</th>
+<th>format</th>
+<th style="text-align: right;">blocks</th>
+<th style="text-align: right;">경고</th>
+<th>상태</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>01 정형 회의록</td>
+<td>docx</td>
+<td style="text-align: right;">63</td>
+<td style="text-align: right;">5</td>
+<td>indexed</td>
+</tr>
+<tr class="even">
+<td>01 정형 회의록</td>
+<td>pdf</td>
+<td style="text-align: right;">26</td>
+<td style="text-align: right;">1</td>
+<td>indexed</td>
+</tr>
+<tr class="odd">
+<td>02 자유양식</td>
+<td>docx</td>
+<td style="text-align: right;">64</td>
+<td style="text-align: right;">0</td>
+<td>indexed</td>
+</tr>
+<tr class="even">
+<td>02 자유양식</td>
+<td>pdf</td>
+<td style="text-align: right;">34</td>
+<td style="text-align: right;">1</td>
+<td>indexed</td>
+</tr>
+<tr class="odd">
+<td>03 정형 가명화</td>
+<td>docx</td>
+<td style="text-align: right;">63</td>
+<td style="text-align: right;">5</td>
+<td>indexed</td>
+</tr>
+<tr class="even">
+<td>03 정형 가명화</td>
+<td>pdf</td>
+<td style="text-align: right;">26</td>
+<td style="text-align: right;">1</td>
+<td>indexed</td>
+</tr>
+<tr class="odd">
+<td>04 자유양식 가명화</td>
+<td>docx</td>
+<td style="text-align: right;">64</td>
+<td style="text-align: right;">0</td>
+<td>indexed</td>
+</tr>
+<tr class="even">
+<td>04 자유양식 가명화</td>
+<td>pdf</td>
+<td style="text-align: right;">35</td>
+<td style="text-align: right;">1</td>
+<td>indexed</td>
+</tr>
+<tr class="odd">
+<td>05 중첩표</td>
+<td>docx</td>
+<td style="text-align: right;">67</td>
+<td style="text-align: right;">7</td>
+<td>indexed</td>
+</tr>
+</tbody>
+</table>
+<h3 id="병합-후-추가-확인">병합 후 추가 확인</h3>
+<pre><code>중첩 표 보존       05 샘플 3,393자 / 67 blocks / 경고 7 — 병합 전과 동일
+파싱 경로 단일화    extract_document_text(...) == convert(...).text  → True
+레지스트리 일치     document_content == converters = {.docx .markdown .md .pdf .txt}
+제어문자 차단       U+007F DOCX → INVALID_DOCUMENT_CONTENT (정규화 전 검사)
+</code></pre>
+<h3 id="재현">재현</h3>
+<div class="sourceCode" id="cb4"><pre class="sourceCode bash"><code class="sourceCode bash"><a class="sourceLine" id="cb4-1" data-line-number="1"><span class="fu">cp</span> .env.example .env        # OPENAI_API_KEY, DB_PASSWORD 입력</a>
+<a class="sourceLine" id="cb4-2" data-line-number="2">                            <span class="co"># PAIM_AUTH_MODE=dev, DEV_USER_ID=1 추가</span></a>
+<a class="sourceLine" id="cb4-3" data-line-number="3"><span class="ex">docker</span> compose down -v <span class="kw">&amp;&amp;</span> <span class="fu">rm</span> -rf .chroma <span class="kw">&amp;&amp;</span> <span class="ex">docker</span> compose up -d</a>
+<a class="sourceLine" id="cb4-4" data-line-number="4"><span class="ex">uv</span> run uvicorn backend.main:app --host 127.0.0.1 --port 8000</a>
+<a class="sourceLine" id="cb4-5" data-line-number="5"><span class="co"># 프로젝트 생성 → POST /api/v1/projects/{id}/documents → status 폴링</span></a></code></pre></div>
+<blockquote>
+<p><code>PAIM_AUTH_MODE=dev</code>는 E2E 전용이다. <code>.env</code>에 남겨두면 CORS·auth 테스트가 그 값을 읽어 실패하므로, 검증 후 제거해야 한다.</p>
+</blockquote>
+<hr />
+<h2 id="2-잘-된-것">2. 잘 된 것</h2>
+<p><strong>action 추출이 완전히 안정적이다.</strong> 9개 조합 전부 정확히 5건, 담당자 5/5. 양식·포맷·가명화·중첩 어느 축으로도 흔들리지 않았다. 정답과 100% 일치한다.</p>
+<p><strong>가명화가 추출에 영향을 주지 않는다.</strong> 가명 인물명(&quot;참석자 A&quot;)도 담당자로 정확히 인식됐다.</p>
+<p><strong>빈 파일이 정확히 거절된다.</strong> <code>400</code> + <code>code: empty_document</code>, <code>detail</code>은 <code>&quot;문서에서 추출된 텍스트가 없습니다.&quot;</code> 19자.</p>
+<p><strong>변환 경고가 실제 문서에서 의도대로 동작한다.</strong> 정형 DOCX는 표 5개 → 경고 5건, 중첩표 문서는 최상위 표 7개 → 경고 7건(중첩 표는 별도 번호를 소비하지 않음), PDF는 반복 머리말 → <code>repeated_line_dropped</code> 1건. 과다 생성 없음.</p>
+<p><strong><code>location</code>이 정확히 붙는다.</strong> <code>table 1</code>, <code>table 2</code>, <code>page N</code> 형식으로 <code>R402</code>가 명세에 기록한 내용과 일치한다.</p>
+<h2 id="3-표는-안-되는-것이-아니다--표별-대조-결과">3. 표는 &quot;안 되는&quot; 것이 아니다 — 표별 대조 결과</h2>
+<p><strong>초판의 판단(&quot;표 안의 내용이 추출되지 않는다&quot;)은 틀렸다.</strong> 숫자만 보고 어느 표에서 무엇이 나왔는지 대조하지 않은 결과다. 정형 문서(03)의 표 5개를 추출된 <code>memory</code> 본문과 문자열 대조했다.</p>
+<table>
+<thead>
+<tr class="header">
+<th>표</th>
+<th>내용</th>
+<th style="text-align: center;">추출</th>
+<th>판정</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>표1 회의 정보</td>
+<td>회의명·일시·장소·참석 인원</td>
+<td style="text-align: center;">✗</td>
+<td><strong>정상</strong> — 메타데이터. decision/action/issue/risk 어디에도 해당 없음</td>
+</tr>
+<tr class="even">
+<td>표2 참석자</td>
+<td>성명·역할·담당 관점</td>
+<td style="text-align: center;">✗</td>
+<td><strong>정상</strong> — 명단. 카테고리 해당 없음</td>
+</tr>
+<tr class="odd">
+<td>표3 주요 안건</td>
+<td>안건 1~4</td>
+<td style="text-align: center;">✗</td>
+<td><strong>정상</strong> — 결론이 &quot;잠정 결론&quot; 절에서 decision으로 추출됨. 중복 회피</td>
+</tr>
+<tr class="even">
+<td>표4 대안별 검토</td>
+<td>기대효과·<strong>리스크</strong>·판단·후속조치</td>
+<td style="text-align: center;">✗</td>
+<td><strong>결함</strong> — risk 0건</td>
+</tr>
+<tr class="odd">
+<td>표5 담당자별 조사 과제</td>
+<td>담당·산출물·<strong>기한</strong></td>
+<td style="text-align: center;"><strong>✓ 5/5</strong></td>
+<td><strong>정상</strong> — owner 5/5, 기한이 content에 포함</td>
+</tr>
+</tbody>
+</table>
+<pre><code>[action] owner=참석자 A  참석자 A가 ... 블루프린트 초안 작성하겠습니다 (~7/28까지).
+[action] owner=참석자 E  참석자 E가 ... 대체 도시 2곳 비교하겠습니다 (~7/28까지).
+</code></pre>
+<p><strong>5개 중 3개는 안 뽑히는 것이 맞다. 실제 결함은 표4 하나다.</strong></p>
+<h3 id="차이는-표-형식이-아니라-행의-완결성">차이는 표 형식이 아니라 행의 완결성</h3>
+<p><strong>표5가 되는 이유</strong>: 각 행이 그 자체로 완결된 액션이다. <code>누가 / 무엇을 / 언제까지</code>가 한 행에 모여 있어 <code>MemoryItem</code>(category·owner·content) 스키마에 그대로 대응된다.</p>
+<p><strong>표4가 안 되는 이유</strong>: 리스크가 열 값으로 흩어져 있다.</p>
+<pre><code>[표4] 전통 콘셉트 앨범 | 인지도·확산력 높음 | 섭외·제작비, 전통성 왜곡 위험 | 우선 검토 | ...
+                                          ↑ 이 셀이 &#39;리스크&#39;라는 표시가 행에 없음
+</code></pre>
+<p>열 머리글은 첫 행에만 있고 데이터 행은 그 정보를 갖지 않는다. LLM은 이 줄을 &quot;대안 비교표의 한 줄&quot;로 읽는다.</p>
+<h3 id="확실하지-않은-부분">확실하지 않은 부분</h3>
+<ul>
+<li>표4형을 개선하는 방법 — <strong>평탄화 형식 변경은 효과가 없다는 것만 확인됐다.</strong> 열 머리글 부착·마크다운 표로 바꿔도 결과가 동일했다(각 4/4).</li>
+<li>정형 문서에서 issue가 0건인 이유 — 정형 문서에 issue에 해당하는 절이 없어 <strong>정답 자체가 불분명하다.</strong></li>
+</ul>
+<h2 id="4-중첩-표--변환은-완전-하위-행-추출은-누락">4. 중첩 표 — 변환은 완전, 하위 행 추출은 누락</h2>
+<p><code>05_PaiM_정형_회의록_Kculture_중첩표.docx</code>는 표 16개 중 9개가 중첩이며 <strong>3단 중첩</strong>을 포함한다(<code>1단 7개 / 2단 5개 / 3단 4개</code>).</p>
+<h3 id="변환-유실-0">변환: 유실 0</h3>
+<p>중첩 표에만 있는 고유 문자열이 전부 보존됐다.</p>
+<table>
+<thead>
+<tr class="header">
+<th>검증 문자열</th>
+<th>결과</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>국악 편곡가 섭외</td>
+<td>보존</td>
+</tr>
+<tr class="even">
+<td>국악 연주자 세션</td>
+<td>보존</td>
+</tr>
+<tr class="odd">
+<td>쇼케이스 장소 후보</td>
+<td>보존</td>
+</tr>
+<tr class="even">
+<td>뉴욕·런던·파리</td>
+<td>보존</td>
+</tr>
+<tr class="odd">
+<td>한복 디자이너 후보</td>
+<td>보존</td>
+</tr>
+</tbody>
+</table>
+<p>평탄화 형식도 의도대로 바깥(<code>|</code>)과 중첩(<code>;</code>)이 구분된다.</p>
+<pre><code>[표6] 콘텐츠 제작 책임자: 박민재 | 중분류 / 담당 | 세부 내용(3단 표)
+      ; 음원 제작 담당: 정다은 | 항목 | 조사 내용 | 기한
+      ; 편곡 | 국악 편곡가 섭외 | 7/28
+</code></pre>
+<p><strong><code>R202</code> 수정이 실제 문서로 실증됐다.</strong> 수정 전이라면 <code>편곡</code>·<code>녹음</code>·<code>7/28</code>이 전부 사라졌을 내용이다.</p>
+<h3 id="추출-상위-표만">추출: 상위 표만</h3>
+<pre><code>상위 표 담당자 5명       → action 5건, owner 5/5   ✓
+중첩 표 세부 과제 10여건  → 편곡·녹음·뮤직비디오·쇼케이스 장소·한복 디자이너·관객 동선  전부 ✗
+</code></pre>
+<p>중첩 표 행도 <code>항목 | 조사 내용 | 기한</code> 구조라 표5형에 가까운데 추출되지 않는다. <strong>한 블록에 3개 층위가 뒤섞이는 것</strong>이 원인으로 보인다.</p>
+<p><strong>텍스트 전달은 정상이다.</strong> 실험으로 확인했다.</p>
+<pre><code>중첩 표 텍스트만 (300자)  → action 4/4, owner 4/4 정확히 추출
+문서 전체 (3,393자)       → 같은 내용 0건
+추출기 청크 수: 1 (분할되지 않음)
+</code></pre>
+<p>문제는 추출 단계의 인식이지 변환·전달이 아니다. 후속 이슈로 정리했다(<code>follow-up-issues.md</code> #1).</p>
+<h2 id="5-깊이-상한-경계-합성">5. 깊이 상한 경계 (합성)</h2>
+<p>Word로 6단 중첩을 손으로 만드는 것은 비현실적이라 python-docx로 생성해 확인했다.</p>
+<table>
+<thead>
+<tr class="header">
+<th>깊이</th>
+<th>내용</th>
+<th>경고</th>
+<th>판정</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>4단</td>
+<td>보존</td>
+<td><code>table_flattened</code></td>
+<td>상한 이내</td>
+</tr>
+<tr class="even">
+<td>5단</td>
+<td>보존</td>
+<td><code>table_flattened</code></td>
+<td>상한 이내</td>
+</tr>
+<tr class="odd">
+<td>6단</td>
+<td>유실</td>
+<td><code>unsupported_element</code></td>
+<td>유실하되 <strong>알림</strong></td>
+</tr>
+<tr class="even">
+<td>7단</td>
+<td>유실</td>
+<td><code>unsupported_element</code></td>
+<td>동일</td>
+</tr>
+</tbody>
+</table>
+<p>경고 메시지: <code>중첩 깊이 5단을 초과한 표의 내용은 변환되지 않았습니다.</code></p>
+<p><strong>경계는 5/6 사이다.</strong> 6단 이상이어도 <strong>파일은 정상 업로드된다</strong> — 그 표 내용만 버려지고 문서 전체는 <code>indexed</code>까지 간다.</p>
+<p>에러가 되는 것은 <strong>깊은 표가 문서의 유일한 내용일 때</strong>뿐이다.</p>
+<pre><code>깊이5, 표만  → 변환 성공 (5단은 살아남아 블록이 생김)
+깊이6, 표만  → 400 empty_document
+              &quot;문서에서 추출된 텍스트가 없습니다.
+               중첩 깊이 5단을 초과한 표의 내용은 변환되지 않았습니다.&quot;
+</code></pre>
+<p>블록이 0개가 되면 <code>assemble()</code>이 오류를 던지되 <strong>사유를 메시지에 싣는다.</strong> <code>R301</code>과 자체 점검 1번으로 확보된 동작이며, 이번 수정(<code>R401</code>·<code>R501</code>)이 깨지 않았다.</p>
+<h2 id="6-자유-양식의-변동은-llm-비결정성이다">6. 자유 양식의 변동은 LLM 비결정성이다</h2>
+<p>정형은 안정적이고 자유 양식은 조합마다 결과가 다르다.</p>
+<table>
+<thead>
+<tr class="header">
+<th></th>
+<th style="text-align: right;">dec</th>
+<th style="text-align: right;">iss</th>
+<th style="text-align: right;">rsk</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>02 자유 원본 docx</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">5</td>
+</tr>
+<tr class="even">
+<td>02 자유 원본 pdf</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">5</td>
+</tr>
+<tr class="odd">
+<td>04 자유 가명화 docx</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr class="even">
+<td>04 자유 가명화 pdf</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">3</td>
+</tr>
+</tbody>
+</table>
+<p><strong>초판 실행과 비교하면 원인이 드러난다.</strong> 코드는 <code>extractor.py</code>·<code>ingestor.py</code>를 전혀 건드리지 않았는데도 분포가 바뀌었다.</p>
+<table>
+<thead>
+<tr class="header">
+<th></th>
+<th>초판(<code>c507626</code>)</th>
+<th>현재(<code>d73bd04</code>)</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>01·03 정형 4조합</td>
+<td>전부 <code>3/5/0/0</code></td>
+<td><code>3/5/0/0</code> ×3, <code>4/5/0/0</code> ×1</td>
+</tr>
+<tr class="even">
+<td>02 자유 docx</td>
+<td><code>1/5/5/0</code></td>
+<td><code>2/5/0/5</code></td>
+</tr>
+<tr class="odd">
+<td>04 자유 docx</td>
+<td><code>2/5/1/5</code></td>
+<td><code>1/5/5/0</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>정형은 두 번 다 거의 동일하고 자유 양식만 크게 흔들린다.</strong> 따라서 변동의 원인은 LLM 비결정성이며 포맷 차이나 코드 변경이 아니다.</p>
+<p>초판 §7이 &quot;LLM 비결정성인지 PDF 구조 소실인지 분리하지 못했다&quot;고 남긴 질문이 이번 재실행으로 해소됐다.</p>
+<h3 id="왜-자유-양식만-흔들리나">왜 자유 양식만 흔들리나</h3>
+<p><strong>원문 자체가 모호하다.</strong> &quot;아직 정하지 못한 것&quot;(미결)과 &quot;기억해 둘 위험 신호&quot;(위험)가 둘 다 있는데, 미결 항목은 issue로도 risk로도 분류될 수 있다. 실제로 실행마다 5건이 전부 issue가 되기도 하고 전부 risk가 되기도 했다.</p>
+<p>문서를 쓰는 쪽에서 두 범주를 구분해 적지 않는 한 이 변동은 남는다.</p>
+<h2 id="7-포맷-간-구조-차이-참고">7. 포맷 간 구조 차이 (참고)</h2>
+<p>같은 문서인데 DOCX와 PDF의 블록 구조가 다르다.</p>
+<table>
+<thead>
+<tr class="header">
+<th></th>
+<th style="text-align: right;">blocks</th>
+<th style="text-align: right;">heading</th>
+<th style="text-align: right;">list_item</th>
+<th style="text-align: right;">table_row</th>
+<th style="text-align: right;">paragraph</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>01 정형 docx</td>
+<td style="text-align: right;">63</td>
+<td style="text-align: right;">9</td>
+<td style="text-align: right;">9</td>
+<td style="text-align: right;">28</td>
+<td style="text-align: right;">17</td>
+</tr>
+<tr class="even">
+<td>01 정형 pdf</td>
+<td style="text-align: right;">26</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">26</td>
+</tr>
+</tbody>
+</table>
+<p>PDF 변환기는 <code>pypdf</code>로 텍스트만 추출하므로 제목·목록·표 구분이 사라진다. <strong>설계상 그런 것이고 결함이 아니다.</strong> 다만 출처 추적의 <code>heading</code> 경로가 PDF에서는 비게 된다(74청크 중 35건만 채움).</p>
+<p><strong>정형 문서는 이 차이에도 action 추출이 동일</strong>했다(docx·pdf 모두 5/5).</p>
+<h2 id="8-완료-조건-대비">8. 완료 조건 대비</h2>
+<table>
+<thead>
+<tr class="header">
+<th>WBS 완료 조건</th>
+<th>판정</th>
+<th>근거</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>DOCX 업로드·변환·메모리 생성 성공</td>
+<td><strong>충족</strong></td>
+<td>5건 <code>indexed</code>, memory 8~12행</td>
+</tr>
+<tr class="even">
+<td>텍스트 PDF 업로드·변환·메모리 생성 성공</td>
+<td><strong>충족</strong></td>
+<td>4건 <code>indexed</code>, memory 8~13행</td>
+</tr>
+<tr class="odd">
+<td>출처 메타데이터 확인 가능</td>
+<td><strong>충족</strong></td>
+<td>Chroma 74청크에 block/page/heading/format, <code>memory_sources</code> 90행</td>
+</tr>
+<tr class="even">
+<td>실패 파일은 명시적 오류 반환</td>
+<td><strong>충족</strong></td>
+<td>빈 파일 400 + <code>empty_document</code></td>
+</tr>
+<tr class="odd">
+<td>전처리 정책서 작성 완료</td>
+<td>충족</td>
+<td><code>docs/DOCUMENT_INGESTION_POLICY.md</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>5개 전부 충족.</strong> 단 아래 유의사항이 붙는다.</p>
+<ul>
+<li>완료 조건의 범위는 **&quot;적재되는가&quot;**이지 &quot;추출 품질&quot;이 아니다. §3·§7·§9의 한계는 완료 조건 항목이 아니며 후속 이슈다.</li>
+<li>익명화 실제 회의록 검증은 <strong>합성 가명화본으로 대체</strong>했다. E 담당자의 실제 산출물이 아니므로 WBS의 해당 항목을 충족한다고 볼 수 없다.</li>
+</ul>
+<h2 id="9-후속-조치">9. 후속 조치</h2>
+<table>
+<thead>
+<tr class="header">
+<th>#</th>
+<th>항목</th>
+<th>성격</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>1</td>
+<td>표4형(속성이 열에 흩어진 표)·중첩 하위 행의 추출</td>
+<td>기능 결함</td>
+</tr>
+<tr class="even">
+<td>2</td>
+<td>업로드 경고 UI 표시</td>
+<td>프론트엔드</td>
+</tr>
+<tr class="odd">
+<td>3</td>
+<td>동일 파일 반복 실행으로 추출 분산 측정</td>
+<td>검증 방법</td>
+</tr>
+<tr class="even">
+<td>4</td>
+<td>회의록 작성 가이드 — 위험·미결을 구분해 목록으로</td>
+<td>운영 규칙</td>
+</tr>
+<tr class="odd">
+<td>5</td>
+<td>익명화 실제 회의록 확보</td>
+<td>E 담당자</td>
+</tr>
+</tbody>
+</table>
+<p>상세는 <code>follow-up-issues.md</code> 참조.</p>
+<p><strong>평탄화 형식 변경은 후속 조치에서 제외한다.</strong> 실험으로 효과가 없음을 확인했다(§3).</p>
+<h2 id="10-재현-방법">10. 재현 방법</h2>
+<div class="sourceCode" id="cb11"><pre class="sourceCode bash"><code class="sourceCode bash"><a class="sourceLine" id="cb11-1" data-line-number="1"><span class="ex">docker</span> compose down -v <span class="kw">&amp;&amp;</span> <span class="fu">rm</span> -rf .chroma       # 완전히 비우기</a>
+<a class="sourceLine" id="cb11-2" data-line-number="2"><span class="ex">docker</span> compose up -d</a>
+<a class="sourceLine" id="cb11-3" data-line-number="3"><span class="va">PAIM_AUTH_MODE=</span>dev <span class="va">DEV_USER_ID=</span>1 <span class="ex">uv</span> run uvicorn backend.main:app --host 127.0.0.1 --port 8000</a>
+<a class="sourceLine" id="cb11-4" data-line-number="4"><span class="co"># 파일 10건을 각각 새 프로젝트에 업로드 후 status 폴링, /memory 조회</span></a></code></pre></div>
+<p><code>.env</code>에 <code>OPENAI_API_KEY</code>, <code>DB_PASSWORD</code> 필요. <code>SESSION_MEMORY_KEY</code>는 이 경로에 관여하지 않는다(lazy 초기화). <code>PAIM_AUTH_MODE=dev</code>는 로컬 검증 전용이다.</p>
+</body>
+</html>
