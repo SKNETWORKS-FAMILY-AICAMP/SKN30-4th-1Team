@@ -960,7 +960,7 @@ LLM이 만든 메모리 변경 제안(pending)을 사람이 승인/거절한다.
     "project_id": 1,
     "memory_id": 10,
     "kind": "complete_action",
-    "evidence": { "type": "complete_action", "title": "..." },
+    "evidence": { "type": "pr", "number": 42, "title": "...", "url": "...", "merged_at": "..." },
     "rationale": "...",
     "confidence": "high",
     "status": "pending",
@@ -1245,7 +1245,9 @@ Git 로그 텍스트를 동기 처리해 메모리로 추출·적재한다. (최
 | `attachments` | array | - | 첨부 자료 `{filename, content_base64}`. `.md`/`.markdown`/`.txt`/`.docx`/`.pdf`, **파일당 최대 8 MB · 전체 합계 8 MB** |
 
 > **`attachments`**: 첨부가 있으면 라우터를 우회해 항상 `route: "semantic"`으로
-> 처리된다. 형식 미지원 시 **400**, 10 MB 초과 시 **413**.
+> 처리된다. 형식 미지원 시 **400**, 8 MB 초과 시 **413**.
+> 첨부 상한(`QUERY_ATTACHMENT_MAX_FILE_BYTES` = 8 MB)은 문서 업로드 상한
+> (`PROJECT_DOCUMENT_MAX_FILE_BYTES` = 10 MB)과 다른 값이다.
 
 **응답 `200`**
 ```json
