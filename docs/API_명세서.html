@@ -203,6 +203,7 @@
     .s204 { color: #065f46; font-weight: 700; }
     .s202 { color: #065f46; font-weight: 700; }
     .s400 { color: #b45309; font-weight: 700; }
+    .s415 { color: #b45309; font-weight: 700; }
     .s401 { color: #b45309; font-weight: 700; }
     .s403 { color: #b45309; font-weight: 700; }
     .s404 { color: #b45309; font-weight: 700; }
@@ -529,7 +530,7 @@
         <div class="res-label">Request — <code>multipart/form-data</code></div>
         <table>
           <tr><th>필드</th><th>타입</th><th>필수</th><th>설명</th></tr>
-          <tr><td><code>file</code></td><td>File</td><td>✅</td><td>.md / .txt / .pdf (최대 10 MB)</td></tr>
+          <tr><td><code>file</code></td><td>File</td><td>✅</td><td>.md / .markdown / .txt / .docx / .pdf (최대 10 MB)</td></tr>
           <tr><td><code>date</code></td><td>string</td><td>-</td><td>문서 날짜 YYYY-MM-DD</td></tr>
         </table>
         <div class="note" style="margin-bottom:8px">
@@ -539,9 +540,44 @@
           그 외 → <code>document</code>
         </div>
         <div class="res-label"><span class="s201">201</span> Created</div>
-        <pre><code>{ "doc_id": 12, "status": "processing" }</code></pre>
+        <pre><code>{ "doc_id": 12, "status": "processing", "format": "pdf", "blocks": 87, "pages": 12,
+  "warnings": [ { "code": "table_flattened", "message": "표를 행 단위 텍스트로 변환했습니다. 열 구조는 보존되지 않습니다.", "location": "table 2" } ] }</code></pre>
+        <div class="res-label">format=docx|pdf|text · blocks=추출 문단·표행 수 · pages=PDF 페이지 수(그 외 null) · warnings=변환 경고(없으면 [])</div>
+        <table>
+          <tr><th>warning <code>code</code></th><th>의미</th><th><code>location</code></th></tr>
+          <tr><td><code>page_no_text</code></td><td>해당 페이지에서 텍스트를 추출하지 못함</td><td><code>page N</code></td></tr>
+          <tr><td><code>page_extract_failed</code></td><td>해당 페이지 파싱 실패</td><td><code>page N</code></td></tr>
+          <tr><td><code>table_flattened</code></td><td>표를 행 단위 텍스트로 평탄화(열 구조 유실)</td><td><code>table N</code></td></tr>
+          <tr><td><code>unsupported_element</code></td><td>이미지·도형·텍스트 상자 등 비텍스트 요소 유실</td><td><code>null</code></td></tr>
+          <tr><td><code>unsupported_element</code></td><td>중첩 깊이 상한(5단) 초과 표의 내용 유실</td><td><code>table N</code></td></tr>
+          <tr><td><code>repeated_line_dropped</code></td><td>머리말·꼬리말로 판단해 제거(개수 요약 1건)</td><td><code>null</code></td></tr>
+          <tr><td><code>duplicate_block_dropped</code></td><td>중복 문단 제거(<strong>개수 요약 1건</strong>)</td><td><code>null</code></td></tr>
+          <tr><td><code>decode_fallback</code></td><td>UTF-8 실패로 다른 인코딩 사용</td><td><code>null</code></td></tr>
+        </table>
+        <div class="note" style="margin-bottom:8px">
+          <code>location</code>은 <strong>null일 수 있습니다.</strong>
+          <code>duplicate_block_dropped</code>와 <code>repeated_line_dropped</code>는 블록마다 발생해도
+          개수만 요약한 1건으로 반환됩니다. 나머지는 위치마다 별도 항목입니다.
+        </div>
         <div class="res-label"><span class="s400">400</span> Bad Request</div>
-        <pre><code>{ "detail": "지원하지 않는 파일 형식입니다. (.md / .txt / .pdf)" }</code></pre>
+        <pre><code>{ "detail": "지원하지 않는 파일 형식입니다. (.docx / .markdown / .md / .pdf / .txt)", "code": "unsupported_format" }
+{ "detail": "PDF에서 텍스트를 추출하지 못했습니다. 스캔 이미지 PDF는 지원하지 않습니다.", "code": "no_text_layer" }
+{ "detail": "DOCX의 압축 해제 크기가 안전한 처리 한도를 초과했습니다. 문서를 나누거나 내용을 줄여서 다시 올려주세요.", "code": "file_too_large" }</code></pre>
+        <div class="res-label">code: unsupported_format | missing_dependency | corrupt_file | empty_document | no_text_layer | file_too_large</div>
+        <div class="res-label"><span class="s415">415</span> Unsupported Media Type — 입력 경계 위반</div>
+        <pre><code>{ "detail": { "code": "INVALID_DOCUMENT_CONTENT",
+              "message": "PDF 확장자와 실제 파일 형식이 일치하지 않습니다." },
+  "request_id": "&lt;uuid&gt;" }</code></pre>
+        <div class="note" style="margin-bottom:8px">
+          <strong>400과 성격이 다릅니다.</strong> 415는 파일을 파서에 넘기기 <strong>전에</strong> 걸러낸 경우입니다 —
+          확장자와 실제 형식 불일치(<code>%PDF-</code>·<code>PK\x03\x04</code> 매직 위반),
+          지원하지 않는 인코딩(UTF-8/CP949 아님), NUL·제어 문자 2% 초과.<br>
+          <strong>매직 검사 통과 여부가 경계입니다.</strong> 매직 불일치 → <code>415</code>,
+          매직은 맞으나 내부 파싱 실패 → <code>400 corrupt_file</code>,
+          압축 해제 한도 초과 → <code>400 file_too_large</code>.<br>
+          415의 <code>detail</code>은 <strong>객체</strong>, 400의 <code>detail</code>은 <strong>문자열</strong>입니다.
+          의도된 차이이며 데스크톱 클라이언트는 양쪽을 모두 읽습니다.
+        </div>
         <div class="res-label"><span class="s413">413</span> Content Too Large</div>
         <pre><code>{ "detail": "파일 크기는 10 MB를 초과할 수 없습니다." }</code></pre>
         <div class="res-label"><span class="s403">403</span> Forbidden</div>
@@ -1221,7 +1257,7 @@
     { "filename": "meeting.md", "content_base64": "&lt;base64&gt;" }
   ]
 }</code></pre>
-        <div class="res-label">첨부 <code>attachments</code>: <code>.md</code>/<code>.txt</code>/<code>.pdf</code>, 파일당 최대 10 MB. 형식 미지원 400, 초과 413. 첨부 시 항상 <code>route: "semantic"</code>.</div>
+        <div class="res-label">첨부 <code>attachments</code>: <code>.md</code>/<code>.markdown</code>/<code>.txt</code>/<code>.docx</code>/<code>.pdf</code>, <strong>파일당 최대 8 MB · 전체 합계 8 MB</strong>. 형식 미지원 400, 내용 불일치 415, 초과 413. 첨부 시 항상 <code>route: "semantic"</code>.</div>
         <div class="res-label"><span class="s200">200</span> OK</div>
         <pre><code>{
   "answer": "현재 가장 큰 리스크는 API 계약 변경 가능성입니다. (출처: planning.pdf)",

@@ -355,3 +355,131 @@ def test_callback_requires_state():
     resp = _client.get("/github/app/callback?installation_id=123")
     assert resp.status_code == 400
     assert resp.json()["detail"] == "state is required"
+
+
+# ── R302: 업로드 성공 응답 예시의 필드 드리프트 ─────────────────────
+#
+# 위 manifest 대조는 endpoint의 method/path 집합만 본다. 응답 예시의 JSON 구조는
+# 비교하지 않으므로, 성공 응답 필드가 바뀌고 문서가 뒤처져도(또는 문서 수정을
+# 통째로 되돌려도) 전부 통과한다. 실제로 구형 HTML이 그대로 통과하는 것이 확인됐다.
+# 여기서는 endpoint 대조 로직은 건드리지 않고 **필드 집합 검사만** 추가한다.
+
+# POST /documents 201 응답의 실제 계약 (backend/api/upload.py)
+_UPLOAD_SUCCESS_FIELDS = {"doc_id", "status", "format", "blocks", "pages", "warnings"}
+
+
+def _json_field_names(snippet: str) -> set[str]:
+    """JSON 예시 문자열에서 최상위로 등장하는 키 이름을 뽑는다.
+
+    중첩 객체(warnings 항목의 code/message/location)까지 포함되지만, 비교 대상인
+    최상위 계약 필드가 모두 들어 있는지 확인하는 용도로는 충분하다.
+    """
+    return set(re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"\s*:', snippet))
+
+
+def upload_success_example_md(text: str) -> str:
+    """md의 `POST /documents` 절에서 201 응답 JSON 예시를 뽑는다."""
+    section = text.split("### `POST /api/v1/projects/{project_id}/documents`", 1)[1]
+    section = section.split("### `", 1)[0]
+    match = re.search(r"\*\*응답 `201`\*\*\s*```json\s*(.*?)```", section, re.S)
+    assert match, "md에서 201 응답 예시를 찾지 못했다"
+    return match.group(1)
+
+
+def upload_success_example_html(text: str) -> str:
+    """html의 **업로드 카드**에서 201 응답 예시를 뽑는다.
+
+    파일 전체에서 첫 201을 찾으면 회원가입 응답을 잡으므로, POST /documents 카드
+    이후 구간으로 범위를 좁힌 뒤 검색한다.
+    """
+    marker = re.search(
+        r'<span class="method POST">POST</span>\s*'
+        r'<span class="path">/api/v1/projects/\{project_id\}/documents</span>',
+        text,
+    )
+    assert marker, "html에서 POST /documents 카드를 찾지 못했다"
+    section = text[marker.end():]
+    match = re.search(
+        r'<span class="s201">201</span> Created</div>\s*<pre><code>(.*?)</code></pre>',
+        section,
+        re.S,
+    )
+    assert match, "html에서 업로드 201 응답 예시를 찾지 못했다"
+    return match.group(1)
+
+
+def test_upload_success_example_fields_match_contract():
+    """md·html의 201 예시가 실제 응답 계약 필드를 모두 담고 있어야 한다."""
+    md_fields = _json_field_names(upload_success_example_md(_MD.read_text(encoding="utf-8")))
+    html_fields = _json_field_names(upload_success_example_html(_HTML.read_text(encoding="utf-8")))
+
+    missing_md = _UPLOAD_SUCCESS_FIELDS - md_fields
+    missing_html = _UPLOAD_SUCCESS_FIELDS - html_fields
+    assert not missing_md, f"md 201 예시에서 누락된 필드: {sorted(missing_md)}"
+    assert not missing_html, f"html 201 예시에서 누락된 필드: {sorted(missing_html)}"
+
+
+def test_upload_success_example_md_and_html_agree():
+    """md와 html의 201 예시 필드 집합이 서로 일치해야 한다."""
+    md_fields = _json_field_names(upload_success_example_md(_MD.read_text(encoding="utf-8")))
+    html_fields = _json_field_names(upload_success_example_html(_HTML.read_text(encoding="utf-8")))
+    assert md_fields == html_fields, (
+        f"md↔html 201 예시 필드 불일치: "
+        f"md-html={sorted(md_fields - html_fields)} html-md={sorted(html_fields - md_fields)}"
+    )
+
+
+def test_upload_field_guard_detects_stale_example():
+    """가드 동작 증명: 구형 예시(doc_id·status만)는 반드시 검출된다.
+
+    aed4695 시점의 html이 이 형태였고, endpoint manifest 검사만으로는 통과했다.
+    """
+    stale = '{ "doc_id": 12, "status": "processing" }'
+    assert _UPLOAD_SUCCESS_FIELDS - _json_field_names(stale), (
+        "구형 예시를 검출하지 못하면 이 가드는 무의미하다"
+    )
+
+
+def test_upload_success_response_matches_openapi_contract():
+    """계약 상수가 실제 코드와 어긋나지 않는지 확인한다."""
+    import inspect
+
+    from backend.api import upload
+
+    source = inspect.getsource(upload.upload_document)
+    for field in _UPLOAD_SUCCESS_FIELDS:
+        assert f'"{field}"' in source, f"업로드 응답에 {field}가 없다(계약 상수가 낡음)"
+
+
+# ── 변환 경고 코드 명세 (PR-001-R402) ──────────────────────────────────────
+
+def test_warning_codes_documented_in_both_specs():
+    """R402: 경고 코드 전체가 md·html 양쪽 명세에 기술돼야 한다.
+
+    이전에는 `table_flattened` 하나만 예시로 있고 나머지는 정책서 링크로 넘겨서,
+    API 명세만 보는 소비자가 7종 중 1종만 알 수 있었다.
+    """
+    from backend.pipeline.converters.base import WarningCode
+
+    codes = [
+        v for k, v in vars(WarningCode).items()
+        if not k.startswith("_") and isinstance(v, str)
+    ]
+    assert len(codes) >= 7, "WarningCode 목록이 예상보다 적다"
+
+    md = _MD.read_text(encoding="utf-8")
+    html = _HTML.read_text(encoding="utf-8")
+    for code in codes:
+        assert code in md, f"Markdown 명세에 {code} 없음"
+        assert code in html, f"HTML 명세에 {code} 없음"
+
+
+def test_nullable_warning_location_documented():
+    """R402: location이 null일 수 있다는 계약이 명세에 드러나야 한다."""
+    md = _MD.read_text(encoding="utf-8")
+    html = _HTML.read_text(encoding="utf-8")
+    assert "null" in md and "location" in md
+    assert "null" in html and "location" in html
+    # 개수 요약 1건으로 바뀐 경고는 그 사실이 적혀 있어야 한다.
+    assert "개수 요약" in md
+    assert "개수 요약" in html

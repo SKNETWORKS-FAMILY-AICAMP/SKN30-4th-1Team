@@ -2,8 +2,9 @@
 # MySQL은 카테고리별 검색, ChromaDB는 의미 유사도 검색에 사용.
 import logging
 import re
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from .models import MemoryItem
+from .converters import ConvertedDocument, chunk_document
 from ..db.mysql import get_connection
 from ..db.chroma import get_collection
 from ..retriever.memory_vector import upsert_memory_vectors
@@ -15,6 +16,17 @@ _NO_ID = -1
 
 CHUNK_SIZE = 600  # ChromaDB 적재 시 원문 청크 크기 (문자 수)
 CHUNK_OVERLAP = 150
+
+# 출처 좌표를 알 수 없는 청크(구조 정보 없는 평문 경로)의 기본 metadata.
+# 키 집합은 두 경로가 같아야 한다 — ChromaDB where 필터가 키 유무로 갈리면
+# 같은 질의가 문서 출처에 따라 다른 결과를 낸다.
+_UNKNOWN_CHUNK_META = {
+    "block_start": _NO_ID,
+    "block_end": _NO_ID,
+    "page_start": _NO_ID,
+    "page_end": _NO_ID,
+    "heading": "",
+}
 
 
 def _rollback_after_ingest_failure(conn) -> None:
@@ -107,6 +119,27 @@ def _split_text(text: str) -> List[str]:
     return chunks
 
 
+def _build_chunks(
+    raw_text: str,
+    converted: Optional[ConvertedDocument],
+) -> List[Tuple[str, dict]]:
+    """(청크 텍스트, 출처 metadata) 목록을 만든다.
+
+    converted가 있으면 페이지·문단 번호가 살아 있는 구조 기반 청킹을 쓰고,
+    없으면(리포지토리 동기화 등 파일 변환을 거치지 않는 경로) 기존 평문
+    분할로 되돌아간다. 두 경로의 metadata 키 집합은 동일하게 유지한다.
+    """
+    if converted is not None and converted.blocks:
+        return [
+            (chunk.text, chunk.to_metadata())
+            for chunk in chunk_document(converted, CHUNK_SIZE, CHUNK_OVERLAP)
+        ]
+    return [
+        (text, {"chunk_index": index, **_UNKNOWN_CHUNK_META})
+        for index, text in enumerate(_split_text(raw_text))
+    ]
+
+
 def _completed_at_sql(item: MemoryItem, item_date: Optional[str], source_date: str) -> tuple[str, list]:
     """completed=true 항목의 완료 시각 SQL 조각을 만든다."""
     if item.category != "action" or not item.completed:
@@ -167,13 +200,18 @@ def ingest(
     doc_type: str,
     repo_id: Optional[int] = None,
     source_metadata: Optional[dict] = None,
+    converted: Optional[ConvertedDocument] = None,
     processing_token: Optional[str] = None,
 ):
     """추출 결과를 두 DB에 순서대로 저장.
     1단계: MySQL — items 각각을 memory + memory_sources 테이블에 INSERT (같은 트랜잭션)
     2단계: ChromaDB — 원문(raw_text)을 청크로 분할해 벡터 임베딩으로 저장
+
+    converted를 넘기면 청크마다 원본 페이지·문단 번호가 metadata로 함께 저장되어
+    답변의 출처를 문서 내부 위치까지 되짚을 수 있다. 넘기지 않으면 raw_text 기준
+    평문 분할로 동작한다(기존 동작).
     """
-    chunks = _split_text(raw_text)
+    chunks = _build_chunks(raw_text, converted)
 
     conn = get_connection()
     memory_rows = []
@@ -269,7 +307,7 @@ def ingest(
             collection = get_collection()
             collection.add(
                 ids=[f"{chunk_prefix}_chunk{i}" for i in range(len(chunks))],
-                documents=chunks,
+                documents=[text for text, _ in chunks],
                 metadatas=[{
                     "project_id": project_id,
                     "doc_id": doc_id if doc_id is not None else _NO_ID,
@@ -283,7 +321,10 @@ def ingest(
                     "source_path": sm.get("source_path", ""),
                     "source_ref": sm.get("source_ref", ""),
                     "source_url": sm.get("source_url", ""),
-                } for _ in chunks],
+                    # 문서 내부 출처 좌표 — 답변의 근거를 "몇 페이지 몇 번째 문단"까지 되짚는다.
+                    "source_format": converted.format if converted is not None else "",
+                    **chunk_meta,
+                } for _, chunk_meta in chunks],
             )
 
         if processing_token is not None:
