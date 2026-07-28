@@ -40,6 +40,10 @@ def ingest_transcript(
     """
     # 타임스탬프가 붙은 형태를 넘긴다. LLM이 "언제 나온 발언인지"를 읽을 수 있어야
     # 추출 결과에 시각 근거가 남는다.
+    # 구간 자체를 본다. text는 안내 머리말 같은 부가 문구를 포함할 수 있어
+    # 비어 있음 판정의 기준으로 삼으면 가드가 뚫린다.
+    if not transcript.segments:
+        raise ValueError("전사문이 비어 있어 적재할 내용이 없습니다.")
     text = transcript.text
     if not text.strip():
         raise ValueError("전사문이 비어 있어 적재할 내용이 없습니다.")

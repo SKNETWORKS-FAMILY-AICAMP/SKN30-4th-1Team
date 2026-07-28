@@ -21,10 +21,14 @@ from .base import (
     WarningCode,
 )
 from .pipeline import SOURCE_KIND, ingest_transcript, transcribe_and_ingest
+from .providers import available as available_providers, diarizing_providers
 from .transcriber import (
     MAX_AUDIO_BYTES,
+    current_provider_name,
     is_supported,
+    max_audio_bytes,
     supported_suffixes,
+    supports_diarization,
     transcribe,
 )
 
@@ -37,9 +41,14 @@ __all__ = [
     "TranscriptionError",
     "TranscriptionWarning",
     "WarningCode",
+    "available_providers",
+    "current_provider_name",
+    "diarizing_providers",
     "ingest_transcript",
     "is_supported",
+    "max_audio_bytes",
     "supported_suffixes",
+    "supports_diarization",
     "transcribe",
     "transcribe_and_ingest",
 ]

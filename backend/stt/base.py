@@ -93,8 +93,22 @@ class Transcript:
 
         각 줄 앞에 타임스탬프(와 있으면 화자)를 붙인다. LLM이 "언제 나온 발언인지"를
         읽을 수 있어야 추출된 항목에 시각 근거를 남길 수 있다.
+
+        화자 정보가 없으면 머리말로 그 사실을 명시한다. 추출 프롬프트가 action의
+        owner를 요구하는데 근거가 없으면, LLM이 `회의 참석자` 같은 사람이 아닌 값을
+        채워 넣는다(실측). 그 값이 owner 컬럼에 들어가면 담당자 기준 조회가 망가지므로,
+        모를 때는 비우도록 명시적으로 지시한다.
         """
+        if not self.segments:
+            # 구간이 없으면 안내문도 붙이지 않는다. 붙이면 빈 전사문이 "내용 있음"으로
+            # 보여, 호출자의 빈 입력 가드가 뚫린다.
+            return ""
         lines = []
+        if not self.has_speakers():
+            lines.append(
+                "[안내] 이 전사문에는 화자 구분 정보가 없습니다. "
+                "발언자를 추측하지 말고, 본문에 이름이 명시된 경우에만 owner를 채우세요."
+            )
         for segment in self.segments:
             prefix = f"[{segment.timestamp}]"
             if segment.speaker:

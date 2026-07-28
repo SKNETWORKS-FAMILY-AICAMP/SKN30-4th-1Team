@@ -29,7 +29,7 @@ def test_supported_audio_formats():
 
 def test_unsupported_format_rejected_before_api_call():
     """지원하지 않는 형식은 과금되는 외부 호출 전에 거절한다."""
-    with patch("backend.stt.transcriber._require_client") as client:
+    with patch("backend.stt.providers.openai_stt._require_client") as client:
         with pytest.raises(TranscriptionError) as exc:
             transcribe("회의.aac", b"data")
     assert exc.value.code == ErrorCode.UNSUPPORTED_FORMAT
@@ -37,7 +37,7 @@ def test_unsupported_format_rejected_before_api_call():
 
 
 def test_empty_audio_rejected():
-    with patch("backend.stt.transcriber._require_client") as client:
+    with patch("backend.stt.providers.openai_stt._require_client") as client:
         with pytest.raises(TranscriptionError) as exc:
             transcribe("회의.mp3", b"")
     assert exc.value.code == ErrorCode.EMPTY_AUDIO
@@ -46,7 +46,7 @@ def test_empty_audio_rejected():
 
 def test_oversized_audio_rejected_before_api_call():
     """상한 초과는 호출해봐야 거절되므로 미리 막는다."""
-    with patch("backend.stt.transcriber._require_client") as client:
+    with patch("backend.stt.providers.openai_stt._require_client") as client:
         with pytest.raises(TranscriptionError) as exc:
             transcribe("긴회의.mp3", b"x" * (MAX_AUDIO_BYTES + 1))
     assert exc.value.code == ErrorCode.FILE_TOO_LARGE
@@ -75,7 +75,7 @@ def _fake_response(segments, language="ko", duration=12.0):
 def _transcribe_with(response, filename="회의녹음.m4a", **kwargs):
     client = MagicMock()
     client.audio.transcriptions.create.return_value = response
-    with patch("backend.stt.transcriber._require_client", return_value=client):
+    with patch("backend.stt.providers.openai_stt._require_client", return_value=client):
         return transcribe(filename, b"audio-bytes", **kwargs), client
 
 
@@ -161,7 +161,7 @@ def test_provider_failure_is_normalized_and_does_not_leak_detail():
     client.audio.transcriptions.create.side_effect = RuntimeError(
         "api_key=sk-secret-value rejected"
     )
-    with patch("backend.stt.transcriber._require_client", return_value=client):
+    with patch("backend.stt.providers.openai_stt._require_client", return_value=client):
         with pytest.raises(TranscriptionError) as exc:
             transcribe("회의.mp3", b"audio-bytes")
 
@@ -322,3 +322,147 @@ def test_transcribe_and_ingest_wires_both_stages():
 
     assert summary["segments"] == 2
     assert summary["source"] == "회의녹음.m4a"
+
+
+# ─── 제공자 레지스트리 ─────────────────────────────────────────────────────
+
+def test_diarizing_providers_are_registered():
+    """화자 분리가 필요한 회의 녹음에는 clova/google을 쓸 수 있어야 한다."""
+    from backend.stt import available_providers, diarizing_providers
+
+    assert {"openai", "clova", "google"} <= set(available_providers())
+    assert {"clova", "google"} <= set(diarizing_providers())
+    # 기본 제공자(openai)는 화자 분리를 지원하지 않는다 — 사실대로 선언해야 한다.
+    assert "openai" not in diarizing_providers()
+
+
+def test_provider_selected_by_env(monkeypatch):
+    from backend.stt import current_provider_name, supports_diarization
+
+    monkeypatch.setenv("STT_PROVIDER", "clova")
+    assert current_provider_name() == "clova"
+    assert supports_diarization() is True
+
+
+def test_unknown_provider_raises_explicit_error(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "없는제공자")
+    with pytest.raises(TranscriptionError) as exc:
+        transcribe("회의.mp3", b"audio")
+    assert exc.value.code == ErrorCode.UNSUPPORTED_FORMAT
+    assert "clova" in exc.value.message  # 사용 가능 목록을 알려준다
+
+
+def test_size_limit_is_per_provider():
+    """clova는 긴 녹음을 받으므로 상한이 openai보다 커야 한다."""
+    from backend.stt import max_audio_bytes
+
+    assert max_audio_bytes("clova") > max_audio_bytes("openai")
+
+
+# ─── 실측으로 발견한 결함 (왕복 검증 회귀) ─────────────────────────────────
+
+def test_vocabulary_hint_is_sent_to_fix_term_transliteration():
+    """한국어 발화 속 영어 기술 용어가 음차되지 않도록 어휘 힌트를 넘긴다.
+
+    실측: 힌트 없이는 "ChromaDB"가 "크로마 디비"로 전사되어 키워드 검색이 어긋났다.
+    """
+    _, client = _transcribe_with(
+        _fake_response([{"text": "내용", "start": 0.0, "end": 1.0}])
+    )
+    prompt = client.audio.transcriptions.create.call_args.kwargs.get("prompt", "")
+    assert "ChromaDB" in prompt and "FastAPI" in prompt
+
+
+def test_vocabulary_is_overridable(monkeypatch):
+    monkeypatch.setenv("STT_VOCABULARY", "쿠버네티스, 그라파나")
+    _, client = _transcribe_with(
+        _fake_response([{"text": "내용", "start": 0.0, "end": 1.0}])
+    )
+    assert client.audio.transcriptions.create.call_args.kwargs["prompt"] == "쿠버네티스, 그라파나"
+
+
+def test_speakerless_transcript_tells_llm_not_to_guess_owner():
+    """화자 정보가 없으면 추측 금지를 명시한다.
+
+    실측: 명시하지 않으면 LLM이 owner를 '회의 참석자'로 채워, 담당자 기준 조회가
+    사람이 아닌 값으로 오염됐다.
+    """
+    transcript, _ = _transcribe_with(_fake_response([
+        {"text": "결정했습니다.", "start": 0.0, "end": 2.0},
+    ]))
+    assert "추측하지" in transcript.text
+    assert transcript.text.splitlines()[0].startswith("[안내]")
+
+
+def test_transcript_with_speakers_has_no_guard_header():
+    """화자가 있으면 안내문이 붙지 않는다 — 불필요한 지시로 추출을 방해하지 않는다."""
+    transcript, _ = _transcribe_with(_fake_response([
+        {"text": "제안합니다.", "start": 0.0, "end": 2.0, "speaker": "화자 1"},
+    ]))
+    assert "[안내]" not in transcript.text
+    assert transcript.text.startswith("[00:00] 화자 1:")
+
+
+# ─── 화자 분리 제공자 응답 파싱 ────────────────────────────────────────────
+
+def test_clova_payload_maps_speakers_and_milliseconds():
+    """CLOVA는 밀리초 단위이고 화자를 객체로 준다."""
+    from backend.stt.providers.clova_stt import _segments_from_payload
+
+    segments, _ = _segments_from_payload({"segments": [
+        {"text": "제안합니다.", "start": 0, "end": 2500, "speaker": {"label": "1", "name": "화자1"}},
+        {"text": "동의합니다.", "start": 2500, "end": 5000, "speaker": 2},
+    ]})
+
+    assert segments[0]["start"] == 0.0 and segments[0]["end"] == 2.5
+    assert segments[0]["speaker"] == "화자1"
+    assert segments[1]["speaker"] == "화자 2"
+
+
+def test_google_payload_groups_words_by_speaker():
+    """Google은 단어별 speakerTag를 주므로 같은 화자끼리 묶어야 한다."""
+    from backend.stt.providers.google_stt import _segments_from_payload
+
+    segments, _ = _segments_from_payload({"results": [{"alternatives": [{"words": [
+        {"word": "기술", "startTime": "0s", "endTime": "0.5s", "speakerTag": 1},
+        {"word": "스택은", "startTime": "0.5s", "endTime": "1.0s", "speakerTag": 1},
+        {"word": "동의합니다", "startTime": "1.0s", "endTime": "2.0s", "speakerTag": 2},
+    ]}]}]})
+
+    assert len(segments) == 2
+    assert segments[0]["text"] == "기술 스택은"
+    assert segments[0]["speaker"] == "화자 1"
+    assert segments[1]["speaker"] == "화자 2"
+    assert segments[1]["end"] == 2.0
+
+
+def test_clova_missing_credentials_has_distinct_code(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "clova")
+    monkeypatch.delenv("CLOVA_SPEECH_INVOKE_URL", raising=False)
+    monkeypatch.delenv("CLOVA_SPEECH_SECRET", raising=False)
+    with pytest.raises(TranscriptionError) as exc:
+        transcribe("회의.mp3", b"audio")
+    assert exc.value.code == ErrorCode.MISSING_CREDENTIALS
+
+
+def test_google_missing_credentials_has_distinct_code(monkeypatch):
+    monkeypatch.setenv("STT_PROVIDER", "google")
+    monkeypatch.delenv("GOOGLE_STT_API_KEY", raising=False)
+    with pytest.raises(TranscriptionError) as exc:
+        transcribe("회의.wav", b"audio")
+    assert exc.value.code == ErrorCode.MISSING_CREDENTIALS
+
+
+def test_low_confidence_segments_are_reported():
+    """잡음 구간의 그럴듯한 오인식을 사용자가 알 수 있어야 한다."""
+    class Seg:
+        def __init__(self, text, start, end, no_speech_prob):
+            self.text, self.start, self.end = text, start, end
+            self.no_speech_prob = no_speech_prob
+            self.avg_logprob = -0.2
+
+    transcript, _ = _transcribe_with(_fake_response([
+        Seg("정상 구간", 0.0, 2.0, 0.05),
+        Seg("잡음 오인식", 2.0, 4.0, 0.95),
+    ]))
+    assert WarningCode.LOW_CONFIDENCE in {w.code for w in transcript.warnings}
