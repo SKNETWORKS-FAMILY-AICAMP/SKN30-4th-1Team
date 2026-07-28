@@ -99,14 +99,6 @@ def _convert_upload(filename: str, data: bytes) -> ConvertedDocument:
 
 # ── 내부 헬퍼 ─────────────────────────────────────────────────────
 
-def _delete_chroma_vectors(doc_id: int):
-    try:
-        from ..db.chroma import get_collection
-        get_collection().delete(where={"doc_id": doc_id})
-    except Exception:
-        logger.warning("ChromaDB vector cleanup failed for doc_id=%s", doc_id)
-
-
 def _delete_document(doc_id: int, refresh_project_memory: bool = True):
     """Transfer document accounting to durable cleanup, then retry cleanup."""
     project_id = quota_delete_document(doc_id)
