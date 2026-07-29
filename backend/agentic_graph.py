@@ -16,7 +16,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
-from .llm.chat_model_factory import get_chat_model
+from .llm.chat_model_factory import get_agentic_qa_model
 from .retriever import qa_engine
 from .retriever.qa_tools import QA_TOOLS
 
@@ -126,7 +126,7 @@ def _tool_limit_messages(state: AgenticQAState) -> dict:
 
 def build_agentic_qa_graph(model=None, max_tool_rounds: Optional[int] = None):
     """Build a bounded ToolNode loop around one orchestrator chat model."""
-    llm = model or get_chat_model()
+    llm = model or get_agentic_qa_model()
     auto_model = llm.bind_tools(QA_TOOLS)
     # Every project Q&A must inspect at least one source. Later turns use automatic
     # tool choice so the same model can either search again or write the answer.
