@@ -147,17 +147,14 @@ import {
 } from "./settings";
 import { WorkspacePageLayout } from "./WorkspacePageLayout";
 import { ProjectPortfolioPage } from "./ProjectPortfolioPage";
-import {
-  ProjectDetailPage,
-  type ProjectDetailTab,
-} from "./ProjectDetailPage";
-import {
-  ProjectManagementPage,
-  type ManagementSection,
-} from "./ProjectManagementPage";
 import { ProfileAvatar } from "./ProfileAvatar";
 import { normalizeApiProjectSetup } from "./projectSetup";
 import { isProjectSetupComplete } from "./types";
+import { useProjectWorkspaceDomain } from "./useProjectWorkspaceDomain";
+import {
+  type MainView,
+  useWorkspaceRoute,
+} from "./workspaceRoute";
 import type {
   Attachment,
   ChatSession,
@@ -180,6 +177,16 @@ import type {
 
 const LazyGithubPanel = lazy(() =>
   import("./GithubPanel").then((module) => ({ default: module.GithubPanel })),
+);
+const LazyProjectDetailPage = lazy(() =>
+  import("./ProjectDetailPage").then((module) => ({
+    default: module.ProjectDetailPage,
+  })),
+);
+const LazyProjectManagementPage = lazy(() =>
+  import("./ProjectManagementPage").then((module) => ({
+    default: module.ProjectManagementPage,
+  })),
 );
 const LazyAuthScreen = lazy(() =>
   import("./AuthScreen").then((module) => ({ default: module.AuthScreen })),
@@ -499,15 +506,6 @@ type ProjectDeltaBannerState = {
 };
 
 type ServerStatus = "online" | "offline";
-type MainView =
-  | "chat"
-  | "members"
-  | "profile"
-  | "project-detail"
-  | "project-management"
-  | "project-setup"
-  | "projects"
-  | "settings";
 type SubmitQuestionOptions = {
   intent?: "delta_briefing";
   forceNewSession?: boolean;
@@ -1924,13 +1922,27 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   const [initialProjectState] = useState(() =>
     loadProjectState(projectStorageKey, allowLegacyProjectCacheFallback),
   );
-  const [projects, setProjects] = useState<ProjectWorkspace[]>(initialProjectState.projects);
-  const [selectedProjectId, setSelectedProjectId] = useState(
-    initialProjectState.selectedProjectId,
-  );
-  const [selectedSessionId, setSelectedSessionId] = useState(
-    initialProjectState.selectedSessionId,
-  );
+  const {
+    canDeleteSelectedProject,
+    canMutateSelectedProject,
+    isSelectedProjectOwner,
+    projects,
+    projectsRef,
+    selectedProject,
+    selectedProjectId,
+    selectedProjectIdRef,
+    selectedProjectRole,
+    selectedSession,
+    selectedSessionId,
+    selectedSessionIdRef,
+    sessions,
+    setProjects,
+    setSelectedProjectId,
+    setSelectedSessionId,
+  } = useProjectWorkspaceDomain({
+    hasAuthenticatedUser: Boolean(authUser),
+    initialState: initialProjectState,
+  });
   const [zoomScale, setZoomScaleState] = useState(loadZoomScale);
   const [prompt, setPrompt] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -1993,11 +2005,18 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   );
   // 앱 진입점은 프로젝트 포트폴리오다. 프로젝트 선택은 상세 화면으로,
   // 새 프로젝트 생성은 설정 흐름으로 이동하고 채팅은 첫 전송 때만 만들어진다.
-  const [mainView, setMainView] = useState<MainView>("projects");
-  const [projectDetailTab, setProjectDetailTab] =
-    useState<ProjectDetailTab>("overview");
-  const [projectManagementSection, setProjectManagementSection] =
-    useState<ManagementSection>("general");
+  const {
+    mainView,
+    membersReturnView,
+    navigateTo,
+    openMembers,
+    openProjectDetail,
+    openProjectManagement,
+    projectDetailTab,
+    projectManagementSection,
+    setProjectDetailTab,
+    setProjectManagementSection,
+  } = useWorkspaceRoute();
   const [settings, setSettingsState] = useState(loadPaimSettings);
   const [serverUrlDraft, setServerUrlDraft] = useState(settings.serverUrl);
   const t = (key: string, vars?: Record<string, number | string>) =>
@@ -2072,9 +2091,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   const mainViewHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const mainViewReturnFocusRef = useRef<HTMLElement | null>(null);
   const mainViewReturnFocusSelectorRef = useRef<string | null>(null);
-  const membersReturnViewRef = useRef<
-    Extract<MainView, "project-detail" | "project-management">
-  >("project-detail");
   const promptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const activeQueryControllerRef = useRef<AbortController | null>(null);
   const userCancelledQueryControllersRef = useRef(new WeakSet<AbortController>());
@@ -2105,9 +2121,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   const githubOperationRegistryRef = useRef(createLatestProjectOperationRegistry());
   const projectFileImportRegistryRef = useRef(createLatestProjectOperationRegistry());
   const ignoredProjectDeltaRef = useRef<Record<string, string>>({});
-  const projectsRef = useRef(initialProjectState.projects);
-  const selectedProjectIdRef = useRef(initialProjectState.selectedProjectId);
-  const selectedSessionIdRef = useRef(initialProjectState.selectedSessionId);
+  const githubLoginSessionsRef = useRef(githubLoginSessions);
   const sessionDraftsRef = useRef(
     new Map<string, { attachments: Attachment[]; prompt: string }>(),
   );
@@ -2129,41 +2143,31 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       )} · 전체 최대 ${formatBytesAsMiB(capabilities.query_attachments.max_total_bytes)}`
     : "";
 
+  useLayoutEffect(() => {
+    const root = document.documentElement;
+    if (settings.theme === "system") {
+      delete root.dataset.theme;
+      root.style.colorScheme = "light dark";
+    } else {
+      root.dataset.theme = settings.theme;
+      root.style.colorScheme = settings.theme;
+    }
+  }, [settings.theme]);
+
   function retryCapabilities() {
     setCapabilitiesRevision((revision) => revision + 1);
   }
 
-  const selectedProject = useMemo(
-    () => projects.find((project) => project.id === selectedProjectId) ?? null,
-    [projects, selectedProjectId],
-  );
   const isPrimaryProjectContext =
     mainView === "chat" ||
     mainView === "project-detail" ||
     mainView === "project-management" ||
     mainView === "project-setup";
-  const selectedProjectRole = selectedProject?.currentUserRole;
-  const isSelectedProjectOwner = selectedProject
-    ? !authUser || typeof selectedProject.apiProjectId !== "number"
-      ? true
-      : selectedProjectRole === "owner"
-    : false;
-  const canMutateSelectedProject = selectedProject
-    ? !authUser || typeof selectedProject.apiProjectId !== "number"
-      ? true
-      : canRole(selectedProjectRole, "member")
-    : false;
-  const canDeleteSelectedProject = isSelectedProjectOwner;
   const canMutateSelectedProjectRef = useRef(canMutateSelectedProject);
   canMutateSelectedProjectRef.current = canMutateSelectedProject;
   const selectedProjectReadOnlyReason = !canMutateSelectedProject
     ? t("조회 권한으로 열려 있어 메시지와 파일을 보낼 수 없습니다.")
     : undefined;
-  const sessions = selectedProject?.sessions ?? [];
-  const selectedSession = useMemo(
-    () => sessions.find((session) => session.id === selectedSessionId) ?? null,
-    [selectedSessionId, sessions],
-  );
   const showProjectPanel =
     Boolean(selectedProject) &&
     ((mainView === "chat" && Boolean(selectedSession)) ||
@@ -2488,7 +2492,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
           : accountMenuTriggerRef.current ?? promptTextareaRef.current;
       setIsAccountMenuOpen(false);
       setOpenActionMenu(null);
-      setMainView("settings");
+      navigateTo("settings");
     })
       .then((stopListening) => {
         if (isDisposed) {
@@ -3226,10 +3230,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     return () => controller.abort();
   }, []);
 
-  useEffect(() => {
-    projectsRef.current = projects;
-  }, [projects]);
-
   useLayoutEffect(() => {
     githubLoginSessionsRef.current = githubLoginSessions;
   }, [githubLoginSessions]);
@@ -3248,16 +3248,8 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     }
 
     closeProjectPanel();
-    setMainView("project-detail");
+    openProjectDetail();
   }, [isSelectedProjectOwner, mainView, selectedProject]);
-
-  useEffect(() => {
-    selectedProjectIdRef.current = selectedProjectId;
-  }, [selectedProjectId]);
-
-  useEffect(() => {
-    selectedSessionIdRef.current = selectedSessionId;
-  }, [selectedSessionId]);
 
   useEffect(() => {
     const apiProjectId = selectedProject?.apiProjectId;
@@ -3266,7 +3258,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       !didSyncProjectsRef.current ||
       !authUser ||
       !selectedProject ||
-      selectedProject.currentUserRole !== undefined ||
       typeof apiProjectId !== "number" ||
       serverStatus !== "online"
     ) {
@@ -4472,8 +4463,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         ) {
           setSelectedSessionId(null);
           if (mainViewRef.current === "chat") {
-            setProjectDetailTab("overview");
-            setMainView("project-detail");
+            openProjectDetail("overview");
           }
         }
       });
@@ -5371,7 +5361,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     selectedSessionIdRef.current = null;
     setSelectedProjectId(null);
     setSelectedSessionId(null);
-    setMainView("projects");
+    navigateTo("projects");
     setOpenActionMenu(null);
     closeProjectPanel();
     resetVisibleDraft();
@@ -5390,8 +5380,11 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     rememberCurrentDraft();
     setSelectedProjectId(nextProject.id);
     setSelectedSessionId(null);
-    setMainView(nextView);
-    setProjectDetailTab("overview");
+    if (nextView === "project-detail") {
+      openProjectDetail("overview");
+    } else {
+      navigateTo(nextView);
+    }
     setOpenActionMenu(null);
     if (nextView === "project-detail") {
       showSessionDraft(nextProject.id, null);
@@ -5417,11 +5410,10 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         ? document.activeElement
         : null);
     mainViewReturnFocusSelectorRef.current = ".project-detail-open-management";
-    setProjectManagementSection("general");
     rememberCurrentDraft();
     setSelectedProjectId(projectId);
     setSelectedSessionId(null);
-    setMainView("project-management");
+    openProjectManagement("general");
     setOpenActionMenu(null);
     closeProjectPanel();
     showSessionDraft(projectId, null);
@@ -5429,7 +5421,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
   function returnToProjectDetailFromManagement() {
     setSelectedSessionId(null);
-    setMainView("project-detail");
+    openProjectDetail();
     mainViewReturnFocusRef.current = null;
   }
 
@@ -5441,7 +5433,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     setProjects((currentProjects) => [nextProject, ...currentProjects]);
     setIsSidebarCollapsed(false);
     setIsSidebarResizing(false);
-    setMainView("project-setup");
+    navigateTo("project-setup");
     setSelectedProjectId(nextProject.id);
     setSelectedSessionId(null);
     setProjectPanelTabs([]);
@@ -5684,8 +5676,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       setupCompletedAt: completedAt,
       setupMode: completedMode,
     }));
-    setProjectDetailTab("overview");
-    setMainView("project-detail");
+    openProjectDetail("overview");
     setSelectedProjectId(projectId);
     setSelectedSessionId(null);
     closeProjectPanel();
@@ -7154,7 +7145,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
   function openAccountView(view: Extract<MainView, "profile" | "settings">) {
     mainViewReturnFocusRef.current = accountMenuTriggerRef.current;
-    setMainView(view);
+    navigateTo(view);
     setIsAccountMenuOpen(false);
     setOpenActionMenu(null);
   }
@@ -7218,7 +7209,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       return;
     }
 
-    membersReturnViewRef.current =
+    const nextMembersReturnView =
       mainViewRef.current === "project-management"
         ? "project-management"
         : "project-detail";
@@ -7233,7 +7224,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     rememberCurrentDraft();
     setSelectedProjectId(projectId);
     setSelectedSessionId(null);
-    setMainView("members");
+    openMembers(nextMembersReturnView);
     setOpenActionMenu(null);
     showSessionDraft(projectId, null);
   }
@@ -7362,9 +7353,9 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   function returnToPrimaryView() {
     const returnView = mainView;
     setSelectedSessionId(null);
-    setMainView(
+    navigateTo(
       returnView === "members" && selectedProject
-        ? membersReturnViewRef.current
+        ? membersReturnView
         : "projects",
     );
     window.requestAnimationFrame(() => {
@@ -7445,8 +7436,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
     if (wasSelected) {
       setSelectedSessionId(null);
-      setProjectDetailTab("overview");
-      setMainView("project-detail");
+      openProjectDetail("overview");
       if (pendingProjectId === projectId && pendingSessionId === sessionId) {
         cancelActiveQueryForProject(projectId);
       }
@@ -7528,8 +7518,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       }));
       setSelectedProjectId(project.id);
       setSelectedSessionId(null);
-      setProjectDetailTab("overview");
-      setMainView("project-detail");
+      openProjectDetail("overview");
       resetVisibleDraft();
     } catch (error) {
       if (!isUserCancelledQuery(error, controller)) {
@@ -7541,7 +7530,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         });
       }
       setSelectedSessionId(null);
-      setMainView("project-setup");
+      navigateTo("project-setup");
       resetVisibleDraft();
     } finally {
       if (finishActiveQuery(controller, timeoutId)) {
@@ -7669,7 +7658,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
     if (wasSelected) {
       setSelectedSessionId(null);
-      setMainView("projects");
+      navigateTo("projects");
       showSessionDraft(nextState.selectedProjectId ?? "", null);
     }
   }
@@ -7756,7 +7745,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
   function handleSelectSession(projectId: string, sessionId: string) {
     rememberCurrentDraft();
-    setMainView("chat");
+    navigateTo("chat");
     setSelectedProjectId(projectId);
     setSelectedSessionId(sessionId);
     showSessionDraft(projectId, sessionId);
@@ -7989,7 +7978,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
           ...project,
           sessions: [nextSession, ...project.sessions],
         }));
-        setMainView("chat");
+        navigateTo("chat");
         setSelectedProjectId(selectedProject.id);
         setSelectedSessionId(nextSession.id);
       });
@@ -8224,7 +8213,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     const nextState = createProjectState(remainingProjects, null, null);
     applyProjectState(nextState);
     forgetProjectDrafts(selectedProject.id);
-    setMainView("projects");
+    navigateTo("projects");
     setOpenActionMenu(null);
     showSessionDraft(nextState.selectedProjectId ?? "", null);
     mainViewReturnFocusRef.current = null;
@@ -9225,106 +9214,110 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         ) : mainView === "project-management" &&
           selectedProject &&
           isSelectedProjectOwner ? (
-          <ProjectManagementPage
-            activeSection={projectManagementSection}
-            isProjectDeleteConfirming={
-              pendingDeleteProjectId === selectedProject.id
-            }
-            language={settings.language}
-            onBack={returnToProjectDetailFromManagement}
-            onDeleteProject={
-              canDeleteSelectedProject
-                ? (event) =>
-                    handleDeleteProject(selectedProject.id, event)
-                : undefined
-            }
-            onManageMembers={(trigger) =>
-              void openProjectMembers(selectedProject.id, trigger)
-            }
-            onOpenProjectGithub={() => {
-              if (
-                !shouldSkipProjectPermission(
-                  selectedProject,
-                  "overview",
-                  "owner",
+          <Suspense fallback={<PanelLoadingState label={t("프로젝트 관리 불러오는 중")} />}>
+            <LazyProjectManagementPage
+              activeSection={projectManagementSection}
+              isProjectDeleteConfirming={
+                pendingDeleteProjectId === selectedProject.id
+              }
+              language={settings.language}
+              onBack={returnToProjectDetailFromManagement}
+              onDeleteProject={
+                canDeleteSelectedProject
+                  ? (event) =>
+                      handleDeleteProject(selectedProject.id, event)
+                  : undefined
+              }
+              onManageMembers={(trigger) =>
+                void openProjectMembers(selectedProject.id, trigger)
+              }
+              onOpenProjectGithub={() => {
+                if (
+                  !shouldSkipProjectPermission(
+                    selectedProject,
+                    "overview",
+                    "owner",
+                  )
+                ) {
+                  openProjectPanelTool("github");
+                  openProjectPanel();
+                }
+              }}
+              onRenameProject={(name) =>
+                renameProjectFromDetail(selectedProject.id, name)
+              }
+              onSectionChange={setProjectManagementSection}
+              onUpdateProjectDescription={(description) =>
+                updateProjectDescriptionFromDetail(
+                  selectedProject.id,
+                  description,
                 )
-              ) {
+              }
+              project={selectedProject}
+            />
+          </Suspense>
+        ) : mainView === "project-detail" && selectedProject ? (
+          <Suspense fallback={<PanelLoadingState label={t("프로젝트 상세 불러오는 중")} />}>
+            <LazyProjectDetailPage
+              activeTab={projectDetailTab}
+              composerAttachments={attachments}
+              composerDisabledMessage={selectedProjectReadOnlyReason}
+              composerPrompt={prompt}
+              currentUserId={authUser?.id ?? null}
+              isComposerSending={isSending}
+              key={selectedProject.id}
+              language={settings.language}
+              onAddProjectFiles={
+                canMutateSelectedProject
+                  ? () => void handleOpenProjectFiles(selectedProject.id)
+                  : undefined
+              }
+              onAddProjectFolder={
+                canMutateSelectedProject
+                  ? () => void handleOpenProjectDirectory(selectedProject.id)
+                  : undefined
+              }
+              onBack={handleOpenProjectPortfolio}
+              onComposerPickFiles={
+                canMutateSelectedProject && capabilities
+                  ? () => void handlePickFiles()
+                  : undefined
+              }
+              onComposerPromptChange={handlePromptChange}
+              onComposerRemoveAttachment={removeAttachment}
+              onComposerSubmit={() => handleSubmit()}
+              onDeleteProjectFile={
+                canMutateSelectedProject
+                  ? (file) => handleDeleteProjectFile(selectedProject.id, file)
+                  : undefined
+              }
+              onOpenGithub={() => {
                 openProjectPanelTool("github");
                 openProjectPanel();
+              }}
+              onManageMembers={(trigger) =>
+                void openProjectMembers(selectedProject.id, trigger)
               }
-            }}
-            onRenameProject={(name) =>
-              renameProjectFromDetail(selectedProject.id, name)
-            }
-            onSectionChange={setProjectManagementSection}
-            onUpdateProjectDescription={(description) =>
-              updateProjectDescriptionFromDetail(
-                selectedProject.id,
-                description,
-              )
-            }
-            project={selectedProject}
-          />
-        ) : mainView === "project-detail" && selectedProject ? (
-          <ProjectDetailPage
-            activeTab={projectDetailTab}
-            composerAttachments={attachments}
-            composerDisabledMessage={selectedProjectReadOnlyReason}
-            composerPrompt={prompt}
-            currentUserId={authUser?.id ?? null}
-            isComposerSending={isSending}
-            key={selectedProject.id}
-            language={settings.language}
-            onAddProjectFiles={
-              canMutateSelectedProject
-                ? () => void handleOpenProjectFiles(selectedProject.id)
-                : undefined
-            }
-            onAddProjectFolder={
-              canMutateSelectedProject
-                ? () => void handleOpenProjectDirectory(selectedProject.id)
-                : undefined
-            }
-            onBack={handleOpenProjectPortfolio}
-            onComposerPickFiles={
-              canMutateSelectedProject && capabilities
-                ? () => void handlePickFiles()
-                : undefined
-            }
-            onComposerPromptChange={handlePromptChange}
-            onComposerRemoveAttachment={removeAttachment}
-            onComposerSubmit={() => handleSubmit()}
-            onDeleteProjectFile={
-              canMutateSelectedProject
-                ? (file) => handleDeleteProjectFile(selectedProject.id, file)
-                : undefined
-            }
-            onOpenGithub={() => {
-              openProjectPanelTool("github");
-              openProjectPanel();
-            }}
-            onManageMembers={(trigger) =>
-              void openProjectMembers(selectedProject.id, trigger)
-            }
-            onOpenManagement={
-              isSelectedProjectOwner
-                ? (trigger) =>
-                    handleOpenProjectManagement(selectedProject.id, trigger)
-                : undefined
-            }
-            onOpenProjectFile={openProjectFileFromDetail}
-            onOpenProjectFilesManager={() => {
-              openProjectPanelTool("files");
-              openProjectPanel();
-            }}
-            onTabChange={setProjectDetailTab}
-            memoryItems={selectedProjectMemoryItems}
-            project={selectedProject}
-            projectRole={
-              isSelectedProjectOwner ? "owner" : selectedProjectRole
-            }
-            refreshRevision={postSyncRefreshRevision}
-          />
+              onOpenManagement={
+                isSelectedProjectOwner
+                  ? (trigger) =>
+                      handleOpenProjectManagement(selectedProject.id, trigger)
+                  : undefined
+              }
+              onOpenProjectFile={openProjectFileFromDetail}
+              onOpenProjectFilesManager={() => {
+                openProjectPanelTool("files");
+                openProjectPanel();
+              }}
+              onTabChange={setProjectDetailTab}
+              memoryItems={selectedProjectMemoryItems}
+              project={selectedProject}
+              projectRole={
+                isSelectedProjectOwner ? "owner" : selectedProjectRole
+              }
+              refreshRevision={postSyncRefreshRevision}
+            />
+          </Suspense>
         ) : mainView === "chat" && selectedSession ? (
           <>
             {selectedSession.messages.length === 0 ? (

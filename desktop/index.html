@@ -3,6 +3,25 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <script>
+      (() => {
+        let theme = "system";
+        try {
+          const settings = JSON.parse(localStorage.getItem("paim.settings.v1") || "{}");
+          if (settings.theme === "dark" || settings.theme === "light") {
+            theme = settings.theme;
+          }
+        } catch {}
+
+        if (theme === "system") {
+          document.documentElement.style.colorScheme = "light dark";
+        } else {
+          document.documentElement.dataset.theme = theme;
+          document.documentElement.style.colorScheme = theme;
+        }
+      })();
+    </script>
     <title>PaiM</title>
   </head>
   <body>
