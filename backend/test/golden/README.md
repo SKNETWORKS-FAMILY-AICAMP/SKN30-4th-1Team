@@ -17,6 +17,8 @@ supersede 계층 1~3이 검색 품질을 개선했는지 골든셋(60문항, 2�
   **파일이 아니라 환경변수로 주면**(`export OPENAI_API_KEY=...`) scope 검사(시크릿
   파일 차단)와도 충돌하지 않는다. 리포 루트 `.env`도 로드되지만 `.env` 파일이
   working tree에 있으면 `check-scope.sh`가 (의도적으로) 실패한다.
+  (`check-scope.sh`·`verify-backend.sh`는 저장소에 없는 **개인 워크플로 도구**다.
+   `.gitignore`의 `/scripts` 대상이며 외부에서 제공된다.)
 - **LANGSMITH_API_KEY** — 선택. 있으면 experiment `golden-<corpus>-<config>-<runid>`
   로 기록. 없거나 `--no-langsmith`면 로컬 CSV만으로 완주.
 - 실행은 리포 루트에서: `.venv/bin/python backend/test/golden/run_eval.py <명령>`

@@ -81,11 +81,13 @@ repo sync → 머지 PR × 열린 액션 대조(Reconciler) → 완료 제안 �
 │   ├── chat/                        # AES-256-GCM 암호화 세션
 │   ├── llm/                         # LLM 클라이언트 (fast/quality 티어링 팩토리)
 │   ├── github/                      # GitHub App 연동 (설치 세션 · repo preview)
-│   └── db/                          # MySQL(schema + migrate_v1~5) · ChromaDB
+│   └── db/                          # MySQL(schema.sql + migrate_v2~v9) · ChromaDB
 ├── desktop/
 │   ├── src/                         # React 19 UI (채팅 · 메모리 패널 · 제안 인박스 · 설정)
 │   ├── src-tauri/                   # Tauri 2 런타임
 │   └── .env.production              # 공개 빌드 설정 (OAuth client ID)
+├── tests/
+│   └── integration/mysql/run.sh     # 전체 백엔드 게이트 (비통합 pytest + 실제 MySQL)
 ├── docs/                            # API 명세 · 검색 품질 평가셋
 ├── docker-compose.yml               # MySQL (스키마 자동 적용)
 ├── start-paim.bat                   # Windows 원클릭 실행 (Docker·백엔드·앱 자동 기동)
@@ -132,6 +134,29 @@ npm ci --prefix desktop
 npm run demo --prefix desktop        # 개발 실행
 npm run app:build --prefix desktop   # 설치본 빌드 (CI가 태그 push 시 자동 수행)
 ```
+
+## Tests
+
+전체 백엔드 게이트는 하나의 러너로 돌린다. **MySQL 전용이 아니다** — 비통합
+pytest 를 먼저 실행한 뒤 컨테이너를 띄운다.
+
+```bash
+./tests/integration/mysql/run.sh          # 전체 (Docker 필요)
+./tests/integration/mysql/run.sh --check  # 경로 계약만, Docker 미기동
+```
+
+`--check`(preflight)는 러너와 `compose.yml` 이 참조하는 경로가 실재하고 추적되는지
+확인한다. 경로 목록은 러너에 하드코딩하지 않고 `compose.yml` 에서 읽으므로,
+`backend/db/` 의 파일을 옮기면 여기서 즉시 드러난다.
+
+비통합 테스트만 돌리려면:
+
+```bash
+uv run pytest -q --ignore=tests/integration/mysql
+```
+
+> `scripts/run-backend-tests.sh` 는 저장소에 없는 **개인 도구용 호환 래퍼**다.
+> 위 러너가 유일한 기준이며, 검증 근거로 쓰는 로그는 러너를 직접 호출해 만든다.
 
 ## How It Works
 
