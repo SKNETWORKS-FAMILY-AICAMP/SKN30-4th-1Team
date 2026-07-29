@@ -193,8 +193,13 @@ def transcribe(
         response.raise_for_status()
         payload = response.json()
     except Exception as exc:
-        # 응답 본문에 요청 세부가 섞일 수 있어 로그에만 남긴다.
-        logger.warning("CLOVA 전사 실패 source=%s", filename, exc_info=True)
+        # invoke URL itself may contain a domain key. Exception repr/traceback can therefore
+        # disclose credentials, so log only the exception type and the normalized source.
+        logger.warning(
+            "CLOVA 전사 실패 source=%s error_type=%s",
+            Path(filename).name,
+            type(exc).__name__,
+        )
         raise TranscriptionError(
             ErrorCode.PROVIDER_ERROR,
             "음성 전사에 실패했습니다. 파일이 손상되었거나 서비스가 일시적으로 "

@@ -144,9 +144,14 @@ def transcribe(
     try:
         response = client.audio.transcriptions.create(**request)
     except Exception as exc:
-        # 제공자 오류 원문에는 요청 세부(키 포함)가 섞일 수 있으므로 로그에만 남기고,
-        # 사용자에게는 조치 가능한 문장만 전달한다.
-        logger.warning("STT 전사 실패 source=%s model=%s", filename, model, exc_info=True)
+        # Provider exceptions can contain request metadata. Keep credentials and raw remote
+        # payloads out of logs as well as the public error response.
+        logger.warning(
+            "STT 전사 실패 source=%s model=%s error_type=%s",
+            Path(filename).name,
+            model,
+            type(exc).__name__,
+        )
         raise TranscriptionError(
             ErrorCode.PROVIDER_ERROR,
             "음성 전사에 실패했습니다. 파일이 손상되었거나 서비스가 일시적으로 "

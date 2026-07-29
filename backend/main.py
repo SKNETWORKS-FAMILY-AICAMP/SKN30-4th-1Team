@@ -24,6 +24,7 @@ from .api.suggestion import router as suggestion_router
 from .api.delta import router as delta_router
 from .api.capabilities import router as capabilities_router
 from .chat.router import router as chat_router
+from .stt.router import router as stt_router
 from .github.router import router as github_router, SessionExpiredException
 from .rate_limit import limiter, rate_limit_exceeded_handler
 from .config import cors_origins, validate_phase_b_config
@@ -209,6 +210,7 @@ app.include_router(suggestion_router, prefix="/api/v1")
 app.include_router(delta_router,      prefix="/api/v1")
 app.include_router(capabilities_router, prefix="/api/v1")
 app.include_router(chat_router,    prefix="/api/v1")
+app.include_router(stt_router,     prefix="/api/v1")
 # github_router는 자체 prefix(/github/app)를 사용하므로 /api/v1 붙이지 않음
 app.include_router(github_router)
 app.include_router(health_router)

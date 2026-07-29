@@ -157,7 +157,7 @@ def test_silent_audio_raises_no_speech():
     assert exc.value.code == ErrorCode.NO_SPEECH
 
 
-def test_provider_failure_is_normalized_and_does_not_leak_detail():
+def test_provider_failure_is_normalized_and_does_not_leak_detail(caplog):
     """제공자 오류 원문에는 요청 세부가 섞일 수 있어 그대로 노출하지 않는다."""
     client = MagicMock()
     client.audio.transcriptions.create.side_effect = RuntimeError(
@@ -169,6 +169,7 @@ def test_provider_failure_is_normalized_and_does_not_leak_detail():
 
     assert exc.value.code == ErrorCode.PROVIDER_ERROR
     assert "sk-secret-value" not in exc.value.message
+    assert "sk-secret-value" not in caplog.text
 
 
 def test_language_is_passed_through_when_specified():
@@ -268,7 +269,8 @@ def test_ingest_transcript_feeds_extractor_and_ingestor():
     from backend.stt import ingest_transcript
 
     with patch("backend.stt.pipeline.extract", return_value=[]) as mock_extract, \
-         patch("backend.stt.pipeline.ingest") as mock_ingest:
+         patch("backend.stt.pipeline.ingest") as mock_ingest, \
+         patch("backend.stt.pipeline.update_project_memory") as mock_memory:
         summary = ingest_transcript(1, _sample_transcript(), date="2026-07-28")
 
     # 추출에는 타임스탬프가 붙은 텍스트가 들어간다.
@@ -282,6 +284,7 @@ def test_ingest_transcript_feeds_extractor_and_ingestor():
     assert kwargs["doc_type"] == "meeting"
     assert kwargs["source_metadata"]["source_kind"] == "transcript"
     assert kwargs["source_metadata"]["source_ref"] == "openai:whisper-1"
+    mock_memory.assert_called_once_with(1, [])
 
     assert summary["segments"] == 2
     assert summary["language"] == "ko"
@@ -309,9 +312,11 @@ def test_ingest_failure_propagates_not_swallowed():
     from backend.stt import ingest_transcript
 
     with patch("backend.stt.pipeline.extract", return_value=[]), \
-         patch("backend.stt.pipeline.ingest", side_effect=RuntimeError("DB down")):
+         patch("backend.stt.pipeline.ingest", side_effect=RuntimeError("DB down")), \
+         patch("backend.stt.pipeline.update_project_memory") as mock_memory:
         with pytest.raises(RuntimeError):
             ingest_transcript(1, _sample_transcript())
+    mock_memory.assert_not_called()
 
 
 def test_transcribe_and_ingest_wires_both_stages():
@@ -319,7 +324,8 @@ def test_transcribe_and_ingest_wires_both_stages():
 
     with patch("backend.stt.transcriber.transcribe", return_value=_sample_transcript()), \
          patch("backend.stt.pipeline.extract", return_value=[]), \
-         patch("backend.stt.pipeline.ingest"):
+         patch("backend.stt.pipeline.ingest"), \
+         patch("backend.stt.pipeline.update_project_memory"):
         summary = transcribe_and_ingest(1, "회의녹음.m4a", b"audio", date="2026-07-28")
 
     assert summary["segments"] == 2
@@ -433,6 +439,24 @@ def test_clova_missing_credentials_has_distinct_code(monkeypatch):
     assert exc.value.code == ErrorCode.MISSING_CREDENTIALS
 
 
+def test_clova_failure_does_not_log_secret_url(monkeypatch, caplog):
+    """CLOVA invoke URL contains a domain key, so exception tracebacks must stay out of logs."""
+    import httpx
+
+    monkeypatch.setenv("CLOVA_SPEECH_INVOKE_URL", "https://example.test/domain/secret-url-key")
+    monkeypatch.setenv("CLOVA_SPEECH_SECRET", "secret-header-key")
+    with patch.object(
+        httpx,
+        "post",
+        side_effect=RuntimeError("request to secret-url-key used secret-header-key"),
+    ):
+        with pytest.raises(TranscriptionError):
+            transcribe("meeting.mp3", b"audio", provider="clova")
+
+    assert "secret-url-key" not in caplog.text
+    assert "secret-header-key" not in caplog.text
+
+
 def test_low_confidence_segments_are_reported():
     """잡음 구간의 그럴듯한 오인식을 사용자가 알 수 있어야 한다."""
     class Seg:
@@ -458,7 +482,7 @@ def test_guard_instruction_never_reaches_vector_store():
         provider="openai", model="whisper-1",
     )
     captured = {}
-    with patch("backend.stt.pipeline.extract", return_value=[]) as mock_extract,          patch("backend.stt.pipeline.ingest", side_effect=lambda **kw: captured.update(kw)):
+    with patch("backend.stt.pipeline.extract", return_value=[]) as mock_extract,          patch("backend.stt.pipeline.ingest", side_effect=lambda **kw: captured.update(kw)),          patch("backend.stt.pipeline.update_project_memory"):
         ingest_transcript(1, transcript)
 
     # 추출에는 지시문이 들어가고

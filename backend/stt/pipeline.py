@@ -14,6 +14,7 @@ from typing import Callable, Optional
 
 from ..pipeline.extractor import extract
 from ..pipeline.ingestor import ingest
+from ..project_memory import update_project_memory
 from .base import Transcript
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,16 @@ def ingest_transcript(
         },
         processing_token=processing_token,
     )
+
+    # Keep this function a complete Project Memory path even when called outside HTTP.
+    # The overview is derived state, so its failure must not roll back a successful ingest.
+    try:
+        update_project_memory(project_id, items)
+    except Exception:
+        logger.warning(
+            "STT 프로젝트 메모리 갱신 실패 (적재는 성공): project_id=%s",
+            project_id,
+        )
 
     logger.info(
         "STT 적재 완료 project_id=%s source=%s segments=%s items=%s",
