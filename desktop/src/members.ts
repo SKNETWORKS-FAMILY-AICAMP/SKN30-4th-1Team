@@ -18,7 +18,7 @@ export const PROJECT_ROLE_RANK: Readonly<Record<ProjectRole, number>> = {
   owner: 3,
 };
 
-export type ProjectMember = Pick<PaimUser, "email" | "name"> & {
+export type ProjectMember = Pick<PaimUser, "email" | "name" | "profile_image_url"> & {
   user_id: PaimUser["id"];
   role: ProjectRole;
   created_at?: string | null;
@@ -65,8 +65,11 @@ export function canRemoveProjectMember(
   return canRole(role, "member") && target.user_id === currentUser.id;
 }
 
-export async function fetchProjectMembers(projectId: number) {
-  return fetchPaimJson<ProjectMember[]>(`/projects/${projectId}/members`);
+export async function fetchProjectMembers(projectId: number, init?: RequestInit) {
+  return fetchPaimJson<ProjectMember[]>(
+    `/projects/${projectId}/members`,
+    init,
+  );
 }
 
 export async function addProjectMember(

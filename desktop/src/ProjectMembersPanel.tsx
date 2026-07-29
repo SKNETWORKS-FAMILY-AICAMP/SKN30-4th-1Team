@@ -9,6 +9,7 @@ import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import type { PaimUser } from "./auth";
 import { useI18n } from "./i18n";
+import { ProfileAvatar } from "./ProfileAvatar";
 import {
   ASSIGNABLE_PROJECT_ROLES,
   addProjectMember,
@@ -494,9 +495,13 @@ export function ProjectMembersPanel({
       >
         <Card className="project-members-card" padding={2}>
           <div className="project-members-identity">
-            <span className="project-members-avatar" aria-hidden="true">
-              {getMemberInitials(member)}
-            </span>
+            <ProfileAvatar
+              ariaHidden
+              className="project-members-avatar"
+              fallback={getMemberInitials(member)}
+              imageUrl={member.profile_image_url}
+              label={member.name || member.email}
+            />
             <div className="project-members-copy">
               <div className="project-members-name-row">
                 <strong>{member.name}</strong>
