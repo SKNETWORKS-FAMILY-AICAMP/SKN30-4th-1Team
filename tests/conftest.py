@@ -20,3 +20,14 @@ def reset_rate_limiter():
     limiter.reset()
     yield
     limiter.reset()
+
+
+def pytest_configure(config):
+    """하네스 계약의 안정적 행위 ID marker.
+
+    수용 기준이 함수 이름 대신 이 ID 집합을 계약으로 삼는다 —
+    이름을 바꿔도 계약이 유지된다(tests/test_harness_contract.py).
+    """
+    config.addinivalue_line(
+        "markers", "behavior(*ids): 하네스 계약의 안정적 행위 ID"
+    )
