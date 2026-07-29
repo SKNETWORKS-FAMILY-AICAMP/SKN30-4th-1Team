@@ -135,25 +135,19 @@ class _FakeConn:
         pass
 
 
-class _FakeLLMResponse:
-    def __init__(self, content):
-        self.content = content
+class _FakeAgenticQA:
+    """세션 API가 호출하는 Agentic Q&A 경계를 흉내 낸다."""
 
-
-class _FakeLLM:
-    """llm.chat_model_factory.get_chat_model()이 반환하는 LangChain 챗모델을 흉내 낸 페이크.
-    실제 네트워크 호출 없이 고정 응답(또는 강제 에러)을 돌려준다."""
-
-    def __init__(self, content="테스트용 LLM 응답입니다.", raise_error=False):
-        self.content = content
+    def __init__(self, answer="테스트용 Agentic 응답입니다.", raise_error=False):
+        self.answer = answer
         self.raise_error = raise_error
-        self.received_messages = None
+        self.calls = []
 
-    def invoke(self, messages):
-        self.received_messages = messages
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
         if self.raise_error:
-            raise RuntimeError("LLM 호출 실패 (테스트 시뮬레이션)")
-        return _FakeLLMResponse(self.content)
+            raise RuntimeError("Agentic Q&A 호출 실패 (테스트 시뮬레이션)")
+        return {"answer": self.answer}
 
 
 @pytest.fixture
@@ -168,13 +162,11 @@ def fake_conn(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def fake_llm(monkeypatch):
-    """backend.chat.router.get_chat_model()을 패치해 실제 LLM 호출(네트워크/API 키) 없이
-    고정 응답을 반환하게 한다. 모든 테스트에 자동 적용되며, 실패 시나리오가 필요한
-    테스트는 반환된 인스턴스의 raise_error/content를 직접 조작한다."""
-    llm = _FakeLLM()
-    monkeypatch.setattr("backend.chat.router.get_chat_model", lambda: llm)
-    return llm
+def fake_agentic_qa(monkeypatch):
+    """직접 LLM 대신 Agentic 실행 경계를 패치한다."""
+    agentic_qa = _FakeAgenticQA()
+    monkeypatch.setattr("backend.chat.router.run_agentic_qa", agentic_qa)
+    return agentic_qa
 
 
 def test_create_and_query_session(fake_conn):
@@ -188,6 +180,58 @@ def test_create_and_query_session(fake_conn):
     )
     assert result["status"] == "success"
     assert result["session_id"] == session_id
+
+
+def test_session_context_is_preserved_for_agentic_without_persisting_rag_context(
+    fake_conn, fake_agentic_qa
+):
+    """요약·복호화 이력·임시 RAG 텍스트가 Agentic 입력으로만 전달되어야 한다."""
+    from backend.chat.router import (
+        QueryRequest,
+        SessionCreateRequest,
+        create_chat_session,
+        get_session_message_history,
+        handle_session_query,
+    )
+    from backend.chat.session_store import SessionStore
+
+    session_id = create_chat_session(1, SessionCreateRequest(title="s"), db=fake_conn)["id"]
+    store = SessionStore(fake_conn, project_id=1)
+    store.save_message(session_id, role="user", text="이전 질문", token_count=3)
+    store.save_message(session_id, role="assistant", text="이전 답변", token_count=3)
+    store.save_or_update_summary(
+        session_id,
+        summary_text="이전 대화의 핵심 결론",
+        source_message_id=0,
+    )
+
+    temporary_rag = "이 텍스트는 세션 저장소에 남으면 안 됩니다."
+    result = handle_session_query(
+        1,
+        session_id,
+        QueryRequest(current_question="후속 질문", rag_context=temporary_rag),
+        db=fake_conn,
+    )
+
+    assert result == {
+        "status": "success",
+        "session_id": session_id,
+        "answer": "테스트용 Agentic 응답입니다.",
+    }
+    prepared_context = fake_agentic_qa.calls[0]["prepared_context"]
+    assert {"role": "system", "content": "[이전 대화 요약]: 이전 대화의 핵심 결론"} in prepared_context
+    assert {"role": "user", "content": "이전 질문"} in prepared_context
+    assert {"role": "assistant", "content": "이전 답변"} in prepared_context
+    assert {
+        "role": "system",
+        "content": "[참고 프로젝트 RAG 지식 - MySQL/ChromaDB 검색 결과]:\n" + temporary_rag,
+    } in prepared_context
+    assert all(message["content"] != "후속 질문" for message in prepared_context)
+
+    persisted_messages = get_session_message_history(1, session_id, db=fake_conn)
+    assert all(temporary_rag not in message["text"] for message in persisted_messages)
+    persisted_summary, _, _ = store.get_session_context(session_id)
+    assert temporary_rag not in persisted_summary
 
 
 def test_message_history_roundtrip_through_encryption(fake_conn):
@@ -290,27 +334,34 @@ def test_delete_session_with_messages_cleans_up_children(fake_conn):
     assert session_id not in fake_conn.sessions
 
 
-def test_query_answer_uses_real_llm_not_placeholder(fake_conn, fake_llm):
-    """handle_session_query()가 하드코딩된 placeholder 문자열이 아니라
-    LLM 호출 결과를 반환해야 한다 (AGENT_LOG.md Entry 050 요구사항 A)."""
+def test_query_answer_uses_agentic_result_not_placeholder(fake_conn, fake_agentic_qa):
+    """세션 응답은 직접 LLM이 아니라 Agentic 실행 결과를 사용해야 한다."""
     from backend.chat.router import create_chat_session, handle_session_query, SessionCreateRequest, QueryRequest
 
-    fake_llm.content = "실제 LLM이 생성한 답변입니다."
+    fake_agentic_qa.answer = "Agentic이 생성한 답변입니다."
     session_id = create_chat_session(1, SessionCreateRequest(title="s"), db=fake_conn)["id"]
 
     result = handle_session_query(1, session_id, QueryRequest(current_question="질문"), db=fake_conn)
 
-    assert result["answer"] == "실제 LLM이 생성한 답변입니다."
+    assert result == {
+        "status": "success",
+        "session_id": session_id,
+        "answer": "Agentic이 생성한 답변입니다.",
+    }
     assert "복호화된 대화 상태와" not in result["answer"]  # 기존 placeholder 문자열 잔존 여부 확인
-    assert fake_llm.received_messages is not None  # 실제로 LLM.invoke()가 호출되었는지 확인
+    assert len(fake_agentic_qa.calls) == 1
+    call = fake_agentic_qa.calls[0]
+    assert call["project_id"] == 1
+    assert call["question"] == "질문"
+    assert call["prepared_context"] == []
 
 
-def test_query_llm_failure_returns_503_not_raw_exception(fake_conn, fake_llm):
-    """LLM 호출이 실패하면 raw exception이 아니라 503 HTTPException으로 변환되어야 한다."""
+def test_query_agentic_failure_returns_503_not_raw_exception(fake_conn, fake_agentic_qa):
+    """Agentic 실행 실패도 기존과 같이 503 HTTPException으로 변환되어야 한다."""
     from backend.chat.router import create_chat_session, handle_session_query, SessionCreateRequest, QueryRequest
 
     session_id = create_chat_session(1, SessionCreateRequest(title="s"), db=fake_conn)["id"]
-    fake_llm.raise_error = True
+    fake_agentic_qa.raise_error = True
 
     with pytest.raises(HTTPException) as exc:
         handle_session_query(1, session_id, QueryRequest(current_question="질문"), db=fake_conn)

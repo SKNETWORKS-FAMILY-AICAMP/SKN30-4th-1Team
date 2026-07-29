@@ -59,6 +59,9 @@ def test_archive_is_excluded_from_the_runtime_build_inputs():
 
 def test_runtime_qna_entrypoints_are_agentic_only():
     query_api = (REPO_ROOT / "backend" / "api" / "query.py").read_text(encoding="utf-8")
+    session_router = (REPO_ROOT / "backend" / "chat" / "router.py").read_text(
+        encoding="utf-8"
+    )
     streamlit_chat = (REPO_ROOT / "frontend" / "views" / "chat.py").read_text(
         encoding="utf-8"
     )
@@ -70,6 +73,9 @@ def test_runtime_qna_entrypoints_are_agentic_only():
     assert "run_agentic_qa" in query_api
     assert "run_qa(" not in query_api
     assert "query_intent" not in query_api
+    assert "run_agentic_qa" in session_router
+    assert "get_chat_model" not in session_router
+    assert "_to_langchain_messages" not in session_router
     assert "run_agentic_qa" in streamlit_chat
     assert "qa_engine import answer" not in streamlit_chat
     assert "def run_qa(" not in ingest_graph

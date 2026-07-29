@@ -444,7 +444,7 @@ ingestor.ingest()
     <ul>
       <li><code>session_store.py</code>: 세션·메시지를 <code>security/session_crypto.py</code>(AES-256-GCM, <code>SESSION_MEMORY_KEY</code>)로 암호화 저장</li>
       <li><code>context_builder.py</code>: tiktoken으로 토큰 수 계산 후 시스템 프롬프트+요약+최근 메시지를 토큰 예산 안에서 조립</li>
-      <li>세션 질의 API는 이 router cutover 범위 밖이며, 별도 직접 LLM 경로를 유지합니다.</li>
+      <li>세션 질의 API도 같은 Agentic Q&amp;A를 사용합니다. 기존 컨텍스트 예산·암호화 이력·롤링 요약은 API 전처리에서 만들고, Agentic 도구 오케스트레이터가 답변을 생성한 뒤 기존 저장·응답 형식을 유지합니다.</li>
     </ul>
 
     <h3 id="b-llm">3.8 llm — 프로바이더 추상화</h3>
@@ -533,7 +533,8 @@ ingestor.ingest()
 
 세션 질의 (chat/router.py)
   → context_builder.py 로 암호화 대화 이력과 함께 컨텍스트 조립
-  → 별도 직접 LLM 응답 경로 (이 router cutover 범위 밖)</div>
+  → Agentic Q&amp;A (프로젝트 질의·Streamlit과 동일한 도구 오케스트레이터)
+  → 기존 세션 저장·롤링 요약·응답 형식 유지</div>
 
     <h3>8.4 델타 브리핑</h3>
     <div class="flow-step">앱 재오픈 (api/delta.py: GET/POST .../delta, .../briefing/delta)

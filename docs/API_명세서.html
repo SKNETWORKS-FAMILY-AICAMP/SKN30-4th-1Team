@@ -1216,7 +1216,8 @@
         <span class="path" id="session-query">/api/v1/projects/{project_id}/sessions/{session_id}/query</span>
       </div>
       <div class="endpoint-desc">
-        세션 기반 대화형 질의. 암호화된 대화 이력을 컨텍스트로 사용하며 롤링 요약을 자동 관리.
+        세션 기반 Agentic 대화형 질의. 암호화된 대화 이력과 롤링 요약을 컨텍스트로 사용하고,
+        프로젝트 질의와 같은 읽기 전용 근거 도구로 답변을 생성.
         <code>member</code> 이상 권한 필요.
       </div>
       <div class="endpoint-body">
@@ -1225,6 +1226,7 @@
   "current_question": "현재 가장 큰 리스크가 뭐야?",
   "rag_context": ""
 }</code></pre>
+        <div class="endpoint-desc"><code>rag_context</code>는 이번 Agentic 질의에서만 사용하는 임시 참고 텍스트이며 세션에 저장하지 않습니다.</div>
         <div class="res-label"><span class="s200">200</span> OK</div>
         <pre><code>{
   "status": "success",

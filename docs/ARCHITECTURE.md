@@ -233,7 +233,7 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 
 - `session_store.py`: 세션·메시지를 `security/session_crypto.py`(AES-256-GCM, `SESSION_MEMORY_KEY`)로 암호화 저장
 - `context_builder.py`: tiktoken으로 토큰 수를 계산해 시스템 프롬프트+요약+최근 메시지를 토큰 예산 안에서 조립
-- 세션 질의 API는 이 router cutover의 범위 밖이며, 별도 직접 LLM 경로를 유지합니다.
+- 세션 질의 API도 같은 Agentic Q&A를 사용합니다. 기존 컨텍스트 예산·암호화 이력·롤링 요약은 API 전처리에서 만들고, Agentic 도구 오케스트레이터가 답변을 생성한 뒤 기존 저장·응답 형식을 유지합니다.
 
 ### 3.8 llm — 프로바이더 추상화
 
@@ -331,7 +331,8 @@ repo 연결/동기화 (api/repository.py: POST .../sync)
 
 세션 질의 (chat/router.py)
   → context_builder.py 로 암호화 대화 이력과 함께 컨텍스트 조립
-  → 별도 직접 LLM 응답 경로 (이 router cutover 범위 밖)
+  → Agentic Q&A (프로젝트 질의·Streamlit과 동일한 도구 오케스트레이터)
+  → 기존 세션 저장·롤링 요약·응답 형식 유지
 ```
 
 ### 8.4 델타 브리핑

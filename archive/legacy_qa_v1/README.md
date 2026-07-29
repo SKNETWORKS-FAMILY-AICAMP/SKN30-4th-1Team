@@ -41,6 +41,7 @@ check only, pass --allow-dirty.
   inputs are mutable and must be isolated in a later opt-in E2E evaluation.
 
 The runtime must not import this directory. The old router is preserved only
-by the fixed commit and this materialization recipe; the router-branching
-project query API and Streamlit Q&A use the Agentic path only. The separate
-session-memory API is not part of this router cutover.
+by the fixed commit and this materialization recipe. All active Q&A
+entrypoints — project query API, Streamlit Q&A, and the separate session-memory
+API — use the Agentic path. The session-memory API was not part of the original
+router-branching baseline, but its current runtime is Agentic as well.

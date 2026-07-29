@@ -171,16 +171,38 @@ def _initial_messages(
     question: str,
     history: Optional[list],
     attachment_context: str = "",
+    prepared_context: Optional[list] = None,
 ) -> list[BaseMessage]:
+    """Build the orchestrator input without widening the public Q&A contract.
+
+    ``prepared_context`` is an internal, server-created message sequence for
+    callers that already applied their own context budget (the encrypted
+    session API).  Unlike client-supplied ``history``, it preserves explicit
+    system messages such as the rolling session summary.  Normal Q&A callers
+    continue to use the existing, bounded history path.
+    """
     messages: list[BaseMessage] = [SystemMessage(content=ORCHESTRATOR_SYSTEM_PROMPT)]
-    for item in (history or [])[-qa_engine.MAX_HISTORY:]:
-        content = str(item.get("content", "")).strip()
-        if not content:
-            continue
-        if item.get("role") == "assistant":
-            messages.append(AIMessage(content=content))
-        else:
-            messages.append(HumanMessage(content=content))
+    if prepared_context is not None:
+        for item in prepared_context:
+            content = str(item.get("content", "")).strip()
+            if not content:
+                continue
+            role = item.get("role")
+            if role == "system":
+                messages.append(SystemMessage(content=content))
+            elif role == "assistant":
+                messages.append(AIMessage(content=content))
+            else:
+                messages.append(HumanMessage(content=content))
+    else:
+        for item in (history or [])[-qa_engine.MAX_HISTORY:]:
+            content = str(item.get("content", "")).strip()
+            if not content:
+                continue
+            if item.get("role") == "assistant":
+                messages.append(AIMessage(content=content))
+            else:
+                messages.append(HumanMessage(content=content))
     if attachment_context.strip():
         messages.append(HumanMessage(content=attachment_context.strip()))
     messages.append(HumanMessage(content=question))
@@ -250,6 +272,7 @@ def run_agentic_qa(
     history: Optional[list] = None,
     attachment_context: str = "",
     attachment_sources: Optional[list[str]] = None,
+    prepared_context: Optional[list] = None,
     *,
     model=None,
     max_tool_rounds: Optional[int] = None,
@@ -264,7 +287,12 @@ def run_agentic_qa(
         app = _agentic_app
     output = app.invoke({
         "project_id": project_id,
-        "messages": _initial_messages(question, history, attachment_context),
+        "messages": _initial_messages(
+            question,
+            history,
+            attachment_context,
+            prepared_context=prepared_context,
+        ),
         "tool_rounds": 0,
     })
     result = _collect_result(output["messages"], output.get("tool_rounds", 0))

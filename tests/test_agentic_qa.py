@@ -1,9 +1,13 @@
 import json
 from unittest.mock import MagicMock, patch
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from backend.agentic_graph import ORCHESTRATOR_SYSTEM_PROMPT, run_agentic_qa
+from backend.agentic_graph import (
+    ORCHESTRATOR_SYSTEM_PROMPT,
+    _initial_messages,
+    run_agentic_qa,
+)
 from backend.retriever import qa_tools
 from backend.retriever.qa_tools import QA_TOOLS, query_structured_memory
 
@@ -21,6 +25,28 @@ class _ToolCallingFake:
     def invoke(self, messages):
         self.invocations.append(list(messages))
         return next(self.responses)
+
+
+def test_prepared_context_keeps_session_roles_and_appends_question_once():
+    """세션의 ContextBuilder 출력은 Agentic 입력에서도 역할을 보존한다."""
+    messages = _initial_messages(
+        question="새 질문",
+        history=[{"role": "user", "content": "무시되어야 하는 기본 history"}],
+        prepared_context=[
+            {"role": "system", "content": "[이전 대화 요약]: 요약"},
+            {"role": "user", "content": "이전 질문"},
+            {"role": "assistant", "content": "이전 답변"},
+            {"role": "system", "content": "[참고 프로젝트 RAG 지식]: 임시 근거"},
+        ],
+    )
+
+    assert isinstance(messages[0], SystemMessage)
+    assert isinstance(messages[1], SystemMessage)
+    assert isinstance(messages[2], HumanMessage)
+    assert isinstance(messages[3], AIMessage)
+    assert isinstance(messages[4], SystemMessage)
+    assert isinstance(messages[5], HumanMessage)
+    assert [message.content for message in messages].count("새 질문") == 1
 
 
 def _memory_row(row_id: int, content: str, source: str = "meeting.md") -> dict:
