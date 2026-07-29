@@ -953,7 +953,11 @@ def cmd_ingest(args) -> None:
                 conn.commit()
             finally:
                 conn.close()
-            items = extract(md.read_text(encoding="utf-8"), default_source=md.name)
+            items = extract(
+                md.read_text(encoding="utf-8"),
+                default_source=md.name,
+                reference_date=date,
+            )
             ingest(project_id=project_id, doc_id=doc_id, items=items,
                    raw_text=md.read_text(encoding="utf-8"), source=md.name,
                    date=date, doc_type="meeting")

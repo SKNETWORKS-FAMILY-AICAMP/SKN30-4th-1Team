@@ -1,5 +1,6 @@
 import json
 import logging
+from datetime import date
 
 import pymysql
 from fastapi import APIRouter, HTTPException
@@ -45,6 +46,7 @@ def _suggestion_response(row: dict) -> dict:
 # suggestion.kind별로 대상 memory가 가져야 하는 category — accept 시 잘못된 대상 방지.
 _KIND_TARGET_CATEGORY = {
     "complete_action": "action",
+    "set_due_date": "action",
     "supersede": "decision",
 }
 
@@ -58,6 +60,7 @@ def _suggestion_or_404(cursor, project_id: int, suggestion_id: int) -> dict:
     cursor.execute(
         "SELECT s.*, m.category AS memory_category,"
         " m.completed_at AS memory_completed_at,"
+        " m.due_date AS memory_due_date,"
         " m.superseded_by AS memory_superseded_by"
         " FROM memory_suggestions s"
         " JOIN memory m ON m.id = s.memory_id AND m.project_id = s.project_id"
@@ -108,12 +111,53 @@ def _apply_accepted_effect(cursor, project_id: int, row: dict) -> None:
     """accept 시 suggestion.kind에 따라 대상 memory에 효과를 반영한다.
 
     - complete_action: 미완료 action이면 completed_at=NOW().
+    - set_due_date: 원문 기준으로 계산된 마감 후보를 아직 마감이 없는 action에 설정.
     - supersede: 아직 살아있는 decision이면 superseded_by=evidence.superseding_memory_id,
       superseded_at=NOW() 설정(계층1 필터가 이때부터 실효).
     지원하지 않는 kind는 명시적으로 거부한다 — 알 수 없는 kind가 기본 분기로 흘러
     엉뚱한 대상에 completed_at을 설정하는 것을 막는다.
     """
     kind = row["kind"]
+    if kind == "set_due_date":
+        evidence = _decode_evidence(row["evidence"]) or {}
+        candidate = evidence.get("suggested_due_date")
+        try:
+            parsed = date.fromisoformat(str(candidate))
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400,
+                detail="Due date suggestion has an invalid candidate",
+            ) from None
+        canonical = parsed.isoformat()
+        if str(candidate) != canonical:
+            raise HTTPException(
+                status_code=400,
+                detail="Due date suggestion has an invalid candidate",
+            )
+
+        current = row.get("memory_due_date")
+        current_value = str(current)[:10] if current else None
+        if current_value is not None:
+            if current_value == canonical:
+                return
+            raise HTTPException(
+                status_code=409,
+                detail="Action due date changed after the suggestion was created",
+            )
+
+        cursor.execute(
+            "UPDATE memory SET due_date = %s, updated_by = 'user', is_user_verified = 1"
+            " WHERE id = %s AND project_id = %s AND category = 'action'"
+            " AND due_date IS NULL",
+            (canonical, row["memory_id"], project_id),
+        )
+        if cursor.rowcount == 0:
+            raise HTTPException(
+                status_code=409,
+                detail="Action due date changed after the suggestion was created",
+            )
+        return
+
     if kind == "supersede":
         evidence = _decode_evidence(row["evidence"]) or {}
         superseding_id = evidence.get("superseding_memory_id")
@@ -227,6 +271,28 @@ def _resolve_suggestion(project_id: int, suggestion_id: int, status: str) -> dic
         # (삭제 경로들과 동일한 best-effort 헬퍼 재사용, 실패해도 accept 결과는 유지)
         from ..project_memory import refresh_project_memory_after_delete
         refresh_project_memory_after_delete(project_id)
+
+    if status == "accepted" and row["kind"] == "set_due_date":
+        try:
+            conn = get_connection()
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT * FROM memory WHERE id = %s AND project_id = %s",
+                        (row["memory_id"], project_id),
+                    )
+                    memory_row = cursor.fetchone()
+            finally:
+                conn.close()
+            if memory_row:
+                from ..retriever.memory_vector import upsert_memory_vector
+                upsert_memory_vector(memory_row)
+        except Exception:
+            logger.warning(
+                "due date memory vector refresh failed memory_id=%s",
+                row["memory_id"],
+                exc_info=True,
+            )
 
     return _suggestion_response(updated)
 

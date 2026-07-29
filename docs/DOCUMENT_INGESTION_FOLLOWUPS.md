@@ -246,32 +246,18 @@ backend/api/repository.py:433  repositories.last_error = str(exc)
 
 ## 7. `due_date` 컬럼과 추출 정책 연결 (낮음)
 
-**설계상 의도된 동작이며 결함이 아니다.** `extractor.py`가 명시한다.
-
-```python
-# 41행 (프롬프트)
-- For action items, if a deadline is mentioned, append it to content
-  (e.g. "문서 초안 작성 (~6/22까지)"). Do not put the deadline in the date field.
-```
-
-`MemoryItem` 스키마에 `due_date`가 없는 것은 이 지시와 일관된다. E2E에서 실제로
-`content`에 `"7/28까지"`가 들어가고 `date`는 회의일로 정확히 채워졌다.
-
-**다만 미연결 지점이 남는다.**
+**2026-07-30 해결.** `MemoryItem`과 ingestor를 `memory.due_date`에 연결했다.
 
 | 위치 | 상태 |
 | --- | --- |
-| `memory.due_date` 컬럼 | 문서 업로드 경로로는 항상 `NULL` |
-| `backend/api/delta.py` | 마감 임박·기한 초과 집계가 이 컬럼에 의존 |
-| `backend/retriever/query_intent.py` | 마감 기준 필터 조회 |
-| README | "담당·개수·**마감** 정답 보장" |
+| 연도·월·일이 명시된 절대 날짜 | 원문 구절과 날짜가 일치할 때 자동 저장 |
+| 상대·연도 생략 날짜 | 기준일로 단일 후보를 계산해 `set_due_date` 승인 제안 생성 |
+| 단일 날짜를 정할 수 없는 표현 | 날짜를 만들지 않고 action `content`에만 보존 |
+| 사용자 직접 수정 | 기존 pending `set_due_date` 제안을 자동 거절 |
+| 제안 승인 | action 마감 설정 후 memory vector 갱신 |
 
-회의록에 "7/28까지"가 있어도 **"마감 임박한 액션"에는 잡히지 않는다.**
-사용자가 UI에서 직접 입력한 값만 반영된다.
-
-**확인이 필요한 것**: 의도된 트레이드오프인지(사람이 확정한 마감만 신뢰),
-아니면 `due_date` 컬럼이 나중에 추가되면서 추출 쪽이 따라가지 않은 것인지.
-커밋 이력 조사가 필요하다.
+`date`는 계속 회의·문서 기록일이고 `due_date`는 action 마감일이다. 상대 표현을
+자동 확정하지 않으므로 마감 필터의 정확성과 사람 승인 경계를 함께 보존한다.
 
 ---
 

@@ -212,6 +212,16 @@ def update_memory(project_id: int, memory_id: int, body: MemoryUpdate):
                     "evidence, '$.superseding_memory_id')) AS UNSIGNED) = %s)",
                     (get_current_user_id(), project_id, memory_id, memory_id),
                 )
+            if "due_date" in raw_fields:
+                # 사용자가 마감일을 직접 설정하거나 해제하면 이전 LLM 후보는 더 이상
+                # 유효하지 않다. 인박스에 승인 가능한 것처럼 남지 않도록 함께 닫는다.
+                cursor.execute(
+                    "UPDATE memory_suggestions"
+                    " SET status = 'rejected', resolved_at = NOW(), resolved_by = %s"
+                    " WHERE project_id = %s AND memory_id = %s"
+                    " AND kind = 'set_due_date' AND status = 'pending'",
+                    (get_current_user_id(), project_id, memory_id),
+                )
             cursor.execute(
                 f"UPDATE memory SET {set_clause} WHERE id = %s AND project_id = %s",
                 values,

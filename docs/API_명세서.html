@@ -941,7 +941,7 @@
           <tr><td><code>completed</code></td><td>boolean</td><td><code>true</code>→<code>completed_at=NOW()</code>, <code>false</code>→<code>null</code>. <code>null</code> 전송은 400</td></tr>
           <tr><td><code>sort_order</code></td><td>integer | null</td><td>표시 정렬 순서. 명시적 <code>null</code> 전송 시 해제</td></tr>
         </table>
-        <div class="note"><code>completed</code>(요청, boolean) ↔ <code>completed_at</code>(응답, timestamp). 수정 필드가 없으면 400. category를 decision 밖으로 바꾸는 변경이 supersede 관계와 충돌하면 409.</div>
+        <div class="note"><code>completed</code>(요청, boolean) ↔ <code>completed_at</code>(응답, timestamp). <code>due_date</code>를 직접 설정·해제하면 pending <code>set_due_date</code> 제안은 자동 거절된다. 수정 필드가 없으면 400. category를 decision 밖으로 바꾸는 변경이 supersede 관계와 충돌하면 409.</div>
         <div class="res-label"><span class="s200">200</span> OK</div>
         <pre><code>{
   "id": 1,
@@ -1034,7 +1034,7 @@
     <!-- ── Suggestions ────────────────────────────────────────── -->
     <h2 id="suggestions">제안 (Suggestions)</h2>
     <p class="note" style="margin-bottom:16px;">
-      <code>kind</code>: <code>complete_action</code>(기본)·<code>supersede</code>·<code>all</code>.
+      <code>kind</code>: <code>complete_action</code>(기본)·<code>set_due_date</code>·<code>supersede</code>·<code>all</code>.
       상세 계약·에러는 <code>HANDOVER_SUPERSEDE_FRONTEND.md</code>.
     </p>
 
@@ -1049,6 +1049,7 @@
         <pre><code>[{ "id": 8, "project_id": 1, "memory_id": 10, "kind": "complete_action",
   "evidence": {...}, "rationale": "...", "confidence": "high",
   "status": "pending", "created_at": "...", "resolved_at": null, "resolved_by": null }]</code></pre>
+        <div class="note"><code>set_due_date</code> evidence: <code>{ "type": "due_date", "suggested_due_date": "2026-08-07", "raw_text": "다음 주 금요일까지", "reference_date": "2026-07-30", "source": "회의록.md" }</code>. 연도·월·일이 명시된 날짜는 자동 저장하고, 상대·연도 생략 날짜만 승인 후보로 만든다.</div>
         <div class="res-label"><span class="s400">400</span> 잘못된 status/kind &nbsp;·&nbsp; <span class="s404">404</span> 프로젝트 없음</div>
       </div>
     </div>
@@ -1058,10 +1059,10 @@
         <span class="method POST">POST</span>
         <span class="path">/api/v1/projects/{project_id}/suggestions/{suggestion_id}/accept</span>
       </div>
-      <div class="endpoint-desc">제안 승인 (최소 역할 member). complete_action=완료 처리, supersede=결정 번복.</div>
+      <div class="endpoint-desc">제안 승인 (최소 역할 member). complete_action=완료 처리, set_due_date=action 마감 설정, supersede=결정 번복.</div>
       <div class="endpoint-body">
         <div class="res-label"><span class="s200">200</span> OK — 갱신된 suggestion (<code>status: "accepted"</code>)</div>
-        <div class="res-label"><span class="s400">400</span> 이미 해소/미지원 kind &nbsp;·&nbsp; <span class="s409">409</span> supersede 충돌/경합 &nbsp;·&nbsp; <span class="s404">404</span> 제안 없음</div>
+        <div class="res-label"><span class="s400">400</span> 이미 해소/미지원 kind &nbsp;·&nbsp; <span class="s409">409</span> 마감 변경·supersede 충돌/경합 &nbsp;·&nbsp; <span class="s404">404</span> 제안 없음</div>
       </div>
     </div>
 

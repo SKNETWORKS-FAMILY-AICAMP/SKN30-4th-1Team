@@ -178,6 +178,7 @@ def _process_upload_locked(
         items = extract(
             content,
             default_source=filename,
+            reference_date=date,
             on_progress=lambda done, total: _set_doc_progress(
                 doc_id, done, total, processing_token
             ),
@@ -415,7 +416,11 @@ def upload_git_log(project_id: int, body: GitLogUpload):
     doc_id = finalized["doc_id"]
 
     try:
-        items = extract(body.content, default_source=body.source)
+        items = extract(
+            body.content,
+            default_source=body.source,
+            reference_date=body.date,
+        )
         ingest(
             project_id=project_id,
             doc_id=doc_id,

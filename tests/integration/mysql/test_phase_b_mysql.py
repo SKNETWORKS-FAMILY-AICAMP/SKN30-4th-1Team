@@ -1,11 +1,12 @@
 import os
 import asyncio
+import json
 import subprocess
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pymysql
 import pytest
@@ -596,6 +597,70 @@ def test_fenced_document_ingest_cannot_commit_with_stale_token():
             processing_token="wrong-token",
         )
     assert scalar("SELECT COUNT(*) FROM documents WHERE status='indexed'") == 0
+
+
+def test_due_date_ingest_persists_explicit_and_pending_candidate():
+    raw_text = (
+        "배포 문서는 2026년 8월 5일까지 작성한다. "
+        "회귀 테스트는 다음 주 금요일까지 끝낸다."
+    )
+    items = [
+        MemoryItem(
+            category="action",
+            content="배포 문서 작성",
+            date="2026-07-30",
+            due_date="2026-08-05",
+            due_date_text="2026년 8월 5일까지",
+        ),
+        MemoryItem(
+            category="action",
+            content="회귀 테스트 완료",
+            date="2026-07-30",
+            due_date="2026-08-07",
+            due_date_text="다음 주 금요일까지",
+            due_date_requires_confirmation=True,
+        ),
+    ]
+
+    with (
+        patch.object(ingestor_module, "upsert_memory_vectors"),
+        patch.object(ingestor_module, "get_collection", return_value=MagicMock()),
+    ):
+        ingest(
+            project_id=1,
+            doc_id=None,
+            items=items,
+            raw_text=raw_text,
+            source="due-date-integration.txt",
+            date="2026-07-30",
+            doc_type="text",
+        )
+
+    conn = connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT id,content,due_date FROM memory WHERE project_id=1 ORDER BY id"
+            )
+            rows = cursor.fetchall()
+            assert rows[0]["content"] == "배포 문서 작성"
+            assert str(rows[0]["due_date"]) == "2026-08-05"
+            assert rows[1]["content"] == "회귀 테스트 완료"
+            assert rows[1]["due_date"] is None
+
+            cursor.execute(
+                "SELECT memory_id,kind,status,evidence FROM memory_suggestions"
+                " WHERE project_id=1"
+            )
+            suggestion = cursor.fetchone()
+            assert suggestion["memory_id"] == rows[1]["id"]
+            assert suggestion["kind"] == "set_due_date"
+            assert suggestion["status"] == "pending"
+            evidence = json.loads(suggestion["evidence"])
+            assert evidence["suggested_due_date"] == "2026-08-07"
+            assert evidence["reference_date"] == "2026-07-30"
+    finally:
+        conn.close()
 
 
 class BarrierCollection:

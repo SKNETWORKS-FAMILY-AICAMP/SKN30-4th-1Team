@@ -42,6 +42,14 @@ category 구분:
   드러나지 않은 이유를 추론하지 않습니다.
 - date는 회의·문서의 날짜를 YYYY-MM-DD로 기록합니다(예: 2026-06-02).
   "2026년 6월 2일" 같은 표기나 마감일을 넣지 않습니다.
+- due_date는 action에 명시된 마감일만 YYYY-MM-DD로 기록합니다. 원문에 연도·월·일이
+  모두 명시된 절대 날짜라면 due_date_requires_confirmation=false로 둡니다.
+- "7월 28일까지", "다음 주 금요일"처럼 연도가 없거나 상대적인 표현은 아래 기준일로
+  단일 날짜를 계산할 수 있을 때만 due_date 후보를 기록하고
+  due_date_requires_confirmation=true로 둡니다. 단일 날짜를 정할 수 없으면 due_date는
+  null로 두며 임의 날짜를 만들지 않습니다.
+- due_date_text에는 마감 표현을 원문 그대로 복사합니다. 마감이 없으면 due_date,
+  due_date_text는 null이고 due_date_requires_confirmation=false입니다.
 - action의 completed는 완료 보고가 명시될 때만 true, 배정·대기·진행 중이면 false,
   상태를 판단할 수 없으면 null입니다. "완료"라는 단어가 아니라 시제와 맥락으로 판단합니다.
 - action의 마감이 언급되면 content에 함께 남기되(예: "문서 초안 작성 (~6/22까지)")
@@ -87,9 +95,14 @@ _CHUNK_SIZE = 15000  # 청크당 최대 문자 수
 _CHUNK_OVERLAP = 200  # 청크 경계에서 문맥 유지를 위해 앞 청크와 겹치는 문자 수
 
 
-def _system_prompt(source_kind: str) -> str:
+def _system_prompt(source_kind: str, reference_date: Optional[str] = None) -> str:
     """기본 회의록 프롬프트는 유지하고 repo 소스에만 우선 지침을 더한다."""
-    return _REPO_PROMPTS.get(source_kind, "") + SYSTEM_PROMPT
+    reference = reference_date.strip() if reference_date else "제공되지 않음"
+    return (
+        _REPO_PROMPTS.get(source_kind, "")
+        + SYSTEM_PROMPT
+        + f"\n\n마감일 상대 표현 해석 기준일: {reference}"
+    )
 
 
 _README_ACTION_BLOCKLIST = (
@@ -209,14 +222,20 @@ def _notify_progress(on_progress: Optional[Callable[[int, int], None]], done: in
         pass
 
 
-def _extract_chunk(client, text: str, default_source: str, source_kind: str) -> List[MemoryItem]:
+def _extract_chunk(
+    client,
+    text: str,
+    default_source: str,
+    source_kind: str,
+    reference_date: Optional[str] = None,
+) -> List[MemoryItem]:
     """단일 청크를 LLM function calling으로 구조화 추출.
     tool_input=None → LLM이 tool call 자체를 안 한 것(실패), ValueError raise.
     items=[] → 추출할 내용 없음(정상 빈 결과).
     """
     response = client.chat(
         messages=[Message(role="user", content=f"Input:\n{text}")],
-        system=_system_prompt(source_kind),
+        system=_system_prompt(source_kind, reference_date),
         tool_schema=ExtractionResult.model_json_schema(),
         tool_name="extract_memory",
     )
@@ -269,6 +288,7 @@ def extract(
     provider: str = None,
     default_source: str = "",
     source_kind: str = "document",
+    reference_date: Optional[str] = None,
     on_progress: Optional[Callable[[int, int], None]] = None,
 ) -> List[MemoryItem]:
     """메인 추출 함수.
@@ -286,7 +306,9 @@ def extract(
     # 단일 청크면 바로 추출 후 반환 (dedup 불필요)
     if total_chunks == 1:
         try:
-            return _extract_chunk(client, chunks[0], default_source, source_kind)
+            return _extract_chunk(
+                client, chunks[0], default_source, source_kind, reference_date
+            )
         finally:
             _notify_progress(on_progress, 1, total_chunks)
 
@@ -294,7 +316,9 @@ def extract(
     failed_chunks = 0
     for idx, chunk in enumerate(chunks, start=1):
         try:
-            all_items.extend(_extract_chunk(client, chunk, default_source, source_kind))
+            all_items.extend(
+                _extract_chunk(client, chunk, default_source, source_kind, reference_date)
+            )
         except ValueError:
             failed_chunks += 1  # 청크 실패 카운트, 나머지 청크는 계속 처리
         finally:

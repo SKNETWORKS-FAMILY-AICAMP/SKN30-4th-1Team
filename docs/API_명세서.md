@@ -789,6 +789,8 @@ Memory 항목 수동 추가.
 Memory 항목 수정. (최소 역할: member) 수정할 필드만 부분 전송한다(PATCH 시맨틱).
 의미 필드(`category`/`content`/`owner`/`date`/`due_date`/`topic`/`reason`)를 수정하면
 `is_user_verified: true`로 마킹되어 LLM 재처리 시 덮어쓰지 않는다.
+`due_date`를 직접 설정하거나 해제하면 해당 action에 남아 있던 pending
+`set_due_date` 제안은 자동으로 거절 처리된다.
 
 **요청 Body** (수정할 필드만 포함)
 ```json
@@ -938,7 +940,8 @@ Memory 항목 삭제.
 ## 제안 (Suggestions)
 
 LLM이 만든 메모리 변경 제안(pending)을 사람이 승인/거절한다. `kind`는
-`complete_action`(액션 완료) 또는 `supersede`(결정 번복). 상세 계약·에러는
+`complete_action`(액션 완료), `set_due_date`(상대 마감일 후보 확정) 또는
+`supersede`(결정 번복). 상세 supersede 계약·에러는
 [HANDOVER_SUPERSEDE_FRONTEND.md](HANDOVER_SUPERSEDE_FRONTEND.md).
 
 ### `GET /api/v1/projects/{project_id}/suggestions`
@@ -950,7 +953,7 @@ LLM이 만든 메모리 변경 제안(pending)을 사람이 승인/거절한다.
 | 파라미터 | 타입 | 기본 | 설명 |
 |---------|------|------|------|
 | `status` | string | `pending` | `pending`/`accepted`/`rejected` |
-| `kind` | string | `complete_action` | `complete_action`/`supersede`/`all`. 구 클라이언트 보호를 위해 기본은 `complete_action`만 |
+| `kind` | string | `complete_action` | `complete_action`/`set_due_date`/`supersede`/`all`. 구 클라이언트 보호를 위해 기본은 `complete_action`만 |
 
 **응답 `200`**
 ```json
@@ -971,6 +974,23 @@ LLM이 만든 메모리 변경 제안(pending)을 사람이 승인/거절한다.
 ]
 ```
 
+`set_due_date`의 `evidence` 예:
+
+```json
+{
+  "type": "due_date",
+  "suggested_due_date": "2026-08-07",
+  "raw_text": "다음 주 금요일까지",
+  "reference_date": "2026-07-30",
+  "source": "회의록.md"
+}
+```
+
+연도·월·일이 원문에 모두 명시된 action 마감은 제안 없이 즉시 `memory.due_date`에
+저장된다. 상대 또는 연도 생략 표현은 기준일로 단일 날짜를 계산할 수 있고 원문 구절이
+실제 입력에 존재할 때만 `set_due_date` pending 제안이 생성된다. 단일 후보를 정할 수
+없는 표현은 날짜를 만들지 않고 action `content`에만 보존한다.
+
 **응답 `400`** — 잘못된 `status`/`kind`  
 **응답 `404`** — 프로젝트 없음
 
@@ -979,12 +999,13 @@ LLM이 만든 메모리 변경 제안(pending)을 사람이 승인/거절한다.
 ### `POST /api/v1/projects/{project_id}/suggestions/{suggestion_id}/accept`
 
 제안 승인. (최소 역할: member) `complete_action`은 대상 action을 완료 처리,
+`set_due_date`는 아직 마감이 없는 action에 제안 날짜를 설정하고,
 `supersede`는 대상 decision을 번복 처리한다.
 
 **응답 `200`** — 갱신된 suggestion 객체(위 목록 항목과 동일 스키마, `status: "accepted"`)
 
 **응답 `400`** — 이미 해소된 제안 / 지원하지 않는 kind  
-**응답 `409`** — supersede 대상/대체 결정 충돌, 동시 경합 (상세: supersede 핸드오버 §4)  
+**응답 `409`** — 제안 생성 후 action 마감이 다른 값으로 변경됨, supersede 대상/대체 결정 충돌, 동시 경합 (상세: supersede 핸드오버 §4)
 **응답 `404`** — 제안 없음
 
 ---
