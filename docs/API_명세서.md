@@ -1,7 +1,7 @@
 # PaiM FastAPI 명세서
 
 <!-- auth-mode: jwt-fail-closed -->
-<!-- updated: 2026-07-22 -->
+<!-- updated: 2026-07-29 -->
 
 **Base URL (로컬)**: `http://127.0.0.1:8000`  
 **API Prefix**: `/api/v1` (단, GitHub App 연동 엔드포인트는 prefix 없이 `/github/app/*`)  
@@ -62,7 +62,7 @@ prefix). CORS `OPTIONS` 프리플라이트도 통과.
 | `PATCH /api/v1/projects/{id}` | 인증 | member |
 | `DELETE /api/v1/projects/{id}` | 인증 | owner |
 | 문서·저장소·메모리 조회(`GET`) | 인증 | viewer |
-| 문서 업로드·삭제, 저장소 연결/sync/삭제 | 인증 | member |
+| 문서·음성 업로드·삭제, 저장소 연결/sync/삭제 | 인증 | member |
 | 메모리 `POST`·`PATCH`·`DELETE` | 인증 | member |
 | `POST /api/v1/projects/{id}/query` | 인증 | viewer |
 | `POST /api/v1/projects/{id}/git` | 인증 | member |
@@ -462,6 +462,45 @@ MySQL, schema, ChromaDB, upload 저장소의 준비 상태를 확인한다. 인�
 ```
 
 > **처리 흐름**: 업로드 즉시 `processing` 반환 → 백그라운드 처리 완료 후 `indexed` 또는 `failed` 로 상태 갱신.
+
+---
+
+### `POST /api/v1/projects/{project_id}/audio`
+
+회의 녹음을 저장하고 STT 전사 → LLM 추출 → MySQL·Vector DB 적재 → Project
+Memory 갱신을 백그라운드로 수행한다. 최소 역할은 **member**이다.
+
+**요청** `multipart/form-data`
+
+| 필드 | 타입 | 필수 | 설명 |
+|------|------|------|------|
+| `file` | File | ✅ | `STT_PROVIDER`가 지원하는 오디오. OpenAI 25 MB, CLOVA 200 MB 상한 |
+| `date` | string | - | 회의 날짜 `YYYY-MM-DD` |
+
+**응답 `201`**
+```json
+{
+  "doc_id": 71,
+  "status": "processing",
+  "provider": "openai",
+  "diarization": false
+}
+```
+
+업로드 즉시 `processing`을 반환한다. `GET /documents/{doc_id}/status`로
+`indexed` 또는 `failed`를 폴링한다. 실패 상태에는 `STT_PROVIDER_ERROR`,
+`STT_MISSING_CREDENTIALS`, `STT_INGEST_FAILED` 등의 정규화된 `last_error`가 남는다.
+
+**요청 경계 오류**
+
+- `400`: 빈 오디오, 잘못된 파일명, 미지원 확장자
+- `403`: 프로젝트 member 미만
+- `413`: 현재 STT provider의 크기 상한 초과
+- `503`: 알 수 없는 `STT_PROVIDER` 설정
+
+**주요 설정**: `STT_PROVIDER=openai|clova`, `STT_MODEL`, `STT_LANGUAGE`,
+`STT_TIMEOUT_SECONDS`. CLOVA는 `CLOVA_SPEECH_INVOKE_URL`과 `CLOVA_SPEECH_SECRET`이
+필요하며 화자 분리를 지원한다.
 
 ---
 
@@ -1480,8 +1519,7 @@ GitHub 설치 완료 후 리다이렉트되는 콜백. **공개(무인증)이나
 
 ## 구현 현황
 
-> 갱신: 2026-07-22 (TASK-010 반영 — 누락 20 operation·인증/권한·query
-> attachments·memory 필드 문서화. 전체 46 operation, origin/main `5240f40` 기준)
+> 갱신: 2026-07-29 (#9 STT 업로드 경로 반영. 전체 47 operation)
 
 | 엔드포인트 | 상태 |
 |-----------|------|
@@ -1492,6 +1530,7 @@ GitHub 설치 완료 후 리다이렉트되는 콜백. **공개(무인증)이나
 | `GET /api/v1/projects` | ✅ 구현 완료 (DEV user 시 membership JOIN 필터) |
 | `GET /api/v1/projects/{id}` | ✅ 구현 완료 |
 | `POST /api/v1/projects/{id}/documents` | ✅ 구현 완료 (BackgroundTask async) |
+| `POST /api/v1/projects/{id}/audio` | ✅ 구현 완료 (STT → Project Memory, BackgroundTask async) |
 | `GET /api/v1/projects/{id}/documents` | ✅ 구현 완료 |
 | `GET /api/v1/projects/{id}/documents/{doc_id}/status` | ✅ 구현 완료 (last_error 포함) |
 | `DELETE /api/v1/projects/{id}/documents/{doc_id}` | ✅ 구현 완료 (memory + chroma + file cleanup) |
