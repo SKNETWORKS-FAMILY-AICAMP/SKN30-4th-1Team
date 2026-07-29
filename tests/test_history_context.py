@@ -1,3 +1,5 @@
+import pytest
+
 from backend.retriever.history_context import resolve_history_context
 
 
@@ -24,3 +26,19 @@ def test_history_context_keeps_non_history_queries_unchanged():
         [],
         "현재 상태는?",
     )
+
+
+@pytest.mark.parametrize("question", ["그 전에는?", "이전 결정은?"])
+def test_topicless_history_followup_inherits_previous_topic(question):
+    mode, scope, tokens, effective_question = resolve_history_context(
+        question,
+        history=[
+            {"role": "user", "content": "인증 방식을 어떻게 결정했어?"},
+            {"role": "assistant", "content": "OAuth로 결정했습니다."},
+        ],
+    )
+
+    assert mode is True
+    assert scope == "topical"
+    assert "인증" in tokens
+    assert effective_question == f"인증 방식을 어떻게 결정했어? {question}"

@@ -72,6 +72,7 @@ ORCHESTRATOR_SYSTEM_PROMPT = qa_engine.SYSTEM_QA + """
 
 class AgenticQAState(TypedDict, total=False):
     project_id: int
+    current_question: str
     messages: Annotated[list[BaseMessage], add_messages]
     tool_rounds: int
 
@@ -322,6 +323,7 @@ def run_agentic_qa(
         app = _agentic_app
     output = app.invoke({
         "project_id": project_id,
+        "current_question": question,
         "messages": _initial_messages(
             question,
             history,

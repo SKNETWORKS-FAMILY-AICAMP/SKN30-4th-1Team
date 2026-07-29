@@ -34,7 +34,12 @@ def resolve_history_context(
         return False, None, [], question
 
     effective_question = question
-    if history_intent.is_deictic(question):
+    current_topic_tokens = history_intent.extract_content_tokens(question)
+    # Topic-less history questions ("이전 결정은?", "왜 바뀌었어?") are
+    # conversational follow-ups even when they do not contain an explicit
+    # pronoun.  Resolve them against the previous user turn before retrieval;
+    # otherwise they degrade to a project-global supersede search.
+    if history_intent.is_deictic(question) or not current_topic_tokens:
         previous = _last_user_question(history)
         if previous and not history_intent.is_deictic(previous):
             effective_question = f"{previous} {question}"

@@ -14,7 +14,7 @@ from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 
 from ..project_memory import get_project_memory
-from . import mysql_search, qa_engine
+from . import history_context, mysql_search, qa_engine
 from .sql_project_state import fetch_project_overview_context
 
 
@@ -28,6 +28,7 @@ MemoryOperation = Literal["list", "count"]
 CompletionStatus = Literal["open", "completed", "unknown"]
 MEMORY_TOOL_MAX_ROWS = 10
 _ALL_SCOPE_WORDS = frozenset({"전체", "모든", "프로젝트", "기록", "항목", "메모리"})
+_ATTACHMENT_EVIDENCE_MARKERS = ("[첨부 자료]", "[임시 첨부 근거]")
 
 
 def _count_text_filter(category: MemoryCategory, text_query: str) -> Optional[str]:
@@ -86,6 +87,8 @@ def _compact_retrieval_debug(debug: dict) -> dict:
 def search_project_evidence(
     query: str,
     project_id: Annotated[int, InjectedState("project_id")],
+    messages: Annotated[list, InjectedState("messages")],
+    current_question: Annotated[str, InjectedState("current_question")],
     alternate_queries: Optional[list[str]] = None,
     include_history: bool = False,
 ) -> tuple[str, dict]:
@@ -96,11 +99,46 @@ def search_project_evidence(
     ``alternate_queries`` may contain at most three faithful rewrites of the user's
     question. Set ``include_history`` when the question asks how a decision changed.
     """
+    # ``messages`` is the same bounded sequence shown to the orchestrator.  Its
+    # last human turn is the current question, so only earlier human turns are
+    # eligible as the topic of a conversational history follow-up.  Attachment
+    # blocks are evidence, not conversation turns.
+    user_turns = [
+        str(message.content).strip()
+        for message in messages
+        if getattr(message, "type", None) == "human"
+        and str(getattr(message, "content", "")).strip()
+    ]
+    if user_turns:
+        user_turns.pop()
+    conversation_history = [
+        {"role": "user", "content": content}
+        for content in user_turns
+        if not content.startswith(_ATTACHMENT_EVIDENCE_MARKERS)
+    ]
+    history_mode, history_scope, history_tokens, effective_question = (
+        history_context.resolve_history_context(
+            current_question or query,
+            conversation_history,
+            # An explicit true from the model is authoritative.  False (the
+            # schema default) still permits deterministic intent detection so
+            # a missed flag cannot disconnect a conversational follow-up.
+            history_mode=True if include_history else None,
+        )
+    )
+    retrieval_query = effective_question if history_mode else query
+    retrieval_variants = []
+    if history_mode and query.strip() != retrieval_query.strip():
+        retrieval_variants.append(query)
+    retrieval_variants.extend(alternate_queries or [])
+
     context, sources, debug = qa_engine._build_context(
         project_id,
-        query,
-        history_mode=include_history,
-        query_variants=alternate_queries or [],
+        retrieval_query,
+        history_mode=history_mode,
+        history_scope=history_scope,
+        history_topic_tokens=history_tokens,
+        query_variants=retrieval_variants[:3],
     )
     project_memory = get_project_memory(project_id)
     parts = []
