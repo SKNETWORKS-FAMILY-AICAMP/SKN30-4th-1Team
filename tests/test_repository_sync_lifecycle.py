@@ -125,6 +125,7 @@ def test_success_publish_is_fenced_and_returns_exact_previous_generation():
             indexed_files=4,
             last_error=None,
             sync_warning=None,
+            project_id=3,
         )
 
     assert (published, previous) == (True, ACTIVE_RUN_ID)
@@ -147,6 +148,15 @@ def test_success_publish_is_fenced_and_returns_exact_previous_generation():
         if "UPDATE memory_suggestions" in entry.args[0]
     )
     assert suggestion_cleanup.args[1] == (7, RUN_ID, 7, RUN_ID)
+    assert "resolved_at=NOW()" in suggestion_cleanup.args[0]
+    assert "UTC_TIMESTAMP" not in suggestion_cleanup.args[0]
+    summary_invalidation = next(
+        entry
+        for entry in cursor.execute.call_args_list
+        if entry.args[0].startswith("DELETE FROM project_memory")
+    )
+    assert summary_invalidation.args[1] == (3,)
+    conn.commit.assert_called_once()
 
 
 def test_failed_run_preserves_active_generation_commit_and_file_count():
@@ -172,6 +182,10 @@ def test_failed_run_preserves_active_generation_commit_and_file_count():
     assert "active_sync_run_id" not in repo_sql
     assert "commit_sha" not in repo_sql
     assert "indexed_files" not in repo_sql
+    assert not any(
+        entry.args[0].startswith("DELETE FROM project_memory")
+        for entry in cursor.execute.call_args_list
+    )
 
 
 def test_late_worker_cannot_publish_after_fence_is_replaced():
@@ -179,7 +193,13 @@ def test_late_worker_cannot_publish_after_fence_is_replaced():
     cursor.fetchone.return_value = None
 
     with patch("backend.api.repository.get_connection", return_value=conn):
-        result = _set_repo_status(7, RUN_ID, "indexed", commit_sha="stale")
+        result = _set_repo_status(
+            7,
+            RUN_ID,
+            "indexed",
+            commit_sha="stale",
+            project_id=3,
+        )
 
     assert result == (False, None)
     assert cursor.execute.call_count == 1
@@ -213,7 +233,7 @@ def test_generation_cleanup_deletes_only_the_exact_run():
     collection.delete.assert_called_once_with(ids=["old-memory"])
 
 
-def test_first_publish_cleanup_removes_legacy_vectors_without_generation_metadata():
+def test_legacy_generation_cleanup_removes_vectors_without_generation_metadata():
     conn, cursor = _connection()
     cursor.fetchone.return_value = {"active_sync_run_id": RUN_ID}
     collection = MagicMock()

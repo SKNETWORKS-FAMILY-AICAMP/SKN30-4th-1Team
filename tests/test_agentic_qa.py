@@ -232,6 +232,27 @@ def test_memory_count_applies_target_phrase_to_structured_search(monkeypatch):
     assert search.call_args.kwargs["text_query"] == "SDK 연동"
 
 
+def test_evidence_tool_returns_only_generation_scoped_context(monkeypatch):
+    monkeypatch.setattr(
+        qa_tools.qa_engine,
+        "_build_context",
+        lambda *args, **kwargs: (
+            "[원문 맥락]\n새 generation 근거",
+            ["new.md"],
+            {"mysql_rows": [], "chroma_chunks": []},
+        ),
+    )
+
+    content, artifact = qa_tools.search_project_evidence.func(
+        query="최신 변경은?",
+        project_id=1,
+    )
+
+    assert content == "[원문 맥락]\n새 generation 근거"
+    assert "[프로젝트 메모리]" not in content
+    assert artifact["sources"] == ["new.md"]
+
+
 def test_agent_calls_evidence_tool_then_synthesizes_one_answer(monkeypatch):
     fake = _ToolCallingFake([
         AIMessage(content="", tool_calls=[{
@@ -246,7 +267,6 @@ def test_agent_calls_evidence_tool_then_synthesizes_one_answer(monkeypatch):
         }]),
         AIMessage(content="**SDK 연동은 박현우가 담당했습니다.**"),
     ])
-    monkeypatch.setattr(qa_tools, "get_project_memory", lambda project_id: "Modu 프로젝트")
     monkeypatch.setattr(
         qa_tools.qa_engine,
         "_build_context",
@@ -315,7 +335,6 @@ def test_agent_can_combine_multiple_tools(monkeypatch):
         "_rank_mysql_rows",
         lambda project_id, rows, queries, limit: (rows[:limit], []),
     )
-    monkeypatch.setattr(qa_tools, "get_project_memory", lambda project_id: "")
     monkeypatch.setattr(
         qa_tools.qa_engine,
         "_build_context",

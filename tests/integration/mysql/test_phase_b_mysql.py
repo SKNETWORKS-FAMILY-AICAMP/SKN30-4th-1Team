@@ -252,6 +252,15 @@ def test_v10_publish_fence_switches_generation_and_retires_old_derivatives():
             )
             old_memory = cursor.lastrowid
             cursor.execute(
+                "INSERT INTO memory(project_id,repo_id,repo_sync_run_id,category,content)"
+                " VALUES (1,1,'run-new','action','new generation action')"
+            )
+            cursor.execute(
+                "INSERT INTO project_memory(project_id,summary)"
+                " VALUES (1,'old generation summary')"
+                " ON DUPLICATE KEY UPDATE summary=VALUES(summary)"
+            )
+            cursor.execute(
                 "INSERT INTO memory(project_id,category,content,superseded_by)"
                 " VALUES (1,'decision','published predecessor',%s)",
                 (old_memory,),
@@ -283,6 +292,7 @@ def test_v10_publish_fence_switches_generation_and_retires_old_derivatives():
         commit_sha="abc123",
         indexed_files=4,
         last_error=None,
+        project_id=1,
     )
     assert published is True
     assert previous == "run-old"
@@ -305,6 +315,10 @@ def test_v10_publish_fence_switches_generation_and_retires_old_derivatives():
                 (suggestion_id,),
             )
             suggestion = cursor.fetchone()
+            cursor.execute(
+                "SELECT summary FROM project_memory WHERE project_id=1"
+            )
+            project_summary = cursor.fetchone()
     finally:
         conn.close()
 
@@ -317,6 +331,14 @@ def test_v10_publish_fence_switches_generation_and_retires_old_derivatives():
     assert predecessor_row["superseded_by"] is None
     assert suggestion["status"] == "rejected"
     assert suggestion["resolved_at"] is not None
+    assert project_summary is None
+
+    from backend.retriever.query_intent import _fetch_overview_context
+    overview = _fetch_overview_context(1)
+    assert overview["overview_summary"] == ""
+    assert [item["content"] for item in overview["action_plan"]["items"]] == [
+        "new generation action"
+    ]
 
 
 def test_real_v8_upgrade_backfills_and_resumes_after_interruption(monkeypatch, tmp_path):

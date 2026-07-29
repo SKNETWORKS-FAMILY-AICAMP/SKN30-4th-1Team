@@ -107,8 +107,9 @@ def list_suggestions(project_id: int, status: str = "pending", kind: str = "comp
                     " AND (s.kind<>'supersede' OR superseding.id IS NOT NULL)"
                 )
             else:
-                # Resolved suggestions are audit history. Keep them visible
-                # even after their repository generation is superseded.
+                # Resolved rows do not require an active-memory join while the
+                # suggestion row exists. Long-term retention is a separate
+                # schema concern because memory_id still uses ON DELETE CASCADE.
                 sql = (
                     "SELECT s.* FROM memory_suggestions s"
                     " WHERE s.project_id = %s AND s.status = %s"

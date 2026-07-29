@@ -2,6 +2,7 @@ import base64
 import json
 import logging
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Optional
 from urllib import error, parse, request
@@ -444,7 +445,7 @@ def _cleanup_repo_generation(repo_id: int, run_id: str | None) -> None:
         # Read/delete through the persisted collection directly so cleanup
         # never instantiates the embedding client or requires OPENAI_API_KEY.
         # Normalizing a missing/empty metadata value to None also removes
-        # pre-generation vectors during the first generation publish.
+        # pre-generation vectors when explicit legacy cleanup is requested.
         from ..db.chroma import get_existing_collection
 
         collection = get_existing_collection()
@@ -554,10 +555,21 @@ def _set_repo_status(
     indexed_files=_UNSET,
     last_error=_UNSET,
     sync_warning=_UNSET,
+    project_id: int | None = None,
 ) -> tuple[bool, str | None]:
     """현재 run만 실패 처리하거나 새 generation을 원자적으로 게시한다."""
     if status not in {"indexed", "failed"}:
         raise ValueError(f"Unsupported repository terminal status: {status}")
+    if status == "indexed":
+        if project_id is None:
+            raise ValueError("project_id is required to publish a repository generation")
+        # Summary writers and publication share one process-local project lock.
+        # The current deployment is explicitly single-worker.
+        from ..graph import project_memory_write_lock
+        status_guard = project_memory_write_lock(project_id)
+    else:
+        status_guard = nullcontext()
+
     repo_updates: dict = {
         "status": status,
         "current_sync_run_id": None,
@@ -575,67 +587,75 @@ def _set_repo_status(
 
     repo_set_clause = ", ".join(f"{key}=%s" for key in repo_updates)
     repo_values = list(repo_updates.values())
-    conn = get_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                "SELECT active_sync_run_id FROM repositories"
-                " WHERE id=%s AND current_sync_run_id=%s AND status='syncing'"
-                " FOR UPDATE",
-                (repo_id, run_id),
-            )
-            owned_repo = cursor.fetchone()
-            if not owned_repo:
-                conn.rollback()
-                return False, None
-            previous_active_run_id = owned_repo.get("active_sync_run_id")
-            cursor.execute(
-                f"UPDATE repositories SET {repo_set_clause}"
-                " WHERE id=%s AND current_sync_run_id=%s AND status='syncing'",
-                repo_values + [repo_id, run_id],
-            )
-            if cursor.rowcount != 1:
-                conn.rollback()
-                return False, None
-            if status == "indexed":
-                # A published predecessor must not stay hidden by a decision
-                # that just moved to an older repository generation.
+    with status_guard:
+        conn = get_connection()
+        try:
+            with conn.cursor() as cursor:
                 cursor.execute(
-                    "UPDATE memory predecessor"
-                    " JOIN memory successor"
-                    "  ON successor.id=predecessor.superseded_by"
-                    " SET predecessor.superseded_by=NULL,"
-                    "  predecessor.superseded_at=NULL"
-                    " WHERE successor.repo_id=%s"
-                    " AND NOT (successor.repo_sync_run_id <=> %s)",
+                    "SELECT active_sync_run_id FROM repositories"
+                    " WHERE id=%s AND current_sync_run_id=%s AND status='syncing'"
+                    " FOR UPDATE",
                     (repo_id, run_id),
                 )
-                # Suggestions are derived from one published generation. Retire
-                # pending rows whose target (or superseding decision) belongs
-                # to an older generation of this repository.
+                owned_repo = cursor.fetchone()
+                if not owned_repo:
+                    conn.rollback()
+                    return False, None
+                previous_active_run_id = owned_repo.get("active_sync_run_id")
                 cursor.execute(
-                    "UPDATE memory_suggestions s"
-                    " JOIN memory target ON target.id=s.memory_id"
-                    " LEFT JOIN memory superseding"
-                    "  ON s.kind='supersede'"
-                    "  AND superseding.id=CAST(JSON_UNQUOTE(JSON_EXTRACT("
-                    "s.evidence, '$.superseding_memory_id')) AS UNSIGNED)"
-                    " SET s.status='rejected',s.resolved_at=UTC_TIMESTAMP(6)"
-                    " WHERE s.status='pending' AND ("
-                    "  (target.repo_id=%s"
-                    "   AND NOT (target.repo_sync_run_id <=> %s))"
-                    "  OR (s.kind='supersede' AND superseding.repo_id=%s"
-                    "   AND NOT (superseding.repo_sync_run_id <=> %s))"
-                    " )",
-                    (repo_id, run_id, repo_id, run_id),
+                    f"UPDATE repositories SET {repo_set_clause}"
+                    " WHERE id=%s AND current_sync_run_id=%s AND status='syncing'",
+                    repo_values + [repo_id, run_id],
                 )
-        conn.commit()
-        return True, previous_active_run_id
-    except BaseException:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+                if cursor.rowcount != 1:
+                    conn.rollback()
+                    return False, None
+                if status == "indexed":
+                    # A published predecessor must not stay hidden by a decision
+                    # that just moved to an older repository generation.
+                    cursor.execute(
+                        "UPDATE memory predecessor"
+                        " JOIN memory successor"
+                        "  ON successor.id=predecessor.superseded_by"
+                        " SET predecessor.superseded_by=NULL,"
+                        "  predecessor.superseded_at=NULL"
+                        " WHERE successor.repo_id=%s"
+                        " AND NOT (successor.repo_sync_run_id <=> %s)",
+                        (repo_id, run_id),
+                    )
+                    # Suggestions are derived from one published generation. Retire
+                    # pending rows whose target (or superseding decision) belongs
+                    # to an older generation of this repository.
+                    cursor.execute(
+                        "UPDATE memory_suggestions s"
+                        " JOIN memory target ON target.id=s.memory_id"
+                        " LEFT JOIN memory superseding"
+                        "  ON s.kind='supersede'"
+                        "  AND superseding.id=CAST(JSON_UNQUOTE(JSON_EXTRACT("
+                        "s.evidence, '$.superseding_memory_id')) AS UNSIGNED)"
+                        " SET s.status='rejected',s.resolved_at=NOW()"
+                        " WHERE s.status='pending' AND ("
+                        "  (target.repo_id=%s"
+                        "   AND NOT (target.repo_sync_run_id <=> %s))"
+                        "  OR (s.kind='supersede' AND superseding.repo_id=%s"
+                        "   AND NOT (superseding.repo_sync_run_id <=> %s))"
+                        " )",
+                        (repo_id, run_id, repo_id, run_id),
+                    )
+                    # The active pointer and summary invalidation form one
+                    # publication boundary. A failed refresh leaves no summary
+                    # instead of exposing the previous generation's summary.
+                    cursor.execute(
+                        "DELETE FROM project_memory WHERE project_id=%s",
+                        (project_id,),
+                    )
+            conn.commit()
+            return True, previous_active_run_id
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 
 def _get_last_reconciled_pr(repo_id: int) -> int | None:
@@ -826,7 +846,7 @@ def _sync_bg(
             )
 
         _require_sync_ownership(repo_id, run_id)
-        published, previous_active_run_id = _set_repo_status(
+        published, _ = _set_repo_status(
             repo_id,
             run_id,
             "indexed",
@@ -834,13 +854,10 @@ def _sync_bg(
             indexed_files=indexed,
             last_error=None,
             sync_warning=sync_warning,
+            project_id=project_id,
         )
         if not published:
             raise SyncFenceLost(run_id)
-
-        # Publishing is the durable success boundary. Physical deletion is
-        # best-effort because visibility already follows active_sync_run_id.
-        _cleanup_repo_generation(repo_id, previous_active_run_id)
 
         try:
             _detect_published_generation_supersedes(project_id, repo_id, run_id)

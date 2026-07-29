@@ -13,7 +13,6 @@ from typing import Annotated, Literal, Optional
 from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 
-from ..graph import get_project_memory
 from . import mysql_search, qa_engine
 from .query_intent import _fetch_overview_context
 
@@ -97,13 +96,7 @@ def search_project_evidence(
         history_mode=include_history,
         query_variants=alternate_queries or [],
     )
-    project_memory = get_project_memory(project_id)
-    parts = []
-    if project_memory:
-        parts.append(f"[프로젝트 메모리]\n{project_memory}")
-    if context:
-        parts.append(context)
-    content = "\n\n".join(parts) or "프로젝트 기록에서 관련 근거를 찾지 못했습니다."
+    content = context or "프로젝트 기록에서 관련 근거를 찾지 못했습니다."
     return content, {
         "tool": "search_project_evidence",
         "sources": sources,

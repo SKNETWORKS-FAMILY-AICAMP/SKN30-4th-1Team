@@ -59,6 +59,47 @@ def test_run_qa_returns_required_keys(fake_chat_model, fake_qa_engine, fake_proj
     assert result["route"] == "both"
 
 
+def test_qa_node_does_not_mix_unversioned_summary_into_scoped_evidence(monkeypatch):
+    """Semantic Q&A는 캡처한 generation 근거 뒤에 별도 summary를 읽지 않는다."""
+    import backend.graph as graph
+
+    captured = {}
+
+    class _CaptureChain:
+        def invoke(self, inputs):
+            captured.update(inputs)
+            return "테스트 답변"
+
+    monkeypatch.setattr(
+        graph.qa_engine,
+        "_build_context",
+        lambda *args, **kwargs: (
+            "[구조화 기록]\n새 generation 근거",
+            ["new.md"],
+            {"mysql_rows": [1], "chroma_chunks": []},
+        ),
+    )
+    monkeypatch.setattr(graph.qa_engine, "_get_chain", lambda: _CaptureChain())
+    monkeypatch.setattr(
+        graph,
+        "get_project_memory",
+        lambda project_id: (_ for _ in ()).throw(
+            AssertionError("semantic Q&A must not read project_memory")
+        ),
+    )
+
+    result = graph.qa_node({
+        "project_id": 1,
+        "question": "최신 결정은?",
+        "history": [],
+        "history_mode": False,
+    })
+
+    assert result["answer"] == "테스트 답변"
+    assert captured["context"] == "[구조화 기록]\n새 generation 근거"
+    assert "[프로젝트 메모리]" not in captured["context"]
+
+
 def test_update_project_memory_uses_get_chat_model(fake_chat_model, fake_project_memory):
     """update_project_memory()가 get_chat_model()로 요약을 생성해야 한다."""
     import backend.pipeline.models as m

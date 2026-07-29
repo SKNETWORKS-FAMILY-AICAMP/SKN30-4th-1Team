@@ -270,7 +270,8 @@ def test_list_pending_suggestions_returns_evidence_and_rationale():
     assert "LEFT JOIN active_memory superseding" in list_sql
 
 
-def test_list_resolved_suggestions_preserves_audit_history():
+def test_list_resolved_suggestions_does_not_require_active_memory_join():
+    """목록 필터만 검증한다. FK cascade 이후의 보존을 보장하는 테스트는 아니다."""
     row = _suggestion_row(status="accepted")
     conn, cur = _make_conn(fetchone=[{"id": 1}], fetchall=[row])
     with patch("backend.api.suggestion.require_project_access"), \

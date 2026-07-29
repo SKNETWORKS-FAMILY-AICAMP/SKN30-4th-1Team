@@ -1,5 +1,5 @@
 """Repository sync staging, fencing, publication, and cleanup tests."""
-from unittest.mock import ANY, call, patch
+from unittest.mock import ANY, patch
 
 from backend.api.repository import GitHubAPIError, SyncFenceLost, _sync_bg
 
@@ -44,7 +44,7 @@ def _success_patches(sources=None, warnings=None):
     )
 
 
-def test_sync_bg_stages_run_then_publishes_and_deletes_only_previous_generation():
+def test_sync_bg_stages_run_then_publishes_without_deleting_previous_generation():
     patches = _success_patches()
     with (
         patches[0],
@@ -70,31 +70,11 @@ def test_sync_bg_stages_run_then_publishes_and_deletes_only_previous_generation(
         indexed_files=1,
         last_error=None,
         sync_warning=None,
+        project_id=1,
     )
-    cleanup.assert_called_once_with(10, OLD_RUN_ID)
+    cleanup.assert_not_called()
     supersede.assert_called_once_with(1, 10, RUN_ID)
     reconcile.assert_called_once_with(1, 10, [])
-
-
-def test_sync_bg_success_never_uses_keep_all_but_current_cleanup():
-    patches = _success_patches()
-    with (
-        patches[0],
-        patches[1],
-        patches[2],
-        patches[3],
-        patches[4],
-        patches[5] as cleanup,
-        patches[6],
-        patches[7],
-        patches[8],
-        patches[9],
-        patches[10],
-    ):
-        _sync_bg(1, 10, RUN_ID, "owner/repo", "main", None)
-
-    assert cleanup.call_args == call(10, OLD_RUN_ID)
-    assert cleanup.call_args != call(10, RUN_ID)
 
 
 def test_sync_bg_empty_sources_fails_and_cleans_only_failed_run():

@@ -11,7 +11,9 @@
 #  2) 출력(질의): 질문 → [섹션(stub)] → [Q&A] → [검증] → (부족: 재검색 루프)
 #                        → [계획] → [검증] → (부족: 재기획 루프) → [응답] → END
 import asyncio
-from typing import TypedDict, Optional, List, Dict
+from contextlib import contextmanager
+from threading import Lock, RLock
+from typing import TypedDict, Optional, List, Dict, Iterator
 import logging
 
 from langchain_core.messages import HumanMessage, AIMessage
@@ -33,6 +35,22 @@ from .quota import (
 
 MAX_RETRY = 1  # 재검색/재기획 최대 반복 (무한 루프 방지)
 logger = logging.getLogger(__name__)
+
+
+# 현재 운영 계약은 단일 backend worker다. 같은 프로세스 안에서 오래된 요약
+# writer가 repository generation 게시 뒤에 결과를 덮어쓰지 못하도록 프로젝트별
+# writer를 직렬화한다. 다중 worker로 확장할 때는 DB revision/CAS로 교체해야 한다.
+_PROJECT_MEMORY_LOCKS: dict[int, RLock] = {}
+_PROJECT_MEMORY_LOCKS_GUARD = Lock()
+
+
+@contextmanager
+def project_memory_write_lock(project_id: int) -> Iterator[None]:
+    """Serialize project-summary writers and repository publication."""
+    with _PROJECT_MEMORY_LOCKS_GUARD:
+        project_lock = _PROJECT_MEMORY_LOCKS.setdefault(project_id, RLock())
+    with project_lock:
+        yield
 
 
 # ─────────────────────────────────────────────────────────────
@@ -120,6 +138,11 @@ def regenerate_project_memory(project_id: int) -> str:
 
     active_memory 뷰를 읽으므로 번복(superseded)된 결정은 요약에 들어가지 않는다.
     """
+    with project_memory_write_lock(project_id):
+        return _regenerate_project_memory_unlocked(project_id)
+
+
+def _regenerate_project_memory_unlocked(project_id: int) -> str:
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -222,6 +245,11 @@ def update_project_memory(project_id: int, items: list) -> str:
     주의(best-effort): 이 함수는 실패 시 예외를 던진다. 업로드 흐름에서 호출하는 쪽이
     try/except로 감싸, 요약 실패가 업로드 자체를 실패로 만들지 않도록 처리해야 한다.
     """
+    with project_memory_write_lock(project_id):
+        return _update_project_memory_unlocked(project_id, items)
+
+
+def _update_project_memory_unlocked(project_id: int, items: list) -> str:
     prev = get_project_memory(project_id)
     if not items:
         return prev
@@ -288,8 +316,10 @@ def section_node(state: QAState) -> dict:
 
 
 def qa_node(state: QAState) -> dict:
-    """Q&A 에이전트: 하이브리드 검색 + LangChain 생성 (qa_engine 부품 재사용).
-    Project Memory 요약을 컨텍스트 앞에 얹어 프로젝트 맥락을 보강한다(입력↔출력 다리)."""
+    """Q&A 에이전트: 같은 generation으로 고정한 검색 근거만 사용해 답변한다.
+
+    generation이 없는 Project Memory 요약은 조망형 경로에서만 사용한다.
+    """
     pid, q = state["project_id"], state["question"]
     # 검색 질의는 (재작성될 수 있는) question을 쓰고, 체인 선택 판정은
     # run_qa 진입 시 고정된 predicate·주제 토큰을 쓴다.
@@ -304,9 +334,6 @@ def qa_node(state: QAState) -> dict:
     if state.get("attachment_context"):
         parts.append(state["attachment_context"])
 
-    mem = get_project_memory(pid)
-    if mem:
-        parts.append(f"[프로젝트 메모리]\n{mem}")
     if context:
         parts.append(context)
     context = "\n\n".join(parts)

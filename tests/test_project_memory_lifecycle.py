@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from threading import Event, Thread
 from unittest.mock import MagicMock
 
 from backend import graph
@@ -69,6 +70,99 @@ def test_regenerate_project_memory_summarizes_remaining_memory(monkeypatch):
     assert any("ON DUPLICATE KEY UPDATE summary" in sql for sql in sql_calls)
     # G-001: 요약 재료는 active_memory 뷰에서 읽는다 — superseded 결정이 요약에 들어가지 않도록
     assert "FROM active_memory" in select_cursor.execute.call_args.args[0]
+
+
+def test_repository_publish_waits_for_summary_writer_then_invalidates_it(monkeypatch):
+    """오래된 writer가 게시 뒤에 summary를 다시 살리지 못한다."""
+    from backend.api import repository
+
+    writer_in_llm = Event()
+    release_writer = Event()
+    publisher_started = Event()
+    publisher_done = Event()
+    errors = []
+    publish_result = []
+
+    class _BlockingLLM:
+        def invoke(self, prompt):
+            writer_in_llm.set()
+            if not release_writer.wait(5):
+                raise TimeoutError("writer release timed out")
+            return SimpleNamespace(content="이전 generation 요약")
+
+    select_cursor = MagicMock()
+    select_cursor.fetchall.return_value = [{
+        "category": "decision",
+        "content": "이전 generation 결정",
+        "owner": None,
+        "due_date": None,
+        "completed_at": None,
+        "completion_status": None,
+    }]
+    upsert_cursor = MagicMock()
+    summary_connections = MagicMock(side_effect=[
+        _conn_with_cursor(select_cursor),
+        _conn_with_cursor(upsert_cursor),
+    ])
+    monkeypatch.setattr(graph, "get_connection", summary_connections)
+    monkeypatch.setattr(graph, "get_chat_model", lambda **kwargs: _BlockingLLM())
+
+    publish_cursor = MagicMock()
+    publish_cursor.rowcount = 1
+    publish_cursor.fetchone.return_value = {"active_sync_run_id": "run-a"}
+    publish_conn = _conn_with_cursor(publish_cursor)
+    publish_connection = MagicMock(return_value=publish_conn)
+    monkeypatch.setattr(repository, "get_connection", publish_connection)
+
+    def write_old_summary():
+        try:
+            graph.regenerate_project_memory(77)
+        except BaseException as exc:
+            errors.append(exc)
+
+    def publish_new_generation():
+        publisher_started.set()
+        try:
+            publish_result.append(repository._set_repo_status(
+                7,
+                "run-b",
+                "indexed",
+                project_id=77,
+            ))
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            publisher_done.set()
+
+    writer = Thread(target=write_old_summary, daemon=True)
+    publisher = Thread(target=publish_new_generation, daemon=True)
+    writer.start()
+    assert writer_in_llm.wait(5)
+    publisher.start()
+    assert publisher_started.wait(5)
+
+    # Publication must not even open its DB transaction while the stale writer
+    # owns the project lock.
+    assert publish_connection.call_count == 0
+    assert not publisher_done.is_set()
+
+    release_writer.set()
+    writer.join(5)
+    publisher.join(5)
+
+    assert not writer.is_alive()
+    assert not publisher.is_alive()
+    assert errors == []
+    assert publish_result == [(True, "run-a")]
+    assert any(
+        "ON DUPLICATE KEY UPDATE summary" in entry.args[0]
+        for entry in upsert_cursor.execute.call_args_list
+    )
+    assert any(
+        entry.args[0].startswith("DELETE FROM project_memory")
+        and entry.args[1] == (77,)
+        for entry in publish_cursor.execute.call_args_list
+    )
 
 
 def test_cleanup_orphan_memory_vectors_removes_missing_project_or_memory(monkeypatch):
