@@ -1,4 +1,4 @@
-"""Retrieval-only tools used by the experimental tool-calling Q&A graph.
+"""Retrieval-only tools used by the Agentic Q&A graph.
 
 The tools in this module never write the user-facing answer. They only return
 bounded evidence plus an artifact containing provenance/debug information. The
@@ -15,7 +15,12 @@ from langgraph.prebuilt import InjectedState
 
 from ..graph import get_project_memory
 from . import mysql_search, qa_engine
-from .query_intent import _fetch_overview_context
+from .sql_project_state import fetch_project_overview_context
+
+
+# Keep the private alias for test and tool-local compatibility. The old router
+# module is not a runtime dependency anymore.
+_fetch_overview_context = fetch_project_overview_context
 
 
 MemoryCategory = Literal["decision", "action", "issue", "risk", "all"]

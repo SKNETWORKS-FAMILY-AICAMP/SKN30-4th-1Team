@@ -1,9 +1,4 @@
-"""Experimental tool-calling Q&A graph.
-
-One orchestrator model selects retrieval-only tools and writes the final answer.
-The legacy query router remains available behind ``PAIM_QUERY_ROUTING_MODE`` so
-the experiment can be disabled without removing code.
-"""
+"""Agentic tool-calling Q&A graph for the production query path."""
 
 from __future__ import annotations
 
@@ -172,7 +167,11 @@ def build_agentic_qa_graph(model=None, max_tool_rounds: Optional[int] = None):
 _agentic_app = None
 
 
-def _initial_messages(question: str, history: Optional[list]) -> list[BaseMessage]:
+def _initial_messages(
+    question: str,
+    history: Optional[list],
+    attachment_context: str = "",
+) -> list[BaseMessage]:
     messages: list[BaseMessage] = [SystemMessage(content=ORCHESTRATOR_SYSTEM_PROMPT)]
     for item in (history or [])[-qa_engine.MAX_HISTORY:]:
         content = str(item.get("content", "")).strip()
@@ -182,6 +181,8 @@ def _initial_messages(question: str, history: Optional[list]) -> list[BaseMessag
             messages.append(AIMessage(content=content))
         else:
             messages.append(HumanMessage(content=content))
+    if attachment_context.strip():
+        messages.append(HumanMessage(content=attachment_context.strip()))
     messages.append(HumanMessage(content=question))
     return messages
 
@@ -247,11 +248,13 @@ def run_agentic_qa(
     project_id: int,
     question: str,
     history: Optional[list] = None,
+    attachment_context: str = "",
+    attachment_sources: Optional[list[str]] = None,
     *,
     model=None,
     max_tool_rounds: Optional[int] = None,
 ) -> dict:
-    """Run the experimental orchestrator and preserve the existing API contract."""
+    """Run the Agentic orchestrator and preserve the existing API contract."""
     global _agentic_app
     if model is not None or max_tool_rounds is not None:
         app = build_agentic_qa_graph(model=model, max_tool_rounds=max_tool_rounds)
@@ -261,7 +264,15 @@ def run_agentic_qa(
         app = _agentic_app
     output = app.invoke({
         "project_id": project_id,
-        "messages": _initial_messages(question, history),
+        "messages": _initial_messages(question, history, attachment_context),
         "tool_rounds": 0,
     })
-    return _collect_result(output["messages"], output.get("tool_rounds", 0))
+    result = _collect_result(output["messages"], output.get("tool_rounds", 0))
+    if attachment_sources:
+        merged_sources = list(attachment_sources) + list(result["sources"])
+        result["sources"] = list(dict.fromkeys(
+            source for source in merged_sources if source
+        ))[:5]
+    if attachment_sources:
+        result["debug"]["attachments"] = list(attachment_sources)
+    return result

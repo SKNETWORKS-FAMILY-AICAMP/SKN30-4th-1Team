@@ -15,7 +15,6 @@ load_dotenv()
 import chromadb
 from langchain_chroma import Chroma
 from langchain_openai import OpenAIEmbeddings
-from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from pydantic import BaseModel, Field
@@ -614,9 +613,8 @@ def _build_context(
     debug dict는 프론트엔드 디버그 expander에 표시됨.
 
     history_mode: 이력 질문이면 supersede 체인을 컨텍스트에 포함한다.
-    None이면 자체 감지(라우팅 결과를 안 넘기는 호출자 — deprecated answer() 호환).
-    scope·토큰은 graph.run_qa()가 최초 질문 기준으로 고정해 넘기는 것이 정본 —
-    재검색 루프의 재작성 질문이 predicate를 뒤집지 못하게 하기 위함이다.
+    None이면 호출 시점의 질문으로 이력 의도를 감지한다. 호출자가 history mode와
+    scope·토큰을 명시하면 그 값을 그대로 사용한다.
     """
     if history_mode is None:
         history_mode = history_intent.detect_history_intent(question)
@@ -862,44 +860,3 @@ def _build_context(
 
     parts = [p for p in [mysql_ctx, chroma_ctx] if p]
     return "\n\n".join(parts), sources, debug
-
-
-def answer(
-    project_id: int,
-    question: str,
-    history: List[Dict] = None,
-    route: str = None,
-) -> Dict:
-    """질문에 대한 답변을 생성하는 메인 함수 (LangChain RAG).
-    1. 항상 MySQL(구조화) + ChromaDB(원문 맥락) 두 소스를 교차 조회
-    2. _build_context로 컨텍스트 조합
-    3. 대화 히스토리 + 컨텍스트를 LangChain 체인에 전달해 답변 생성
-    route 인자는 호환성 위해 유지하나 항상 'both'로 동작한다.
-
-    DEPRECATED (폐기 예정): Streamlit 데모 전용 함수. 정본 출력 경로는 graph.run_qa()이며
-    프론트가 /query에 연결되면 이 함수의 호출자는 사라진다. Streamlit 폐기와 함께 삭제할 것.
-    엔진 부품(_build_context / _get_chain)은 run_qa가 계속 쓰므로 이 함수만 지운다.
-    신규 호출부는 answer() 대신 graph.run_qa()를 사용하라.
-    """
-    context, sources, debug = _build_context(project_id, question)
-
-    # 대화 히스토리를 MAX_HISTORY 턴으로 잘라 LangChain 메시지로 변환
-    hist_msgs = []
-    for m in (history or [])[-MAX_HISTORY:]:
-        if m.get("role") == "assistant":
-            hist_msgs.append(AIMessage(content=m["content"]))
-        else:
-            hist_msgs.append(HumanMessage(content=m["content"]))
-
-    answer_text = _get_chain().invoke({
-        "history": hist_msgs,
-        "context": context,
-        "question": question,
-    })
-
-    return {
-        "answer":  answer_text,
-        "sources": sources,
-        "route":   "both",
-        "debug":   debug,
-    }

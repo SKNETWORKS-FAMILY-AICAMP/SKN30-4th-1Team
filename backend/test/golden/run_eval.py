@@ -738,17 +738,14 @@ def collect_e0(project_id: int, question: str) -> tuple[list[str], dict]:
 
 
 def collect_e2_e2e(project_id: int, question: str) -> tuple[list[str], dict]:
-    """실서비스 그대로: 라우터 감지 → predicate 고정 → _build_context →
-    graph.qa_node와 동일하게 [프로젝트 메모리] 접두 조립(리뷰 R-005)."""
-    from backend.graph import _resolve_history_state, get_project_memory
-    from backend.retriever.query_intent import classify_question
-    decision = classify_question(question)
-    mode, scope, tokens, effective = _resolve_history_state(
-        question, None, decision.history_mode)
+    """Agentic evidence retrieval: history context → hybrid search → summary."""
+    from backend.graph import get_project_memory
+    from backend.retriever.history_context import resolve_history_context
+    mode, scope, tokens, effective = resolve_history_context(question)
     contexts, debug = _build_context_configured(
         project_id, effective, history_mode=mode,
         history_scope=scope, history_topic_tokens=tokens)
-    # 실서비스(graph.qa_node)는 프로젝트 메모리 요약을 컨텍스트 앞에 얹는다.
+    # Agentic search_project_evidence도 프로젝트 메모리 요약을 근거 앞에 얹는다.
     # 프로젝트 메모리는 파일 출처가 없는 요약이라 source_labels(인용 근거 집합)는
     # 바꾸지 않고 생성 컨텍스트에만 영향을 준다.
     parts = []
@@ -758,16 +755,16 @@ def collect_e2_e2e(project_id: int, question: str) -> tuple[list[str], dict]:
     if debug.get("rendered_context"):
         parts.append(debug["rendered_context"])
     debug["rendered_context"] = "\n\n".join(parts)
-    debug["route"] = decision.route
-    debug["router_stage"] = decision.router_stage
+    debug["route"] = "semantic"
+    debug["router_stage"] = "agentic_evidence_tool"
     return contexts, debug
 
 
 def make_collect_e2_oracle(expected_history: bool):
     def collect(project_id: int, question: str) -> tuple[list[str], dict]:
-        from backend.graph import _resolve_history_state
-        mode, scope, tokens, effective = _resolve_history_state(
-            question, None, expected_history)
+        from backend.retriever.history_context import resolve_history_context
+        mode, scope, tokens, effective = resolve_history_context(
+            question, history_mode=expected_history)
         return _build_context_configured(
             project_id, effective, history_mode=mode,
             history_scope=scope, history_topic_tokens=tokens)
@@ -1564,42 +1561,39 @@ def cmd_audit(args) -> None:
     if args.no_langsmith:
         disable_langsmith()
     questions = [q for q in load_golden() if q["corpus"] == corpus]  # 30문항
-    from backend.retriever.query_intent import classify_question
+    from backend.retriever.history_context import resolve_history_context
 
     RESULTS_DIR.mkdir(exist_ok=True)
-    audit_path = RESULTS_DIR / f"routing_audit_{corpus}_{phase}_{runid}.csv"
-    route_match = 0
+    audit_path = RESULTS_DIR / f"agentic_history_audit_{corpus}_{phase}_{runid}.csv"
     hist_expected = [q for q in questions if q["expected_history_mode"]]
     hist_detected = 0
     with open(audit_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
-        writer.writerow(["corpus", "qid", "tag", "question", "expected_route",
-                         "actual_route", "router_stage", "expected_history",
-                         "actual_history", "route_match", "history_match"])
+        writer.writerow(["corpus", "qid", "tag", "question", "legacy_expected_route",
+                         "runtime_path", "history_scope", "expected_history",
+                         "actual_history", "history_match"])
         for q in questions:
-            decision = classify_question(q["question"])
-            r_ok = decision.route == q["expected_route"]
-            h_ok = decision.history_mode == q["expected_history_mode"]
-            route_match += int(r_ok)
-            if q["expected_history_mode"] and decision.history_mode:
+            mode, scope, _, _ = resolve_history_context(q["question"])
+            h_ok = mode == q["expected_history_mode"]
+            if q["expected_history_mode"] and mode:
                 hist_detected += 1
             writer.writerow([corpus, q["qid"], q["tag"], q["question"],
-                             q["expected_route"], decision.route,
-                             decision.router_stage, q["expected_history_mode"],
-                             decision.history_mode, r_ok, h_ok])
-    routing_accuracy = round(route_match / len(questions), 3)
+                             q["expected_route"], "tool_agent",
+                             scope or "", q["expected_history_mode"],
+                             mode, h_ok])
     detect_rate = (round(hist_detected / len(hist_expected), 3)
                    if hist_expected else "")
-    # summary의 해당 코퍼스 행들에 병합(upsert)
+    # Agentic runtime has no fixed router label. Preserve the old column as N/A
+    # so historical router results and current history checks do not mix.
     writer_obj = SummaryWriter(RESULTS_DIR / "summary.csv")
     for config in MAIN_CONFIGS:
         writer_obj.upsert({
             "run_id": runid, "corpus": corpus, "config": config, "phase": phase,
-            "routing_accuracy": routing_accuracy,
+            "routing_accuracy": "N/A",
             "history_detect_rate": detect_rate,
         })
-    print(f"[완료] audit {corpus}: 라우팅 정확도 {routing_accuracy}, "
-          f"이력 감지율 {detect_rate} → {audit_path.name}")
+    print(f"[완료] Agentic history audit {corpus}: 이력 감지율 {detect_rate} "
+          f"→ {audit_path.name}")
 
 
 def cmd_report(args) -> None:

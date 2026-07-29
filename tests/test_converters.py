@@ -433,14 +433,14 @@ def test_query_attachment_handles_corrupted_docx_without_500():
     conn.cursor.return_value.__enter__.return_value.fetchone.return_value = {"id": 1}
     captured = {}
 
-    def fake_run_qa(**kwargs):
+    def fake_run_agentic_qa(**kwargs):
         captured.update(kwargs)
         return {"answer": "답", "sources": [], "debug": {}}
 
     client = TestClient(app, raise_server_exceptions=False)
     with patch("backend.api.query.require_project_access"), \
          patch("backend.api.query.get_connection", return_value=conn), \
-         patch("backend.api.query.run_qa", side_effect=fake_run_qa):
+         patch("backend.api.query.run_agentic_qa", side_effect=fake_run_agentic_qa):
         response = client.post(
             "/api/v1/projects/1/query",
             json={
@@ -486,7 +486,7 @@ def test_query_attachment_replaces_rejected_docx_with_placeholder(monkeypatch):
     """R001·R2B01: 질의 첨부에서 거절된 DOCX는 본문으로 쓰이지 않고 대체된다.
 
     이전 테스트는 `status_code in (200, 404, 500)`이라 사실상 아무것도 보장하지
-    않았다(500까지 성공으로 간주). 프로젝트 존재와 run_qa를 정상 mock해서
+    않았다(500까지 성공으로 간주). 프로젝트 존재와 Agentic Q&A를 정상 mock해서
     거절된 첨부가 실제로 placeholder가 되는지 단언한다.
     """
     import base64
@@ -503,14 +503,14 @@ def test_query_attachment_replaces_rejected_docx_with_placeholder(monkeypatch):
     conn.cursor.return_value.__enter__.return_value.fetchone.return_value = {"id": 1}
     captured = {}
 
-    def fake_run_qa(**kwargs):
+    def fake_run_agentic_qa(**kwargs):
         captured.update(kwargs)
         return {"answer": "답", "sources": [], "debug": {}}
 
     client = TestClient(app, raise_server_exceptions=False)
     with patch("backend.api.query.require_project_access"), \
          patch("backend.api.query.get_connection", return_value=conn), \
-         patch("backend.api.query.run_qa", side_effect=fake_run_qa):
+         patch("backend.api.query.run_agentic_qa", side_effect=fake_run_agentic_qa):
         response = client.post(
             "/api/v1/projects/1/query",
             json={

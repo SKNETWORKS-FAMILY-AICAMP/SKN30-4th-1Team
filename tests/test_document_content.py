@@ -184,25 +184,25 @@ def test_query_applies_same_fixture_before_db_and_llm(filename, data, valid, exp
     with patch("backend.api.query.require_project_access"), patch(
         "backend.api.query.get_connection", return_value=conn
     ) as get_connection, patch(
-        "backend.api.query.run_qa", return_value={"answer": "ok", "debug": {}}
-    ) as run_qa:
+        "backend.api.query.run_agentic_qa", return_value={"answer": "ok", "debug": {}}
+    ) as run_agentic_qa:
         response = _client.post("/api/v1/projects/1/query", json=payload)
 
     if filename in CONVERSION_FAILURE_FILENAMES:
         # 검증을 통과한 파일의 변환 실패는 질의를 막지 않는다(관대한 첨부 정책).
         assert response.status_code == 200
         assert get_connection.called
-        run_qa.assert_called_once()
+        run_agentic_qa.assert_called_once()
     elif not valid:
         assert response.status_code == 415
         assert response.json()["detail"]["code"] == INVALID_DOCUMENT_CODE
         get_connection.assert_not_called()
-        run_qa.assert_not_called()
+        run_agentic_qa.assert_not_called()
     else:
         # query는 empty attachment를 명시적 placeholder로 유지하는 기존 계약이다.
         assert response.status_code == 200
         assert get_connection.called
-        run_qa.assert_called_once()
+        run_agentic_qa.assert_called_once()
 
 
 def test_sensitive_pdf_parser_warning_is_absent_from_shared_and_endpoint_logs(caplog):
@@ -229,7 +229,7 @@ def test_sensitive_pdf_parser_warning_is_absent_from_shared_and_endpoint_logs(ca
     with patch("backend.api.query.require_project_access"), patch(
         "backend.api.query.get_connection", return_value=query_conn
     ), patch(
-        "backend.api.query.run_qa", return_value={"answer": "ok", "debug": {}}
+        "backend.api.query.run_agentic_qa", return_value={"answer": "ok", "debug": {}}
     ):
         query_response = _client.post(
             "/api/v1/projects/1/query",

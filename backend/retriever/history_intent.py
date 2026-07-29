@@ -1,8 +1,8 @@
 """이력(history) 질문 감지 — 말단 모듈.
 
 "왜 바뀌었어?", "원래 계획은?" 류 질문을 감지해 supersede 체인 포함 여부를
-결정한다. retriever 내부 모듈을 import하지 않아 어디서든(query_intent,
-graph, qa_engine) 순환 없이 import할 수 있다. kiwipiepy는 외부 라이브러리이며
+결정한다. retriever 내부 모듈을 import하지 않아 Agentic 검색 Tool과
+qa_engine에서 순환 없이 import할 수 있다. kiwipiepy는 외부 라이브러리이며
 함수 내부에서 지연 import한다 — 모듈 import 시점 의존성 없음.
 """
 import re

@@ -19,15 +19,8 @@ from ..document_content import (
 )
 from ..pipeline.extractor import extract
 from ..pipeline.ingestor import ingest
-from ..graph import update_project_memory, run_qa
+from ..graph import update_project_memory
 from ..agentic_graph import run_agentic_qa
-from ..retriever import history_intent
-from ..retriever.query_intent import (
-    SemanticFallback,
-    answer_filter_lookup,
-    answer_overview,
-    classify_question,
-)
 from ..pipeline.converters import ConversionError, ErrorCode, convert
 from .auth import require_project_access
 from ..rate_limit import RATE_LIMIT_QUERY, authenticated_user_key, limiter
@@ -58,9 +51,13 @@ class QueryRequest(BaseModel):
     attachments: List[QueryAttachment] = []
 
 
-def _agentic_routing_enabled() -> bool:
-    """Feature flag for the disposable tool-routing experiment."""
-    return os.getenv("PAIM_QUERY_ROUTING_MODE", "agentic").strip().lower() != "legacy"
+def _warn_ignored_legacy_routing_mode() -> None:
+    """Keep the existing env name observable while the runtime is Agentic-only."""
+    if os.getenv("PAIM_QUERY_ROUTING_MODE", "").strip().lower() == "legacy":
+        logger.warning(
+            "legacy_query_routing_mode_ignored",
+            extra={"code": "LEGACY_QUERY_ROUTING_MODE_IGNORED"},
+        )
 
 
 def _clip_attachment_text(text: str, limit: int, marker: str) -> str:
@@ -141,6 +138,7 @@ def _prepare_attachment_context(attachments: List[QueryAttachment]) -> tuple[str
 @limiter.limit(RATE_LIMIT_QUERY, key_func=authenticated_user_key)
 def query(request: Request, project_id: int, body: QueryRequest):
     require_project_access(project_id)
+    _warn_ignored_legacy_routing_mode()
     attachment_context, attachment_sources = _prepare_attachment_context(body.attachments)
     conn = get_connection()
     try:
@@ -151,71 +149,20 @@ def query(request: Request, project_id: int, body: QueryRequest):
     finally:
         conn.close()
 
-    # 질문 의도가 명확하면 SQL/조망형 경로를 쓰고, 아니면 기존 LangGraph RAG로 폴백한다.
+    # Agentic 오케스트레이터가 하나 이상의 검색 Tool을 호출하고 최종 답변을 작성한다.
+    # 첨부는 저장하지 않는 임시 Evidence로만 같은 질문의 LLM 메시지에 포함한다.
     try:
-        if attachment_context:
-            # 첨부 경로는 라우터(classify_question)를 타지 않으므로 이력 감지를 직접 호출한다.
-            result = run_qa(
-                project_id=project_id,
-                question=body.question,
-                history=body.history,
-                attachment_context=attachment_context,
-                attachment_sources=attachment_sources,
-                history_mode=history_intent.detect_history_intent(body.question),
-            )
-            result["route"] = "semantic"
-            debug = result.get("debug") or {}
-            debug["route"] = "semantic"
-            debug["router_stage"] = "attachment"
-            result["debug"] = debug
-            return result
-
-        if _agentic_routing_enabled():
-            try:
-                return run_agentic_qa(project_id, body.question, body.history)
-            except Exception:
-                # Tool calling is not guaranteed for every local OpenAI-compatible
-                # model. Keep the endpoint useful and ground the fallback in the
-                # existing hybrid semantic retriever rather than the brittle router.
-                logger.warning(
-                    "agentic_qa_fallback",
-                    extra={"project_id": project_id, "code": "AGENTIC_QA_FALLBACK"},
-                )
-                result = run_qa(
-                    project_id=project_id,
-                    question=body.question,
-                    history=body.history,
-                    history_mode=history_intent.detect_history_intent(body.question),
-                )
-                result["route"] = "semantic"
-                debug = result.get("debug") or {}
-                debug["route"] = "semantic"
-                debug["router_stage"] = "tool_agent_fallback"
-                result["debug"] = debug
-                return result
-
-        decision = classify_question(body.question, body.history)
-        if decision.route == "filter_lookup":
-            try:
-                return answer_filter_lookup(
-                    project_id, body.question, body.history, decision.router_stage
-                )
-            except SemanticFallback:
-                pass
-        elif decision.route == "overview":
-            return answer_overview(project_id, body.question, decision.router_stage)
-
-        result = run_qa(
+        result = run_agentic_qa(
             project_id=project_id,
             question=body.question,
             history=body.history,
-            history_mode=decision.history_mode,
+            attachment_context=attachment_context,
+            attachment_sources=attachment_sources,
         )
         result["route"] = "semantic"
         debug = result.get("debug") or {}
         debug["route"] = "semantic"
-        debug["router_stage"] = decision.router_stage
-        debug["router_model_tier"] = "fast" if decision.router_stage == "llm" else None
+        debug["router_stage"] = "tool_agent"
         result["debug"] = debug
         return result
     except Exception:

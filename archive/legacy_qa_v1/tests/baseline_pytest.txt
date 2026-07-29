@@ -1,0 +1,8 @@
+# Executed in a detached worktree at legacy-qa-v1-baseline-20260729.
+tests/test_graph.py
+tests/test_query_intent.py
+tests/test_history_intent.py
+tests/test_semantic_retrieval.py
+tests/test_qa_citation.py
+tests/test_qa_supersede_context.py
+tests/test_query_attachments.py

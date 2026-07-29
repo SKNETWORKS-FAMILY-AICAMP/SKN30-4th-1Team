@@ -342,10 +342,9 @@ def test_bm25_tie_input_order_invariant_without_dense(monkeypatch):
     assert all(c["dense_rank"] is None for c in debug_fwd["chroma_chunks"])
 
 
-def test_chain_only_context_visible_to_verify_node(monkeypatch):
+def test_chain_only_context_remains_visible_to_agentic_retrieval(monkeypatch):
     """round-1 R-004: 일반 슬롯 0행 + 체인 행만 있는 컨텍스트(전 행 superseded 순환)가
-    debug.mysql_rows에 반영되어 verify_answer_node가 컨텍스트 있음으로 판정한다."""
-    from backend.graph import verify_answer_node
+    Agentic evidence tool에 전달될 debug.mysql_rows에 반영되어야 한다."""
 
     cycle = [
         _row(1, "결정 알파", superseded_by=2, date="2026-01-01"),
@@ -356,8 +355,7 @@ def test_chain_only_context_visible_to_verify_node(monkeypatch):
 
     assert len(debug["mysql_rows"]) == 3
     assert {r["content"] for r in debug["mysql_rows"]} == {"결정 알파", "결정 베타", "결정 감마"}
-    verdict = verify_answer_node({"debug": debug, "answer": "결정 경위 답변"})
-    assert verdict["answer_ok"] is True
+    assert bool(debug["mysql_rows"] or debug["chroma_chunks"]) is True
 
 
 def test_rewrite_suffix_selects_same_component_ids(monkeypatch):

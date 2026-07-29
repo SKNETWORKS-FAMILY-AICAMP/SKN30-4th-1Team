@@ -212,7 +212,7 @@
       <li><a href="#b-pipeline">3.3 pipeline</a></li>
       <li><a href="#b-reconciler">3.4 reconciler</a></li>
       <li><a href="#b-retriever">3.5 retriever</a></li>
-      <li><a href="#b-graph">3.6 graph.py</a></li>
+      <li><a href="#b-graph">3.6 graphs</a></li>
       <li><a href="#b-chat">3.7 chat</a></li>
       <li><a href="#b-llm">3.8 llm</a></li>
       <li><a href="#b-github">3.9 github</a></li>
@@ -231,7 +231,7 @@
 
   <main>
     <h1>PaiM 시스템 아키텍처</h1>
-    <p class="subtitle">대상 브랜치: <code>main</code> &nbsp;·&nbsp; 갱신: 2026-07-04 &nbsp;·&nbsp; 코드베이스 실측 기준 (README와 다르면 이 문서 우선)</p>
+    <p class="subtitle">갱신: 2026-07-29 &nbsp;·&nbsp; 코드베이스 실측 기준 (README와 다르면 이 문서 우선)</p>
 
     <h2 id="overview">1. 개요</h2>
     <p>PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 프로젝트 메모리"로 통합하는 LLM 기반 AI 프로젝트 매니저입니다.</p>
@@ -239,7 +239,7 @@
       <li><strong>입력</strong>: 회의록(.md/.txt/.pdf) 업로드, GitHub repo 연결</li>
       <li><strong>처리</strong>: LLM이 결정(decision)·액션(action)·이슈(issue)·리스크(risk)로 구조화 추출 → MySQL + ChromaDB 이중 저장</li>
       <li><strong>관찰</strong>: repo sync 시 머지된 PR과 열린 액션을 LangGraph 기반 Reconciler가 대조해 완료 제안 생성 (승인은 항상 사람)</li>
-      <li><strong>질의</strong>: 질문 의도(조회/조망/탐색)에 따라 SQL 직조회 / 요약 직접 응답 / 하이브리드 RAG로 라우팅</li>
+      <li><strong>질의</strong>: 프로젝트 Q&amp;A는 Agentic 오케스트레이터가 SQL 상태·하이브리드 근거·프로젝트 조망 도구를 필요에 따라 호출</li>
       <li><strong>UI</strong>: Tauri + React 데스크톱 앱 (macOS/Windows). Streamlit 프로토타입 UI는 레거시로 유지</li>
     </ul>
 
@@ -257,9 +257,9 @@
                  ┌──────────┘       │       └──────────┐
                  ▼                  ▼                  ▼
      ┌────────────────────┐ ┌──────────────┐ ┌──────────────────┐
-     │ pipeline (추출/적재) │ │ retriever    │ │ reconciler        │
-     │ extractor·ingestor  │ │ 의도 라우팅·   │ │ PR↔액션 대조 그래프 │
-     └─────────┬───────────┘ │ 하이브리드 RAG │ └─────────┬──────────┘
+     │ pipeline (추출/적재) │ │ Agentic Q&amp;A  │ │ reconciler        │
+     │ extractor·ingestor  │ │ 도구·하이브리드 │ │ PR↔액션 대조 그래프 │
+     └─────────┬───────────┘ │ RAG            │ └─────────┬──────────┘
                │             └──────┬───────┘           │
                ▼                    ▼                    ▼
      ┌────────────────┐   ┌────────────────┐   ┌────────────────────┐
@@ -279,7 +279,8 @@
 │
 ├── <span class="path">backend/</span>                         <span class="c"># FastAPI 백엔드 (Python, LangChain/LangGraph)</span>
 │   ├── main.py                      <span class="c"># FastAPI 앱 진입점 — 라우터 등록, CORS, lifespan(기동 시 복구 작업)</span>
-│   ├── graph.py                     <span class="c"># LangGraph 오케스트레이션 — 적재 그래프 + 질의 그래프(검증/재검색 루프)</span>
+│   ├── graph.py                     <span class="c"># 적재 그래프 + 프로젝트 메모리 갱신</span>
+│   ├── agentic_graph.py             <span class="c"># 프로젝트 Q&amp;A 도구 오케스트레이터</span>
 │   ├── startup.py                   <span class="c"># 서버 재시작 시 stale 문서/repo 작업 복구, watchdog</span>
 │   ├── storage.py                   <span class="c"># 업로드 파일 저장 추상화 (로컬 FS 기본, S3 등 교체 대비)</span>
 │   │
@@ -305,11 +306,12 @@
 │   ├── reconciler/                  <span class="c"># 머지 PR ↔ 열린 액션 완료 제안</span>
 │   │   └── pr_actions.py            <span class="c"># LangGraph 배치 매칭 — 워터마크 증분, high/medium+근거만 제안</span>
 │   │
-│   ├── retriever/                   <span class="c"># 질의 라우팅 및 검색</span>
-│   │   ├── query_intent.py          <span class="c"># 질문 의도(조회/조망/탐색) 분기 진입점</span>
-│   │   ├── classifier.py            <span class="c"># 키워드 기반 mysql/chroma/both 경로 규칙 분류기</span>
-│   │   ├── mysql_search.py          <span class="c"># 조회형 — 필터 추출 → SQL 직조회 (정답 보장)</span>
-│   │   ├── chroma_search.py         <span class="c"># 탐색형 — 벡터 유사도 검색</span>
+│   ├── retriever/                   <span class="c"># Agentic Q&amp;A 도구와 검색 부품</span>
+│   │   ├── qa_tools.py              <span class="c"># 근거 검색·구조화 조회·조망 Tool 정의</span>
+│   │   ├── sql_project_state.py     <span class="c"># 조망 Tool의 읽기 전용 SQL 상태 조립</span>
+│   │   ├── history_context.py       <span class="c"># 이력 검색 범위 해석</span>
+│   │   ├── mysql_search.py          <span class="c"># 구조화 상태 조회</span>
+│   │   ├── chroma_search.py         <span class="c"># 벡터 유사도 검색</span>
 │   │   ├── qa_engine.py             <span class="c"># 하이브리드 RAG — BM25(한국어)+dense RRF 융합</span>
 │   │   └── memory_vector.py         <span class="c"># memory 테이블 행을 ChromaDB에 보조 인덱싱(백필 포함)</span>
 │   │
@@ -421,26 +423,28 @@ ingestor.ingest()
       <li>제안은 <code>memory_suggestions</code>에 삽입, 사람이 accept/reject로 확정할 때만 <code>memory.completed_at</code> 갱신</li>
     </ul>
 
-    <h3 id="b-retriever">3.5 retriever — 기억에 묻기 (의도 라우터)</h3>
+    <h3 id="b-retriever">3.5 retriever — Agentic Q&amp;A 도구</h3>
+    <p><code>agentic_graph.py</code>의 오케스트레이터가 다음 읽기 전용 도구를 하나 이상 호출하고, 반환된 근거로 최종 답변을 작성합니다. <code>overview</code>는 별도 경로나 공개 route가 아니라 필요한 도구를 조합하는 질문 유형입니다.</p>
     <table>
-      <tr><th>경로</th><th>판단</th><th>처리</th></tr>
-      <tr><td>조회형</td><td><code>classifier.py</code> 키워드 규칙 → mysql</td><td><code>mysql_search.py</code>: 필터 추출 → SQL 직조회 → 결정론 템플릿 (정답 보장)</td></tr>
-      <tr><td>조망형</td><td>전체 요약 요청</td><td>project_memory 응축 요약을 검색 없이 직접 컨텍스트로 사용</td></tr>
-      <tr><td>탐색형</td><td>chroma / both</td><td><code>qa_engine.py</code>: 멀티쿼리 재표현 → BM25(한국어 형태소)+dense RRF 융합 → 출처 있는 LLM 답변</td></tr>
+      <tr><th>도구</th><th>처리</th></tr>
+      <tr><td><code>search_project_evidence</code></td><td><code>qa_engine.py</code>의 멀티쿼리·BM25(한국어 형태소) + dense RRF로 특정 사실·이유·변경 이력을 검색</td></tr>
+      <tr><td><code>query_structured_memory</code></td><td><code>mysql_search.py</code>로 제한된 구조화 상태 목록·개수를 조회</td></tr>
+      <tr><td><code>get_project_overview</code></td><td><code>sql_project_state.py</code>로 프로젝트 요약과 유효 Action Plan을 근거로 제공</td></tr>
     </table>
-    <p><code>memory_vector.py</code>는 <code>memory</code> 행 생성/수정 시 ChromaDB에도 보조 인덱싱해 탐색형 검색이 구조화 데이터도 커버하도록 합니다.</p>
+    <p><code>memory_vector.py</code>는 <code>memory</code> 행 생성/수정 시 ChromaDB에도 보조 인덱싱해 하이브리드 검색이 구조화 데이터도 커버하도록 합니다.</p>
 
-    <h3 id="b-graph">3.6 graph.py — LangGraph 오케스트레이션</h3>
-    <p>State(TypedDict)를 노드 간 계약으로 고정하고, 노드는 <code>pipeline</code>/<code>retriever</code> 로직을 재사용하는 얇은 래퍼입니다.</p>
+    <h3 id="b-graph">3.6 그래프</h3>
     <ul>
       <li><strong>적재 그래프</strong>: 문서 → [저장] → [메모리] → END</li>
-      <li><strong>질의 그래프</strong>: 질문 → [섹션(stub)] → [Q&A] → [검증] → (부족 시 재검색, <code>MAX_RETRY=1</code>) → [계획 제안] → [검증] → (부족 시 재기획) → [응답] → END — 계획 생성 실패해도 답변은 유지(best-effort)</li>
+      <li><strong>Q&amp;A 그래프</strong>: 질문(+ 임시 첨부 근거) → 오케스트레이터 LLM → Tool 호출/결과 반환 반복 → 근거 기반 최종 답변</li>
+      <li>기존 라우터 분기·검증·재기획 그래프는 <code>archive/legacy_qa_v1</code>의 비교 기준선으로만 보존합니다.</li>
     </ul>
 
     <h3 id="b-chat">3.7 chat — 암호화 세션 대화</h3>
     <ul>
       <li><code>session_store.py</code>: 세션·메시지를 <code>security/session_crypto.py</code>(AES-256-GCM, <code>SESSION_MEMORY_KEY</code>)로 암호화 저장</li>
       <li><code>context_builder.py</code>: tiktoken으로 토큰 수 계산 후 시스템 프롬프트+요약+최근 메시지를 토큰 예산 안에서 조립</li>
+      <li>세션 질의 API는 이 router cutover 범위 밖이며, 별도 직접 LLM 경로를 유지합니다.</li>
     </ul>
 
     <h3 id="b-llm">3.8 llm — 프로바이더 추상화</h3>
@@ -520,13 +524,16 @@ ingestor.ingest()
   → 승인 시에만 memory.completed_at 갱신</div>
 
     <h3>8.3 질문 → 답변</h3>
-    <div class="flow-step">사용자 질문 (api/query.py 또는 chat/router.py 세션 질의)
-  → retriever/query_intent.py: 의도 분류
-      ├─ 조회형 → mysql_search.py → SQL 직조회 → 결정론 템플릿
-      ├─ 조망형 → project_memory 응축 요약 직접 사용
-      └─ 탐색형 → qa_engine.py → 멀티쿼리 + BM25/dense RRF → LLM 생성 → graph.py 검증 루프
-  → (세션 질의) context_builder.py 로 암호화 대화 이력과 함께 컨텍스트 조립
-  → 답변 + 출처 반환</div>
+    <div class="flow-step">프로젝트 Q&amp;A (api/query.py)
+  → 첨부 검증·텍스트 추출 (있을 때만, 임시 근거)
+  → agentic_graph.py: 오케스트레이터 LLM
+      → search_project_evidence / query_structured_memory / get_project_overview
+      → 도구 근거 반환 → 필요한 경우 다음 도구 호출
+  → 최종 답변 + 출처 반환 (<code>route</code>는 호환성상 <code>semantic</code>)
+
+세션 질의 (chat/router.py)
+  → context_builder.py 로 암호화 대화 이력과 함께 컨텍스트 조립
+  → 별도 직접 LLM 응답 경로 (이 router cutover 범위 밖)</div>
 
     <h3>8.4 델타 브리핑</h3>
     <div class="flow-step">앱 재오픈 (api/delta.py: GET/POST .../delta, .../briefing/delta)
@@ -538,7 +545,7 @@ ingestor.ingest()
     <ul>
       <li><strong>정확도 > 재현율</strong> — Reconciler의 완료 매칭은 애매하면 보고하지 않음. 놓친 제안은 다음 동기화나 사람이 잡을 수 있지만, 틀린 완료 처리는 신뢰를 무너뜨림.</li>
       <li><strong>파괴적 변경은 제안-승인, 추가는 자동</strong> — 메모리 적재는 자동, 완료 처리처럼 상태를 바꾸는 일은 반드시 사람의 승인을 거침 (human-in-the-loop).</li>
-      <li><strong>자기검증하는 답변 그래프</strong> — 탐색형 Q&A는 검색 → 답변 → 검증 → (부족 시) 질의 확장 후 재검색 → 계획 제안까지 도는 LangGraph. 계획 생성 실패해도 답변은 유지(best-effort).</li>
+      <li><strong>근거 우선 Agentic Q&amp;A</strong> — 오케스트레이터는 읽기 전용 도구를 하나 이상 호출해 근거를 확인한 뒤 답한다.</li>
       <li><strong>로컬 우선 + 암호화</strong> — 백엔드는 <code>127.0.0.1</code>에만 바인딩, 세션 대화는 AES-256-GCM 암호화 저장.</li>
     </ul>
 

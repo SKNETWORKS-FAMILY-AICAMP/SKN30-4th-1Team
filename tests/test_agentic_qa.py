@@ -329,3 +329,41 @@ def test_agent_can_combine_multiple_tools(monkeypatch):
     ]
     assert "박현우" in result["answer"]
     assert result["sources"] == ["meeting.md", "delay.md"]
+
+
+def test_attachment_is_temporary_agentic_evidence_and_a_returned_source(monkeypatch):
+    fake = _ToolCallingFake([
+        AIMessage(content="", tool_calls=[{
+            "name": "search_project_evidence",
+            "args": {
+                "query": "릴리즈명을 확인해줘",
+                "include_history": False,
+            },
+            "id": "call_evidence",
+            "type": "tool_call",
+        }]),
+        AIMessage(content="릴리즈명은 Bluefin입니다."),
+    ])
+    monkeypatch.setattr(qa_tools, "get_project_memory", lambda project_id: "")
+    monkeypatch.setattr(
+        qa_tools.qa_engine,
+        "_build_context",
+        lambda *args, **kwargs: ("프로젝트 근거", ["project.md"], {}),
+    )
+
+    result = run_agentic_qa(
+        1,
+        "릴리즈명을 확인해줘",
+        attachment_context="[첨부 자료]\n### note.txt\n(출처: note.txt)\n릴리즈명은 Bluefin",
+        attachment_sources=["note.txt"],
+        model=fake,
+    )
+
+    first_turn_text = "\n".join(
+        str(getattr(message, "content", ""))
+        for message in fake.invocations[0]
+    )
+    assert "[첨부 자료]" in first_turn_text
+    assert "릴리즈명은 Bluefin" in first_turn_text
+    assert result["sources"] == ["note.txt", "project.md"]
+    assert result["debug"]["attachments"] == ["note.txt"]

@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from backend.main import app
 
+
 _client = TestClient(app, raise_server_exceptions=False)
 
 
@@ -15,21 +16,24 @@ def _project_conn():
     return conn
 
 
-def test_query_attachment_goes_to_temporary_context_not_router():
-    """첨부가 있으면 라우터를 우회하고 run_qa 임시 컨텍스트로만 전달한다."""
+def test_query_attachment_becomes_temporary_agentic_evidence():
     encoded = base64.b64encode("첨부 전용 사실: 릴리즈명은 Bluefin".encode()).decode()
 
-    def fake_run_qa(**kwargs):
+    def fake_run_agentic_qa(**kwargs):
         assert kwargs["attachment_sources"] == ["note.txt"]
         assert "[첨부 자료]" in kwargs["attachment_context"]
         assert "릴리즈명은 Bluefin" in kwargs["attachment_context"]
-        return {"answer": "Bluefin", "sources": kwargs["attachment_sources"], "debug": {}}
+        return {
+            "answer": "Bluefin",
+            "sources": kwargs["attachment_sources"],
+            "route": "semantic",
+            "debug": {"attachments": kwargs["attachment_sources"]},
+        }
 
     with patch("backend.api.query.require_project_access"), \
          patch("backend.api.query.get_connection", return_value=_project_conn()), \
-         patch("backend.api.query.classify_question", side_effect=AssertionError("router called")), \
-         patch("backend.api.query.run_qa", side_effect=fake_run_qa):
-        resp = _client.post(
+         patch("backend.api.query.run_agentic_qa", side_effect=fake_run_agentic_qa):
+        response = _client.post(
             "/api/v1/projects/1/query",
             json={
                 "question": "릴리즈명이 뭐야?",
@@ -37,65 +41,58 @@ def test_query_attachment_goes_to_temporary_context_not_router():
             },
         )
 
-    assert resp.status_code == 200
-    body = resp.json()
+    assert response.status_code == 200
+    body = response.json()
     assert body["answer"] == "Bluefin"
     assert body["sources"] == ["note.txt"]
     assert body["route"] == "semantic"
-    assert body["debug"]["router_stage"] == "attachment"
+    assert body["debug"]["router_stage"] == "tool_agent"
+    assert body["debug"]["attachments"] == ["note.txt"]
 
 
-def test_attachment_path_passes_history_mode():
-    """TASK-004: 첨부 경로는 라우터를 우회하므로 이력 감지를 직접 호출해 전달한다."""
-    encoded = base64.b64encode("참고 자료".encode()).decode()
+def test_query_without_attachment_still_uses_agentic_orchestrator():
     captured = {}
 
-    def fake_run_qa(**kwargs):
+    def fake_run_agentic_qa(**kwargs):
         captured.update(kwargs)
-        return {"answer": "답", "sources": [], "debug": {}}
+        return {"answer": "답", "sources": [], "route": "semantic", "debug": {}}
 
     with patch("backend.api.query.require_project_access"), \
          patch("backend.api.query.get_connection", return_value=_project_conn()), \
-         patch("backend.api.query.run_qa", side_effect=fake_run_qa):
-        resp = _client.post(
-            "/api/v1/projects/1/query",
-            json={
-                "question": "배포 주기가 왜 바뀌었어?",
-                "attachments": [{"filename": "note.txt", "content_base64": encoded}],
-            },
-        )
-
-    assert resp.status_code == 200
-    assert captured["history_mode"] is True
-
-
-def test_general_path_passes_router_history_mode():
-    """TASK-004: 일반 경로는 라우터가 확정한 history_mode를 run_qa에 그대로 전달한다."""
-    from backend.retriever.query_intent import QueryRoute
-
-    captured = {}
-
-    def fake_run_qa(**kwargs):
-        captured.update(kwargs)
-        return {"answer": "답", "sources": [], "debug": {}}
-
-    decision = QueryRoute(route="semantic", router_stage="history_rule", history_mode=True)
-    with patch("backend.api.query.require_project_access"), \
-         patch("backend.api.query.get_connection", return_value=_project_conn()), \
-         patch.dict("os.environ", {"PAIM_QUERY_ROUTING_MODE": "legacy"}), \
-         patch("backend.api.query.classify_question", return_value=decision), \
-         patch("backend.api.query.run_qa", side_effect=fake_run_qa):
-        resp = _client.post(
+         patch("backend.api.query.run_agentic_qa", side_effect=fake_run_agentic_qa):
+        response = _client.post(
             "/api/v1/projects/1/query",
             json={"question": "배포 주기가 왜 바뀌었어?"},
         )
 
-    assert resp.status_code == 200
-    assert captured["history_mode"] is True
+    assert response.status_code == 200
+    assert captured == {
+        "project_id": 1,
+        "question": "배포 주기가 왜 바뀌었어?",
+        "history": [],
+        "attachment_context": "",
+        "attachment_sources": [],
+    }
+
+
+def test_legacy_routing_mode_cannot_bypass_agentic_runtime():
+    with patch("backend.api.query.require_project_access"), \
+         patch("backend.api.query.get_connection", return_value=_project_conn()), \
+         patch.dict("os.environ", {"PAIM_QUERY_ROUTING_MODE": "legacy"}), \
+         patch(
+             "backend.api.query.run_agentic_qa",
+             return_value={"answer": "답", "sources": [], "route": "semantic", "debug": {}},
+         ) as run_agentic_qa:
+        response = _client.post(
+            "/api/v1/projects/1/query",
+            json={"question": "현재 상태는?"},
+        )
+
+    assert response.status_code == 200
+    run_agentic_qa.assert_called_once()
 
 
 def test_query_attachment_context_marks_truncation(monkeypatch):
-    """첨부 텍스트 상한 초과 시 앞부분만 넣고 잘림 표시를 남긴다."""
     from backend.api import query as query_api
 
     monkeypatch.setattr(query_api, "_ATTACHMENT_MAX_CHARS_PER_FILE", 5)

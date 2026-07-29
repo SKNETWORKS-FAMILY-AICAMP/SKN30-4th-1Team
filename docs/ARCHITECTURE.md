@@ -1,6 +1,6 @@
 # PaiM 시스템 아키텍처
 
-> 갱신: 2026-07-04 · 대상 브랜치: `main`
+> 갱신: 2026-07-29
 >
 > 이 문서는 현재 저장소의 실제 디렉토리/코드 구조를 기준으로 작성되었습니다. `README.md`의 구조 설명이 이 문서와 다르다면 이 문서(코드 기준)를 우선하세요.
 
@@ -11,7 +11,7 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 - **입력**: 회의록(.md/.txt/.pdf) 업로드, GitHub repo 연결
 - **처리**: LLM이 결정(decision)·액션(action)·이슈(issue)·리스크(risk)로 구조화 추출 → MySQL + ChromaDB에 이중 저장
 - **관찰**: repo sync 시 머지된 PR과 열린 액션을 LangGraph 기반 Reconciler가 대조해 완료 제안 생성 (승인은 항상 사람)
-- **질의**: 질문 의도(조회/조망/탐색)에 따라 SQL 직조회 / 요약 직접 응답 / 하이브리드 RAG 중 하나로 라우팅
+- **질의**: 프로젝트 Q&A는 Agentic 오케스트레이터가 SQL 상태·하이브리드 근거·프로젝트 조망 도구를 필요에 따라 호출
 - **UI**: Tauri + React 데스크톱 앱 (macOS/Windows), Streamlit 프로토타입 UI는 레거시로 유지
 
 ```
@@ -29,8 +29,8 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
                  ┌──────────┘       │       └──────────┐
                  ▼                  ▼                  ▼
      ┌────────────────────┐ ┌──────────────┐ ┌──────────────────┐
-     │ pipeline (추출/적재) │ │ retriever    │ │ reconciler        │
-     │ extractor·ingestor  │ │ 의도 라우팅·   │ │ PR↔액션 대조 그래프 │
+     │ pipeline (추출/적재) │ │ Agentic Q&A  │ │ reconciler        │
+     │ extractor·ingestor  │ │ 도구·하이브리드 │ │ PR↔액션 대조 그래프 │
      └─────────┬───────────┘ │ 하이브리드 RAG │ └─────────┬──────────┘
                │             └──────┬───────┘           │
                ▼                    ▼                    ▼
@@ -54,7 +54,8 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 │
 ├── backend/                         # FastAPI 백엔드 (Python, LangChain/LangGraph)
 │   ├── main.py                      # FastAPI 앱 진입점 — 라우터 등록, CORS, lifespan(기동 시 복구 작업)
-│   ├── graph.py                     # LangGraph 오케스트레이션 — 적재 그래프 + 질의 그래프(검증/재검색 루프)
+│   ├── graph.py                     # 적재 그래프 + 프로젝트 메모리 갱신
+│   ├── agentic_graph.py             # 프로젝트 Q&A 도구 오케스트레이터
 │   ├── startup.py                   # 서버 재시작 시 stale 문서/repo 작업 복구, watchdog
 │   ├── storage.py                   # 업로드 파일 저장 추상화 (로컬 FS 기본, S3 등 교체 대비)
 │   │
@@ -80,12 +81,13 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 │   ├── reconciler/                  # 머지 PR ↔ 열린 액션 완료 제안
 │   │   └── pr_actions.py            # LangGraph 배치 매칭 — 워터마크 기반 증분 처리, high/medium 확신 + 근거만 제안
 │   │
-│   ├── retriever/                   # 질의 라우팅 및 검색
-│   │   ├── query_intent.py          # 질문 의도(조회/조망/탐색) 분기 진입점
-│   │   ├── classifier.py            # 키워드 기반 mysql/chroma/both 경로 규칙 분류기
-│   │   ├── mysql_search.py          # 조회형 질문 → 필터 추출 → SQL 직조회 (정답 보장)
-│   │   ├── chroma_search.py         # 탐색형 질문 → 벡터 유사도 검색
-│   │   ├── qa_engine.py             # 하이브리드 RAG — BM25(한국어 형태소)+dense RRF 융합, LangChain 체인
+│   ├── retriever/                   # Agentic Q&A 도구와 검색 부품
+│   │   ├── qa_tools.py              # 근거 검색·구조화 조회·조망 Tool 정의
+│   │   ├── sql_project_state.py     # 조망 Tool의 읽기 전용 SQL 상태 조립
+│   │   ├── history_context.py       # 이력 검색 범위 해석
+│   │   ├── mysql_search.py          # 구조화 상태 조회
+│   │   ├── chroma_search.py         # 벡터 유사도 검색
+│   │   ├── qa_engine.py             # 하이브리드 RAG — BM25(한국어 형태소)+dense RRF 융합
 │   │   └── memory_vector.py         # memory 테이블 행을 ChromaDB에 보조 인덱싱(백필 포함)
 │   │
 │   ├── llm/                         # LLM 프로바이더 추상화 (fast/quality 티어링)
@@ -209,29 +211,29 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 - LLM 매칭은 `high`/`medium` 확신 + 한 줄 근거가 있을 때만 제안 생성 — 애매하면 보고하지 않음(정확도 > 재현율)
 - 제안은 `memory_suggestions` 테이블에 삽입되며, 사람이 `suggestion.py`의 accept/reject로 확정할 때만 `memory.completed_at`이 갱신됨
 
-### 3.5 retriever — 기억에 묻기 (의도 라우터)
+### 3.5 retriever — Agentic Q&A 도구
 
-`query_intent.py`가 진입점이며 질문을 3가지 경로로 분기합니다.
+`agentic_graph.py`의 오케스트레이터가 다음 읽기 전용 도구를 하나 이상 호출하고, 반환된 근거로 최종 답변을 작성합니다. `overview`는 별도 경로나 공개 route가 아니라 필요한 도구를 조합하는 질문 유형입니다.
 
-| 경로 | 판단 | 처리 |
-| --- | --- | --- |
-| 조회형 | `classifier.py` 키워드 규칙 → mysql | `mysql_search.py`: 필터 추출 → SQL 직조회 → 결정론 템플릿 (정답 보장) |
-| 조망형 | 전체 요약 요청 | project_memory 응축 요약을 검색 없이 직접 컨텍스트로 사용 |
-| 탐색형 | chroma / both | `qa_engine.py`: 멀티쿼리 재표현 → BM25(한국어 형태소, kiwipiepy) + dense(OpenAI 임베딩) RRF 융합 → 출처 있는 LLM 답변 |
+| 도구 | 처리 |
+| --- | --- |
+| `search_project_evidence` | `qa_engine.py`의 멀티쿼리·BM25(한국어 형태소) + dense RRF로 특정 사실·이유·변경 이력을 검색 |
+| `query_structured_memory` | `mysql_search.py`로 제한된 구조화 상태 목록·개수를 조회 |
+| `get_project_overview` | `sql_project_state.py`로 프로젝트 요약과 유효 Action Plan을 근거로 제공 |
 
-`memory_vector.py`는 `memory` 테이블 행이 생성/수정될 때 ChromaDB에도 보조 인덱싱해 탐색형 검색이 구조화 데이터도 커버하도록 합니다.
+`memory_vector.py`는 `memory` 테이블 행이 생성/수정될 때 ChromaDB에도 보조 인덱싱해 하이브리드 검색이 구조화 데이터도 커버하도록 합니다.
 
-### 3.6 graph.py — LangGraph 오케스트레이션
+### 3.6 그래프
 
-State(TypedDict)를 노드 간 계약으로 고정하고, 노드는 `pipeline`/`retriever`의 로직을 재사용하는 얇은 래퍼로 구성됩니다.
-
-- **적재 그래프**: 문서 → [저장] → [메모리] → END
-- **질의 그래프**: 질문 → [섹션(stub)] → [Q&A] → [검증] → (부족 시 재검색 루프, `MAX_RETRY=1`) → [계획 제안] → [검증] → (부족 시 재기획 루프) → [응답] → END — 계획 생성이 실패해도 답변 자체는 유지되는 best-effort 설계
+- `graph.py` 적재 그래프: 문서 → [저장] → [메모리] → END
+- `agentic_graph.py` Q&A 그래프: 질문(+ 임시 첨부 근거) → 오케스트레이터 LLM → Tool 호출/결과 반환 반복 → 근거 기반 최종 답변
+- 기존 라우터 분기·검증·재기획 그래프는 [archive/legacy_qa_v1](../archive/legacy_qa_v1/README.md)의 비교 기준선으로만 보존합니다.
 
 ### 3.7 chat — 암호화 세션 대화
 
 - `session_store.py`: 세션·메시지를 `security/session_crypto.py`(AES-256-GCM, `SESSION_MEMORY_KEY`)로 암호화 저장
 - `context_builder.py`: tiktoken으로 토큰 수를 계산해 시스템 프롬프트+요약+최근 메시지를 토큰 예산 안에서 조립
+- 세션 질의 API는 이 router cutover의 범위 밖이며, 별도 직접 LLM 경로를 유지합니다.
 
 ### 3.8 llm — 프로바이더 추상화
 
@@ -320,13 +322,16 @@ repo 연결/동기화 (api/repository.py: POST .../sync)
 ### 8.3 질문 → 답변
 
 ```
-사용자 질문 (api/query.py 또는 chat/router.py 세션 질의)
-  → retriever/query_intent.py: 의도 분류
-      ├─ 조회형 → mysql_search.py → SQL 직조회 → 결정론 템플릿
-      ├─ 조망형 → project_memory 응축 요약 직접 사용
-      └─ 탐색형 → qa_engine.py → 멀티쿼리 + BM25/dense RRF → LLM 생성 → graph.py 검증 루프
-  → (세션 질의의 경우) context_builder.py 로 암호화 대화 이력과 함께 컨텍스트 조립
-  → 답변 + 출처 반환
+프로젝트 Q&A (api/query.py)
+  → 첨부 검증·텍스트 추출 (있을 때만, 임시 근거)
+  → agentic_graph.py: 오케스트레이터 LLM
+      → search_project_evidence / query_structured_memory / get_project_overview
+      → 도구 근거 반환 → 필요한 경우 다음 도구 호출
+  → 최종 답변 + 출처 반환 (`route`는 호환성상 `semantic`)
+
+세션 질의 (chat/router.py)
+  → context_builder.py 로 암호화 대화 이력과 함께 컨텍스트 조립
+  → 별도 직접 LLM 응답 경로 (이 router cutover 범위 밖)
 ```
 
 ### 8.4 델타 브리핑
@@ -342,7 +347,7 @@ repo 연결/동기화 (api/repository.py: POST .../sync)
 
 - **정확도 > 재현율**: Reconciler의 완료 매칭은 애매하면 보고하지 않음(high/medium 확신 + 근거 필수). 놓친 제안은 다음 동기화나 사람이 잡을 수 있지만, 틀린 완료 처리는 신뢰를 무너뜨림.
 - **파괴적 변경은 제안-승인, 추가는 자동**: 메모리 적재는 자동이지만 완료 처리처럼 상태를 바꾸는 일은 반드시 사람의 승인을 거침 (human-in-the-loop).
-- **자기검증하는 답변 그래프**: 탐색형 Q&A는 검색 → 답변 → 검증 → (부족하면) 질의 확장 후 재검색 → 계획 제안까지 도는 LangGraph. 계획 생성 실패해도 답변은 유지(best-effort).
+- **근거 우선 Agentic Q&A**: 오케스트레이터는 읽기 전용 도구를 하나 이상 호출해 근거를 확인한 뒤 답한다. 검증·재계획 같은 안전장치는 평가 결과가 필요할 때만 추가한다.
 - **로컬 우선 + 암호화**: 백엔드는 `127.0.0.1`에만 바인딩, 세션 대화는 AES-256-GCM 암호화 저장.
 
 ## 10. CI/CD

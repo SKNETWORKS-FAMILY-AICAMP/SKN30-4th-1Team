@@ -1,14 +1,15 @@
-# Q&A 채팅 페이지: 질문 입력 → qa_engine.answer() 호출 → 답변 + 검색 메타 렌더링.
+# Q&A 채팅 페이지: 질문 입력 → Agentic Q&A 호출 → 답변 + 검색 메타 렌더링.
 # 프로젝트별 대화 히스토리를 session_state에 유지해 멀티턴 대화를 지원.
 import html
 import streamlit as st
-from backend.retriever.qa_engine import answer
+from backend.agentic_graph import run_agentic_qa
 
 
 ROUTE_LABEL = {
     "mysql":  "구조화 DB 검색",
     "chroma": "벡터 유사도 검색",
     "both":   "DB + 벡터 복합 검색",
+    "semantic": "Agentic 검색",
 }
 
 
@@ -57,7 +58,7 @@ def render(project_id: int, project_name: str):
     with st.chat_message("assistant"):
         with st.spinner("답변 생성 중..."):
             try:
-                result = answer(
+                result = run_agentic_qa(
                     project_id=project_id,
                     question=question,
                     history=api_history,

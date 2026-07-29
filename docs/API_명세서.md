@@ -1244,8 +1244,9 @@ Git 로그 텍스트를 동기 처리해 메모리로 추출·적재한다. (최
 | `history` | array | - | `{role, content}` 대화 이력 |
 | `attachments` | array | - | 첨부 자료 `{filename, content_base64}`. `.md`/`.markdown`/`.txt`/`.docx`/`.pdf`, **파일당 최대 8 MB · 전체 합계 8 MB** |
 
-> **`attachments`**: 첨부가 있으면 라우터를 우회해 항상 `route: "semantic"`으로
-> 처리된다. 형식 미지원 시 **400**, 8 MB 초과 시 **413**.
+> **`attachments`**: 형식·크기를 검증하고 텍스트를 추출한 뒤, 같은 Agentic Q&A 실행의
+> 이번 질문 전용 임시 근거로 전달한다. 별도 라우트나 영구 저장 분기는 없다. 형식 미지원 시
+> **400**, 내용 불일치 시 **415**, 8 MB 초과 시 **413**.
 > 첨부 상한(`QUERY_ATTACHMENT_MAX_FILE_BYTES` = 8 MB)은 문서 업로드 상한
 > (`PROJECT_DOCUMENT_MAX_FILE_BYTES` = 10 MB)과 다른 값이다.
 
@@ -1253,13 +1254,13 @@ Git 로그 텍스트를 동기 처리해 메모리로 추출·적재한다. (최
 ```json
 {
   "answer": "현재 가장 큰 리스크는 API 계약 변경 가능성입니다. (출처: planning.pdf)",
-  "plan": [
-    "API 계약 변경 사항을 프론트엔드 팀과 공유한다",
-    "영향받는 엔드포인트 목록을 작성한다"
-  ],
+  "plan": [],
   "sources": ["planning.pdf", "meeting_notes.md"],
   "route": "semantic",
   "debug": {
+    "router_stage": "tool_agent",
+    "tools_used": ["search_project_evidence"],
+    "tool_rounds": 1,
     "filters": { "category": null },
     "mysql_rows": [
       { "category": "risk", "content": "...", "source": "planning.pdf", "source_label": "planning.pdf" }
@@ -1271,17 +1272,13 @@ Git 로그 텍스트를 동기 처리해 메모리로 추출·적재한다. (최
 }
 ```
 
-> **`route`**: 질문 분류 결과. `semantic`(RAG 검색·첨부) \| `filter_lookup`
-> (구조화 조회 템플릿) \| `overview`(프로젝트 조망 요약) 중 하나. (구 `both`
-> 값은 더 이상 사용하지 않는다.) 세 경로 모두 `answer`·`plan`·`sources`·
-> `route`·`debug`를 반환한다(필드 생략 없음). 다만 **route별로 내용이 다르다**:
-> `filter_lookup`·`overview`는 `plan`이 항상 빈 배열 `[]`이고, `debug`에
-> `mysql_rows`/`chroma_chunks`가 없으며(각각 `rows` 개수 / `overview` 통계),
-> 답변이 템플릿·요약이라 인라인 `(출처:)` 마커가 없을 수 있다. `semantic`만
-> `debug.mysql_rows`/`chroma_chunks`와 마커를 제공한다 — 상세는
-> [HANDOVER_CITATION_FRONTEND.md](HANDOVER_CITATION_FRONTEND.md).
+> **`route`**: 기존 클라이언트 호환을 위해 이 엔드포인트는 항상 `semantic`을 반환한다.
+> 질문 유형은 Agentic 오케스트레이터가 `search_project_evidence`,
+> `query_structured_memory`, `get_project_overview`를 필요에 따라 조합해 처리한다.
+> 사용한 도구와 라운드는 `debug.tools_used`/`debug.tool_rounds`에서 확인할 수 있으며,
+> 검색 도구에 따라 `debug.mysql_rows`/`debug.chroma_chunks`가 포함될 수 있다.
 >
-> **`plan`**: LLM이 답변을 근거로 생성한 다음 할 일 목록 (best-effort — 생성 실패 시 빈 배열 `[]` 반환).
+> **`plan`**: 하위호환을 위해 유지하는 필드이며 현재 기본 Agentic Q&A에서는 빈 배열 `[]`이다.
 >
 > **`answer` 출처 마커 (2026-07-22 추가)**: 답변 본문에 근거의 출처가
 > `(출처: 파일명)` 형태로 포함된다. 프론트는 이 마커를 파싱해 출처 칩/링크로

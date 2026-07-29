@@ -1244,7 +1244,7 @@
         <span class="method POST">POST</span>
         <span class="path">/api/v1/projects/{project_id}/query</span>
       </div>
-      <div class="endpoint-desc">프로젝트 기반 자연어 질의. MySQL 구조화 검색 + ChromaDB 벡터 검색 혼합.</div>
+      <div class="endpoint-desc">프로젝트 기반 자연어 질의. Agentic 오케스트레이터가 읽기 전용 근거 도구를 조합한다.</div>
       <div class="endpoint-body">
         <div class="res-label">Request Body</div>
         <pre><code>{
@@ -1257,14 +1257,17 @@
     { "filename": "meeting.md", "content_base64": "&lt;base64&gt;" }
   ]
 }</code></pre>
-        <div class="res-label">첨부 <code>attachments</code>: <code>.md</code>/<code>.markdown</code>/<code>.txt</code>/<code>.docx</code>/<code>.pdf</code>, <strong>파일당 최대 8 MB · 전체 합계 8 MB</strong>. 형식 미지원 400, 내용 불일치 415, 초과 413. 첨부 시 항상 <code>route: "semantic"</code>.</div>
+        <div class="res-label">첨부 <code>attachments</code>: <code>.md</code>/<code>.markdown</code>/<code>.txt</code>/<code>.docx</code>/<code>.pdf</code>, <strong>파일당 최대 8 MB · 전체 합계 8 MB</strong>. 검증·텍스트 추출 뒤 같은 Agentic Q&amp;A의 이번 질문 전용 근거로 전달된다. 형식 미지원 400, 내용 불일치 415, 초과 413.</div>
         <div class="res-label"><span class="s200">200</span> OK</div>
         <pre><code>{
   "answer": "현재 가장 큰 리스크는 API 계약 변경 가능성입니다. (출처: planning.pdf)",
-  "plan": ["API 계약 변경 사항을 프론트엔드 팀과 공유한다"],
+  "plan": [],
   "sources": ["planning.pdf", "meeting_notes.md"],
   "route": "semantic",
   "debug": {
+    "router_stage": "tool_agent",
+    "tools_used": ["search_project_evidence"],
+    "tool_rounds": 1,
     "filters": { "category": null },
     "mysql_rows": [
       { "category": "risk", "content": "...", "source": "planning.pdf", "source_label": "planning.pdf" }
@@ -1281,7 +1284,7 @@
           없음. <code>debug.*.source_label</code>이 추가됐다(무시 가능). 상세: HANDOVER_CITATION_FRONTEND.md
         </div>
         <div class="endpoint-desc">
-          <strong>route</strong>: <code>semantic</code>(RAG·첨부) · <code>filter_lookup</code>(구조화 조회) · <code>overview</code>(조망 요약) 중 하나(구 <code>both</code> 제거). 세 경로 모두 <code>plan</code>·<code>debug</code>를 반환한다(생략 없음). 단 <code>filter_lookup</code>·<code>overview</code>는 <code>plan</code>이 항상 <code>[]</code>이고 <code>debug</code>에 <code>mysql_rows</code>/<code>chroma_chunks</code>가 없으며(각 <code>rows</code>/<code>overview</code>), 인라인 <code>(출처:)</code> 마커가 없을 수 있다.
+          <strong>route</strong>: 기존 클라이언트 호환을 위해 이 엔드포인트는 항상 <code>semantic</code>을 반환한다. 질문 유형은 Agentic 오케스트레이터가 <code>search_project_evidence</code>, <code>query_structured_memory</code>, <code>get_project_overview</code>를 필요에 따라 조합해 처리한다. 사용한 도구와 라운드는 <code>debug.tools_used</code>/<code>debug.tool_rounds</code>에서 확인할 수 있으며, 검색 도구에 따라 <code>debug.mysql_rows</code>/<code>debug.chroma_chunks</code>가 포함될 수 있다. <code>plan</code>은 하위호환 필드이며 현재 기본 Agentic Q&amp;A에서는 <code>[]</code>이다.
         </div>
         <div class="res-label"><span class="s503">503</span> Service Unavailable</div>
         <pre><code>{ "detail": "Q&amp;A 처리 중 오류가 발생했습니다. 서버 로그를 확인하세요." }</code></pre>
