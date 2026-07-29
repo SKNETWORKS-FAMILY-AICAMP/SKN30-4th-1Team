@@ -165,12 +165,12 @@ export function ProjectPortfolioPage({
       </header>
 
       {isLoading ? (
-        <div className="portfolio-state" role="status">
+        <div className="portfolio-state" data-tone="loading" role="status">
           <Spinner size="md" />
           <p>{language === "ko" ? "프로젝트 현황을 계산하는 중" : "Calculating project health"}</p>
         </div>
       ) : error ? (
-        <div className="portfolio-state" role="alert">
+        <div className="portfolio-state" data-tone="error" role="alert">
           <AlertTriangle aria-hidden="true" size={22} />
           <p>{error}</p>
           <Button
@@ -193,6 +193,7 @@ export function ProjectPortfolioPage({
             return (
               <article
                 className="portfolio-card"
+                data-disabled={!localProject ? "true" : undefined}
                 data-health={overview.health}
                 key={`${overview.local_project_id ?? "server"}:${overview.id}`}
                 role="listitem"
@@ -296,8 +297,14 @@ export function ProjectPortfolioPage({
                     <span>{overview.member_count}</span>
                   </div>
                   <span className="portfolio-open">
-                    {language === "ko" ? "상세 보기" : "View details"}
-                    <ArrowRight aria-hidden="true" size={15} />
+                    {localProject
+                      ? language === "ko"
+                        ? "상세 보기"
+                        : "View details"
+                      : language === "ko"
+                        ? "이 기기에서 열 수 없음"
+                        : "Unavailable on this device"}
+                    {localProject ? <ArrowRight aria-hidden="true" size={15} /> : null}
                   </span>
                 </footer>
               </article>
@@ -305,7 +312,7 @@ export function ProjectPortfolioPage({
           })}
         </div>
       ) : (
-        <div className="portfolio-state">
+        <div className="portfolio-state" data-tone="empty">
           <FolderKanban aria-hidden="true" size={24} />
           <p>
             {query

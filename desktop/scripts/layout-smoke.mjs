@@ -3198,6 +3198,26 @@ async function verifySystemColorContract(send) {
         selectedTab.setAttribute('aria-selected', 'true');
         selectedTab.textContent = '자료';
         tabList.append(selectedTab);
+        const semanticPairDefinitions = {
+          action: ['var(--action-fg)', 'var(--surface)'],
+          bodyFaint: ['var(--faint)', 'var(--bg)'],
+          danger: ['var(--danger)', 'var(--surface)'],
+          focus: ['var(--focus-ring)', 'var(--bg)'],
+          issue: ['var(--issue-fg)', 'var(--surface)'],
+          risk: ['var(--risk-fg)', 'var(--surface)'],
+          selection: ['var(--text)', 'var(--selection-bg)'],
+          surfaceMuted: ['var(--muted)', 'var(--surface)'],
+          surfaceText: ['var(--text)', 'var(--surface)'],
+        };
+        const semanticPairProbes = Object.entries(semanticPairDefinitions).map(
+          ([name, [color, background]]) => {
+            const probe = document.createElement('span');
+            probe.dataset.semanticPair = name;
+            probe.style.color = color;
+            probe.style.background = background;
+            return probe;
+          },
+        );
         shell.append(
           mutedProbe,
           textProbe,
@@ -3205,6 +3225,7 @@ async function verifySystemColorContract(send) {
           avatarProbe,
           authLoadingProbe,
           tabList,
+          ...semanticPairProbes,
         );
 
         const shellStyle = getComputedStyle(shell);
@@ -3215,6 +3236,15 @@ async function verifySystemColorContract(send) {
         const authLoadingStyle = getComputedStyle(authLoadingProbe);
         const authLoadingTextStyle = getComputedStyle(authLoadingText);
         const tabStyle = getComputedStyle(selectedTab);
+        const semanticContrasts = Object.fromEntries(
+          semanticPairProbes.map((probe) => {
+            const style = getComputedStyle(probe);
+            return [
+              probe.dataset.semanticPair,
+              contrastRatio(style.color, style.backgroundColor),
+            ];
+          }),
+        );
         const backgroundColor = shellStyle.backgroundColor;
         const value = {
           avatarContrast: contrastRatio(avatarStyle.color, avatarStyle.backgroundColor),
@@ -3231,6 +3261,7 @@ async function verifySystemColorContract(send) {
           prefersContrast: matchMedia('(prefers-contrast: more)').matches,
           prefersDark: matchMedia('(prefers-color-scheme: dark)').matches,
           rootTheme: document.documentElement.getAttribute('data-theme') || '',
+          semanticContrasts,
           selectedOutlineStyle: tabStyle.outlineStyle,
           selectedOutlineWidth: Number.parseFloat(tabStyle.outlineWidth || '0'),
           textColor,
@@ -3244,6 +3275,7 @@ async function verifySystemColorContract(send) {
         avatarProbe.remove();
         authLoadingProbe.remove();
         tabList.remove();
+        semanticPairProbes.forEach((probe) => probe.remove());
         return value;
       })()`,
     });
@@ -3283,6 +3315,10 @@ async function verifySystemColorContract(send) {
   if (
     value.explicitDark?.colorScheme !== "dark" ||
     value.explicitLight?.colorScheme !== "light" ||
+    value.explicitDark?.rootTheme !== "dark" ||
+    value.explicitLight?.rootTheme !== "light" ||
+    value.systemLight?.rootTheme ||
+    value.systemDark?.rootTheme ||
     value.explicitDark?.backgroundColor === value.explicitLight?.backgroundColor
   ) {
     failures.push("explicit light and dark settings should override the OS scheme");
@@ -3299,6 +3335,36 @@ async function verifySystemColorContract(send) {
     failures.push(
       "system theme secondary text, auth loading text, and fallback avatar should meet 4.5:1 contrast",
     );
+  }
+
+  const readablePairs = [
+    "bodyFaint",
+    "danger",
+    "selection",
+    "surfaceMuted",
+    "surfaceText",
+  ];
+  const nonTextIndicators = ["action", "focus", "issue", "risk"];
+  for (const [mode, snapshot] of [
+    ["system light", value.systemLight],
+    ["system dark", value.systemDark],
+    ["explicit light", value.explicitLight],
+    ["explicit dark", value.explicitDark],
+  ]) {
+    if (
+      readablePairs.some(
+        (pair) => (snapshot?.semanticContrasts?.[pair] ?? 0) < 4.5,
+      )
+    ) {
+      failures.push(`${mode} semantic text colors should meet 4.5:1 contrast`);
+    }
+    if (
+      nonTextIndicators.some(
+        (pair) => (snapshot?.semanticContrasts?.[pair] ?? 0) < 3,
+      )
+    ) {
+      failures.push(`${mode} focus and semantic indicators should meet 3:1 contrast`);
+    }
   }
 
   if (
@@ -3330,6 +3396,115 @@ async function verifySystemColorContract(send) {
   });
 
   debugLayout("system color contract", value);
+  return { value, failures };
+}
+
+// Windows WebView2에서 사용하는 UA와 유효 뷰포트로 네이티브 제목 표시줄
+// 배치가 앱 본문을 밀거나 가로 스크롤을 만들지 않는지 확인한다.
+async function verifyWindowsShellContract(send) {
+  await send("Emulation.setUserAgentOverride", {
+    platform: "Win32",
+    userAgent:
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+      "AppleWebKit/537.36 (KHTML, like Gecko) " +
+      "Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
+  });
+
+  const scenarios = [
+    { width: 1280, height: 820, deviceScaleFactor: 1 },
+    { width: 960, height: 680, deviceScaleFactor: 1 },
+    { width: 480, height: 340, deviceScaleFactor: 2 },
+  ];
+  const value = [];
+  const failures = [];
+
+  for (const scenario of scenarios) {
+    await send("Emulation.setDeviceMetricsOverride", {
+      ...scenario,
+      mobile: false,
+    });
+    await navigateAndWaitForSelector(send, APP_URL, ".windows-titlebar");
+    await sleep(180);
+
+    const result = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `(() => {
+        const shell = document.querySelector('.app-shell');
+        const titlebar = document.querySelector('.windows-titlebar');
+        const controls = [...document.querySelectorAll('.windows-titlebar-button')];
+        const sidebar = document.querySelector('.sidebar');
+        const chrome = document.querySelector('.app-chrome');
+        if (!shell || !titlebar || !sidebar || !chrome) return null;
+
+        const titlebarBox = titlebar.getBoundingClientRect();
+        const sidebarBox = sidebar.getBoundingClientRect();
+        const chromeBox = chrome.getBoundingClientRect();
+        return {
+          controlCount: controls.length,
+          controls: controls.map((control) => {
+            const box = control.getBoundingClientRect();
+            const hitTarget = document.elementFromPoint(
+              box.left + box.width / 2,
+              box.top + box.height / 2,
+            );
+            return {
+              height: box.height,
+              hitTarget: hitTarget === control || Boolean(hitTarget?.closest('.windows-titlebar-button')),
+              label: control.getAttribute('aria-label') || '',
+              width: box.width,
+            };
+          }),
+          documentScrollWidth: document.documentElement.scrollWidth,
+          innerWidth,
+          platform: shell.getAttribute('data-platform') || '',
+          shellGridRows: getComputedStyle(shell).gridTemplateRows,
+          sidebarTop: sidebarBox.top,
+          chromeTop: chromeBox.top,
+          titlebarHeight: titlebarBox.height,
+          titlebarLeft: titlebarBox.left,
+          titlebarRight: titlebarBox.right,
+          titlebarTitle: document.querySelector('.windows-titlebar-title')?.textContent || '',
+        };
+      })()`,
+    });
+    const snapshot = result.result.value;
+    value.push({ scenario, snapshot });
+    const label = `${scenario.width}x${scenario.height}@${scenario.deviceScaleFactor}`;
+
+    if (!snapshot || snapshot.platform !== "windows") {
+      failures.push(`${label} should render the Windows shell`);
+      continue;
+    }
+    if (
+      Math.abs(snapshot.titlebarHeight - 34) > 1 ||
+      Math.abs(snapshot.sidebarTop - 34) > 1 ||
+      Math.abs(snapshot.chromeTop - 34) > 1
+    ) {
+      failures.push(`${label} should reserve one 34px titlebar row above app content`);
+    }
+    if (
+      snapshot.controlCount !== 3 ||
+      snapshot.controls.some(
+        (control) =>
+          Math.abs(control.width - 46) > 1 ||
+          Math.abs(control.height - 34) > 1 ||
+          !control.hitTarget ||
+          !control.label,
+      )
+    ) {
+      failures.push(`${label} should expose three full-size labeled window controls`);
+    }
+    if (
+      snapshot.titlebarTitle !== "PaiM" ||
+      snapshot.titlebarLeft < -0.5 ||
+      snapshot.titlebarRight > snapshot.innerWidth + 0.5 ||
+      snapshot.documentScrollWidth > snapshot.innerWidth
+    ) {
+      failures.push(`${label} should keep the Windows titlebar inside the viewport`);
+    }
+  }
+
+  debugLayout("Windows shell contract", value);
   return { value, failures };
 }
 
@@ -13239,6 +13414,26 @@ async function verifyPromptFocusFlow(send) {
     returnByValue: true,
     expression: `document.activeElement === document.querySelector('[data-testid="project-detail-chat-composer"] textarea')`,
   });
+  const detailComposerSurfaceFocusResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const composer = document.querySelector('[data-testid="project-detail-chat-composer"]');
+      const input = composer?.querySelector('textarea');
+      const helper = composer?.querySelector('#project-detail-composer-helper');
+      input?.blur();
+      helper?.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true,
+        pointerId: 1,
+        pointerType: 'mouse',
+      }));
+      const style = input ? getComputedStyle(input) : null;
+      return {
+        focused: document.activeElement === input,
+        inputOutlineStyle: style?.outlineStyle || '',
+        inputOutlineWidth: Number.parseFloat(style?.outlineWidth || '0'),
+      };
+    })()`,
+  });
   const detailComposerLayoutResult = await send("Runtime.evaluate", {
     returnByValue: true,
     expression: `(() => {
@@ -13312,6 +13507,7 @@ async function verifyPromptFocusFlow(send) {
   const value = {
     initialFocused: initialFocusResult.result.value,
     detailComposerFocused: detailComposerFocusResult.result.value,
+    detailComposerSurfaceFocus: detailComposerSurfaceFocusResult.result.value,
     detailComposerLayout: detailComposerLayoutResult.result.value,
     reopenedChatFocused: reopenedChatFocusResult.result.value,
     afterSubmitFocused: afterSubmitFocusResult.result.value,
@@ -13324,6 +13520,14 @@ async function verifyPromptFocusFlow(send) {
 
   if (!value.detailComposerFocused) {
     failures.push("the project detail composer should accept focus");
+  }
+
+  if (!value.detailComposerSurfaceFocus?.focused ||
+      (value.detailComposerSurfaceFocus.inputOutlineStyle !== "none" &&
+        value.detailComposerSurfaceFocus.inputOutlineWidth > 0)) {
+    failures.push(
+      "the full project detail composer surface should focus its textarea without a nested outline",
+    );
   }
 
   if (!value.detailComposerLayout ||
@@ -14414,6 +14618,15 @@ try {
       result.failures.forEach((failure) => console.log(`  - ${failure}`));
     } else {
       console.log("PASS system theme, contrast, and forced-color contract");
+    }
+  } else if (process.env.PAIM_LAYOUT_FOCUS === "windows-shell") {
+    const result = await verifyWindowsShellContract(send);
+    if (result.failures.length > 0) {
+      hasFailures = true;
+      console.log("FAIL Windows shell contract");
+      result.failures.forEach((failure) => console.log(`  - ${failure}`));
+    } else {
+      console.log("PASS Windows shell at 100% and 200% effective viewports");
     }
   } else if (process.env.PAIM_LAYOUT_FOCUS === "query-lifecycle") {
     const focusedChecks = [
