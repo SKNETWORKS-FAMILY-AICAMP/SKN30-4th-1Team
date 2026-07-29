@@ -111,6 +111,13 @@ uv sync
 uv run uvicorn backend.main:app --port 8000
 ```
 
+Agentic 프로젝트 Q&A의 MVP 지원 계약은 공식 OpenAI API의
+`gpt-4.1-mini` 하나다. `.env`의 `LLM_PROVIDER=openai`와
+`OPENAI_MODEL=gpt-4.1-mini`를 유지하고 Q&A graph의 기본 모델은
+`get_agentic_qa_model()`로 생성해야 한다. 이 helper는 다른 provider/model 또는 사용자
+지정 OpenAI 호환 endpoint를 네트워크 호출 전에 명확한 설정 오류로 중단한다. 문서 추출
+등 일반 LLM factory의 기존 provider 분기는 제거하지 않았다.
+
 ### Windows 원클릭 실행 (`start-paim.bat`)
 
 uv와 Docker Desktop이 설치되어 있다면 저장소 클론 후 루트의 `start-paim.bat`을 더블클릭하는 것으로 위 백엔드 과정 전체가 자동 진행됩니다.
