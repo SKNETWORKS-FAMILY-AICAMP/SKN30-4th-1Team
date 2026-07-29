@@ -66,7 +66,7 @@ def test_accept_supersede_sets_superseded_by_from_evidence():
     conn, cur = _make_conn(fetchone=[row, _EXISTS, updated])
     with patch("backend.api.suggestion.require_project_access"), \
          patch("backend.retriever.memory_vector.delete_memory_vector") as mock_del, \
-         patch("backend.graph.refresh_project_memory_after_delete") as mock_refresh, \
+         patch("backend.project_memory.refresh_project_memory_after_delete") as mock_refresh, \
          patch("backend.api.suggestion.get_connection", return_value=conn):
         resp = _client.post("/api/v1/projects/1/suggestions/8/accept")
 
@@ -92,7 +92,7 @@ def test_accept_supersede_already_superseded_is_noop_on_memory():
     conn, cur = _make_conn(fetchone=[row, _EXISTS, updated])
     with patch("backend.api.suggestion.require_project_access"), \
          patch("backend.retriever.memory_vector.delete_memory_vector"), \
-         patch("backend.graph.refresh_project_memory_after_delete"), \
+         patch("backend.project_memory.refresh_project_memory_after_delete"), \
          patch("backend.api.suggestion.get_connection", return_value=conn):
         resp = _client.post("/api/v1/projects/1/suggestions/8/accept")
 
@@ -123,7 +123,7 @@ def test_accept_supersede_existence_check_requires_live_decision():
     conn, cur = _make_conn(fetchone=[row, _EXISTS, updated])
     with patch("backend.api.suggestion.require_project_access"), \
          patch("backend.retriever.memory_vector.delete_memory_vector"), \
-         patch("backend.graph.refresh_project_memory_after_delete"), \
+         patch("backend.project_memory.refresh_project_memory_after_delete"), \
          patch("backend.api.suggestion.get_connection", return_value=conn):
         resp = _client.post("/api/v1/projects/1/suggestions/8/accept")
 
@@ -171,7 +171,7 @@ def test_accept_supersede_validation_locks_superseding_row():
     conn, cur = _make_conn(fetchone=[row, _EXISTS, updated])
     with patch("backend.api.suggestion.require_project_access"), \
          patch("backend.retriever.memory_vector.delete_memory_vector"), \
-         patch("backend.graph.refresh_project_memory_after_delete"), \
+         patch("backend.project_memory.refresh_project_memory_after_delete"), \
          patch("backend.api.suggestion.get_connection", return_value=conn):
         resp = _client.post("/api/v1/projects/1/suggestions/8/accept")
 

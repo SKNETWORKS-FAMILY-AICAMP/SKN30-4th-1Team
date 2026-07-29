@@ -3,7 +3,6 @@ import concurrent.futures
 import os
 import threading
 import uuid
-from pathlib import Path
 
 import chromadb
 from fastapi import APIRouter

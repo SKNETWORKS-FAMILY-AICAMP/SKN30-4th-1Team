@@ -13,7 +13,7 @@ from typing import Annotated, Literal, Optional
 from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 
-from ..graph import get_project_memory
+from ..project_memory import get_project_memory
 from . import mysql_search, qa_engine
 from .sql_project_state import fetch_project_overview_context
 

@@ -49,12 +49,12 @@ def test_delete_repo_data_uses_key_free_delete():
     needs_key.assert_not_called()
 
 
-def test_upload_module_has_no_dead_chroma_helper():
+def test_documents_module_has_no_dead_chroma_helper():
     """`_delete_chroma_vectors` 는 호출부가 0인 죽은 코드였다.
 
     `quota._delete_doc_vectors` 가 같은 doc_id 조건으로 실제 삭제를 수행한다.
     되살아나면 키를 요구하는 경로가 다시 생기므로 부재를 고정한다.
     """
-    from backend.api import upload as upload_module
+    from backend.api import documents as documents_module
 
-    assert not hasattr(upload_module, "_delete_chroma_vectors")
+    assert not hasattr(documents_module, "_delete_chroma_vectors")

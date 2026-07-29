@@ -1,4 +1,3 @@
-import asyncio
 import base64
 import binascii
 import logging
@@ -17,22 +16,10 @@ from ..document_content import (
     supported_formats_label,
     validate_document_bytes,
 )
-from ..pipeline.extractor import extract
-from ..pipeline.ingestor import ingest
-from ..graph import update_project_memory
 from ..agentic_graph import run_agentic_qa
 from ..pipeline.converters import ConversionError, ErrorCode, convert
 from .auth import require_project_access
 from ..rate_limit import RATE_LIMIT_QUERY, authenticated_user_key, limiter
-from ..quota import (
-    cleanup_failed_reservation,
-    compensate_cancelled_document,
-    delete_document as quota_delete_document,
-    fail_document,
-    finalize_document,
-    require_upload_user,
-    reserve_document,
-)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -168,67 +155,3 @@ def query(request: Request, project_id: int, body: QueryRequest):
     except Exception:
         logger.error("qa_request_failed", extra={"project_id": project_id, "code": "QA_FAILED"})
         raise HTTPException(status_code=503, detail="Q&A 처리 중 오류가 발생했습니다. 서버 로그를 확인하세요.")
-
-
-class GitLogUpload(BaseModel):
-    content: str
-    source: str = "git log"
-    date: str = ""
-
-
-@router.post("/projects/{project_id}/git", status_code=201)
-def upload_git_log(project_id: int, body: GitLogUpload):
-    # 동기 처리 — documents.status 추적 없음. 향후 /documents 엔드포인트로 통합 예정
-    if not body.content.strip():
-        raise HTTPException(status_code=400, detail="content must not be empty")
-
-    user_id = require_upload_user()
-    require_project_access(project_id, min_role="member")
-    reservation = reserve_document(
-        project_id, user_id, len(body.content.encode("utf-8")), "virtual"
-    )
-    try:
-        finalized = finalize_document(reservation["reservation_id"], "git_log.txt", "git")
-    except BaseException:
-        cleanup_failed_reservation(reservation["reservation_id"])
-        raise
-    doc_id = finalized["doc_id"]
-
-    try:
-        items = extract(body.content, default_source=body.source)
-        ingest(
-            project_id=project_id,
-            doc_id=doc_id,
-            items=items,
-            raw_text=body.content,
-            source=body.source,
-            date=body.date,
-            doc_type="git",
-            processing_token=finalized["processing_token"],
-        )
-    except asyncio.CancelledError:
-        compensate_cancelled_document(doc_id)
-        raise
-    except Exception:
-        logger.error("git_ingest_failed", extra={"project_id": project_id, "code": "GIT_INGEST_FAILED"})
-        fail_document(doc_id, "GIT_INGEST_FAILED")
-        raise HTTPException(status_code=503, detail="Git 로그 처리 중 오류가 발생했습니다.")
-
-    for old_doc_id in finalized["old_doc_ids"]:
-        quota_delete_document(old_doc_id)
-
-    # 프로젝트 메모리 갱신 (best-effort — 요약 실패해도 업로드는 성공 처리)
-    try:
-        update_project_memory(project_id, items)
-    except Exception:
-        import logging
-        logging.getLogger(__name__).warning(
-            "git_project_memory_update_failed",
-            extra={"project_id": project_id, "code": "PROJECT_MEMORY_UPDATE_FAILED"},
-        )
-
-    counts = {"decision": 0, "action": 0, "issue": 0, "risk": 0}
-    for item in items:
-        counts[item.category] += 1
-
-    return {"doc_id": doc_id, "extracted": counts}

@@ -129,15 +129,15 @@ def _finalized():
 
 @pytest.mark.parametrize(("filename", "data", "valid", "expected"), DOCUMENT_CASES)
 def test_upload_applies_shared_fixture_before_db_and_storage(filename, data, valid, expected):
-    with patch("backend.api.upload.require_project_access"), patch(
-        "backend.api.upload.require_upload_user", return_value=1
+    with patch("backend.api.documents.require_project_access"), patch(
+        "backend.api.documents.require_upload_user", return_value=1
     ), patch(
-        "backend.api.upload.reserve_document", return_value=_reservation()
+        "backend.api.documents.reserve_document", return_value=_reservation()
     ) as reserve, patch(
-        "backend.api.upload.write_reserved_file"
+        "backend.api.documents.write_reserved_file"
     ) as write_file, patch(
-        "backend.api.upload.finalize_document", return_value=_finalized()
-    ), patch("backend.api.upload._process_upload") as process:
+        "backend.api.documents.finalize_document", return_value=_finalized()
+    ), patch("backend.api.documents._process_upload") as process:
         response = _client.post(
             "/api/v1/projects/1/documents",
             files={"file": (filename, data, "application/octet-stream")},
@@ -213,12 +213,12 @@ def test_sensitive_pdf_parser_warning_is_absent_from_shared_and_endpoint_logs(ca
     caplog.clear()
     assert extract_document_text("sensitive.pdf", data) == "A"
 
-    with patch("backend.api.upload.require_project_access"), patch(
-        "backend.api.upload.require_upload_user", return_value=1
-    ), patch("backend.api.upload.reserve_document", return_value=_reservation()), patch(
-        "backend.api.upload.write_reserved_file"
-    ), patch("backend.api.upload.finalize_document", return_value=_finalized()), patch(
-        "backend.api.upload._process_upload"
+    with patch("backend.api.documents.require_project_access"), patch(
+        "backend.api.documents.require_upload_user", return_value=1
+    ), patch("backend.api.documents.reserve_document", return_value=_reservation()), patch(
+        "backend.api.documents.write_reserved_file"
+    ), patch("backend.api.documents.finalize_document", return_value=_finalized()), patch(
+        "backend.api.documents._process_upload"
     ):
         upload_response = _client.post(
             "/api/v1/projects/1/documents",

@@ -279,7 +279,7 @@
 │
 ├── <span class="path">backend/</span>                         <span class="c"># FastAPI 백엔드 (Python, LangChain/LangGraph)</span>
 │   ├── main.py                      <span class="c"># FastAPI 앱 진입점 — 라우터 등록, CORS, lifespan(기동 시 복구 작업)</span>
-│   ├── graph.py                     <span class="c"># 적재 그래프 + 프로젝트 메모리 갱신</span>
+│   ├── project_memory.py            <span class="c"># 활성 memory 기반 프로젝트 요약 캐시</span>
 │   ├── agentic_graph.py             <span class="c"># 프로젝트 Q&amp;A 도구 오케스트레이터</span>
 │   ├── startup.py                   <span class="c"># 서버 재시작 시 stale 문서/repo 작업 복구, watchdog</span>
 │   ├── storage.py                   <span class="c"># 업로드 파일 저장 추상화 (로컬 FS 기본, S3 등 교체 대비)</span>
@@ -287,7 +287,8 @@
 │   ├── api/                         <span class="c"># REST 엔드포인트 (prefix: /api/v1)</span>
 │   │   ├── auth.py                  <span class="c"># 개발용 임시 인증 (DEV_USER_ID) — 4차 로드맵에서 정식 로그인으로 대체 예정</span>
 │   │   ├── project.py               <span class="c"># 프로젝트 CRUD</span>
-│   │   ├── upload.py                <span class="c"># 문서 업로드/삭제 + 메모리(결정/액션/이슈/리스크) CRUD</span>
+│   │   ├── documents.py             <span class="c"># 문서 업로드/삭제 + Git 로그 적재</span>
+│   │   ├── memory.py                <span class="c"># 수동 memory CRUD</span>
 │   │   ├── repository.py            <span class="c"># GitHub repo 연결/조회/삭제 + sync 트리거</span>
 │   │   ├── suggestion.py            <span class="c"># Reconciler 완료 제안 조회/승인/거절</span>
 │   │   ├── delta.py                 <span class="c"># "지난 확인 이후" 델타 브리핑 조회/생성</span>
@@ -311,7 +312,6 @@
 │   │   ├── sql_project_state.py     <span class="c"># 조망 Tool의 읽기 전용 SQL 상태 조립</span>
 │   │   ├── history_context.py       <span class="c"># 이력 검색 범위 해석</span>
 │   │   ├── mysql_search.py          <span class="c"># 구조화 상태 조회</span>
-│   │   ├── chroma_search.py         <span class="c"># 벡터 유사도 검색</span>
 │   │   ├── qa_engine.py             <span class="c"># 하이브리드 RAG — BM25(한국어)+dense RRF 융합</span>
 │   │   └── memory_vector.py         <span class="c"># memory 테이블 행을 ChromaDB에 보조 인덱싱(백필 포함)</span>
 │   │
@@ -392,11 +392,12 @@
     <table>
       <tr><th>모듈</th><th>라우트 예시</th><th>역할</th></tr>
       <tr><td><code>project.py</code></td><td><code>/projects</code></td><td>프로젝트 CRUD</td></tr>
-      <tr><td><code>upload.py</code></td><td><code>/projects/{id}/documents</code>, <code>.../memory</code></td><td>문서 업로드, 메모리 CRUD</td></tr>
+      <tr><td><code>documents.py</code></td><td><code>/projects/{id}/documents</code>, <code>.../git</code></td><td>문서 업로드·삭제, Git 로그 적재</td></tr>
+      <tr><td><code>memory.py</code></td><td><code>.../memory</code></td><td>수동 메모리 CRUD</td></tr>
       <tr><td><code>repository.py</code></td><td><code>/projects/{id}/repositories</code>, <code>.../sync</code></td><td>GitHub repo 연결, 동기화 트리거</td></tr>
       <tr><td><code>suggestion.py</code></td><td><code>.../suggestions/{id}/accept|reject</code></td><td>완료 제안 승인/거절</td></tr>
       <tr><td><code>delta.py</code></td><td><code>.../delta</code>, <code>.../briefing/delta</code></td><td>델타 브리핑</td></tr>
-      <tr><td><code>query.py</code></td><td><code>.../query</code>, <code>.../git</code></td><td>1회성 Q&A (첨부파일 임시 컨텍스트)</td></tr>
+      <tr><td><code>query.py</code></td><td><code>.../query</code></td><td>1회성 Q&A (첨부파일 임시 컨텍스트)</td></tr>
       <tr><td><code>chat/router.py</code></td><td><code>/projects/{id}/sessions/...</code></td><td>세션 CRUD·질의 (암호화 대화)</td></tr>
       <tr><td><code>github/router.py</code></td><td><code>/github/app/sessions</code>, <code>/callback</code></td><td>GitHub App 설치 플로우</td></tr>
       <tr><td><code>auth.py</code></td><td>—</td><td>개발용 임시 인증(<code>DEV_USER_ID</code>)</td></tr>
@@ -433,10 +434,11 @@ ingestor.ingest()
     </table>
     <p><code>memory_vector.py</code>는 <code>memory</code> 행 생성/수정 시 ChromaDB에도 보조 인덱싱해 하이브리드 검색이 구조화 데이터도 커버하도록 합니다.</p>
 
-    <h3 id="b-graph">3.6 그래프</h3>
+    <h3 id="b-graph">3.6 LangGraph 사용 지점</h3>
     <ul>
-      <li><strong>적재 그래프</strong>: 문서 → [저장] → [메모리] → END</li>
       <li><strong>Q&amp;A 그래프</strong>: 질문(+ 임시 첨부 근거) → 오케스트레이터 LLM → Tool 호출/결과 반환 반복 → 근거 기반 최종 답변</li>
+      <li><strong>Reconciler 그래프</strong>: 머지 PR ↔ 열린 Action 대조 → 확신도·근거가 있는 완료 제안만 생성</li>
+      <li>문서·Git 적재는 <code>documents.py</code>의 백그라운드/동기 처리로 실행하며, 별도 ingest 그래프는 두지 않습니다.</li>
       <li>기존 라우터 분기·검증·재기획 그래프는 <code>archive/legacy_qa_v1</code>의 비교 기준선으로만 보존합니다.</li>
     </ul>
 
@@ -508,7 +510,7 @@ ingestor.ingest()
 
     <h2 id="flows">8. 핵심 흐름</h2>
     <h3>8.1 문서 업로드 → 기억 적재</h3>
-    <div class="flow-step">사용자 업로드 (api/upload.py)
+    <div class="flow-step">사용자 업로드 (api/documents.py)
   → storage.py 로 파일 저장 (BackgroundTasks로 비동기 처리)
   → pipeline/extractor.py: 소스 지침 기반 LLM 구조화 추출
   → pipeline/ingestor.py: MySQL(memory) + ChromaDB 이중 저장

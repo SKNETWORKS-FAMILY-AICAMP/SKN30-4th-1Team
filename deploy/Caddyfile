@@ -16,7 +16,7 @@
 }
 
 {$PAIM_DOMAIN::80} {
-	# 업로드 상한은 backend/api/upload.py의 10MB보다 약간 위로 잡는다. 프록시가
+	# 업로드 상한은 backend/api/documents.py의 10MB보다 약간 위로 잡는다. 프록시가
 	# 과대 업로드를 조기 차단하되, 10~12MB 구간은 애플리케이션까지 도달시켜
 	# "파일 크기는 10 MB를 초과할 수 없습니다" 메시지를 그대로 보여주기 위함이다.
 	request_body {

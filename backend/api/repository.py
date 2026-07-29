@@ -346,7 +346,7 @@ def _clear_repo_indexed_data(repo_id: int, refresh_project_memory: bool = False)
     except Exception:
         logger.warning("기존 ChromaDB vector 정리 실패 repo_id=%s", repo_id, exc_info=True)
     if refresh_project_memory and project_id is not None:
-        from ..graph import refresh_project_memory_after_delete
+        from ..project_memory import refresh_project_memory_after_delete
         refresh_project_memory_after_delete(project_id)
 
 
@@ -375,7 +375,7 @@ def _delete_repo_data(repo_id: int):
     except Exception:
         logger.warning("ChromaDB vector cleanup failed for repo_id=%s", repo_id, exc_info=True)
     if project_id is not None:
-        from ..graph import refresh_project_memory_after_delete
+        from ..project_memory import refresh_project_memory_after_delete
         refresh_project_memory_after_delete(project_id)
 
 
@@ -496,7 +496,7 @@ def _sync_bg(project_id: int, repo_id: int, full_name: str, branch: str, token: 
                     extra={"project_id": project_id, "code": "REPOSITORY_INGEST_FAILED"},
                 )
 
-        from ..graph import refresh_project_memory_after_delete
+        from ..project_memory import refresh_project_memory_after_delete
         refresh_project_memory_after_delete(project_id)
 
         import json as _json

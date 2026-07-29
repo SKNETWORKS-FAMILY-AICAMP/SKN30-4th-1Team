@@ -9,6 +9,6 @@ tests/test_converters.py
 tests/test_sql_project_state.py
 tests/test_history_intent.py
 tests/test_history_context.py
-tests/test_graph.py
+tests/test_project_memory.py
 tests/test_qa_supersede_context.py
 tests/test_legacy_archive.py

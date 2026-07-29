@@ -151,7 +151,7 @@ def _accept(db, suggestion_id):
     with patch("backend.api.suggestion.require_project_access"), \
          patch("backend.api.suggestion.get_current_user_id", return_value=99), \
          patch("backend.retriever.memory_vector.delete_memory_vector"), \
-         patch("backend.graph.refresh_project_memory_after_delete"), \
+         patch("backend.project_memory.refresh_project_memory_after_delete"), \
          patch("backend.api.suggestion.get_connection", return_value=_Conn(db)):
         return _client.post(f"/api/v1/projects/1/suggestions/{suggestion_id}/accept")
 
@@ -168,7 +168,7 @@ def test_accept_supersede_then_layer1_search_excludes_old_decision():
     with patch("backend.api.suggestion.require_project_access"), \
          patch("backend.api.suggestion.get_current_user_id", return_value=99), \
          patch("backend.retriever.memory_vector.delete_memory_vector"), \
-         patch("backend.graph.refresh_project_memory_after_delete"), \
+         patch("backend.project_memory.refresh_project_memory_after_delete"), \
          patch("backend.api.suggestion.get_connection", return_value=_Conn(db)):
         resp = _client.post("/api/v1/projects/1/suggestions/8/accept")
     assert resp.status_code == 200

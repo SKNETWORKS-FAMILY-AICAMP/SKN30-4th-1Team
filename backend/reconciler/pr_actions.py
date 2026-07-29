@@ -164,7 +164,7 @@ def match_node(state: ReconcilerState) -> dict:
 
 
 def build_reconciler_graph():
-    """graph.py와 같은 방식의 얇은 LangGraph wrapper를 만든다."""
+    """노드 연결만 담당하는 얇은 LangGraph wrapper를 만든다."""
     graph = StateGraph(ReconcilerState)
     graph.add_node("match", match_node)
     graph.add_edge(START, "match")

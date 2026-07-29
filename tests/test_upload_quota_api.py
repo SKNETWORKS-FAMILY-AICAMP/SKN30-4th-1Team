@@ -7,11 +7,9 @@ import pytest
 from fastapi import BackgroundTasks, HTTPException, UploadFile
 from fastapi.testclient import TestClient
 
-from backend.api.query import GitLogUpload, upload_git_log
-from backend.api.upload import _process_upload_locked, upload_document
+from backend.api.documents import GitLogUpload, _process_upload_locked, upload_document, upload_git_log
 from backend.pipeline.converters import convert
 from backend import quota as quota_module
-from backend.graph import store_node
 from backend.main import app
 
 
@@ -35,11 +33,11 @@ def user_error():
 
 
 def test_multipart_quota_rejection_has_stable_code_and_no_file_side_effect():
-    with patch("backend.api.upload.require_project_access"), patch(
-        "backend.api.upload.require_upload_user", return_value=1
-    ), patch("backend.api.upload.reserve_document", side_effect=quota_error()), patch(
-        "backend.api.upload.write_reserved_file"
-    ) as write, patch("backend.api.upload.finalize_document") as finalize:
+    with patch("backend.api.documents.require_project_access"), patch(
+        "backend.api.documents.require_upload_user", return_value=1
+    ), patch("backend.api.documents.reserve_document", side_effect=quota_error()), patch(
+        "backend.api.documents.write_reserved_file"
+    ) as write, patch("backend.api.documents.finalize_document") as finalize:
         response = client.post(URL, files=FILE)
     assert response.status_code == 413
     assert response.json()["detail"]["code"] == "UPLOAD_QUOTA_EXCEEDED"
@@ -49,10 +47,10 @@ def test_multipart_quota_rejection_has_stable_code_and_no_file_side_effect():
 
 
 def test_dev_upload_requires_real_positive_user_before_reservation():
-    with patch("backend.api.upload.require_project_access"), patch(
-        "backend.api.upload.require_upload_user", side_effect=user_error()
-    ), patch("backend.api.upload.reserve_document") as reserve, patch(
-        "backend.api.upload.write_reserved_file"
+    with patch("backend.api.documents.require_project_access"), patch(
+        "backend.api.documents.require_upload_user", side_effect=user_error()
+    ), patch("backend.api.documents.reserve_document") as reserve, patch(
+        "backend.api.documents.write_reserved_file"
     ) as write:
         response = client.post(URL, files=FILE)
     assert response.status_code == 503
@@ -62,10 +60,10 @@ def test_dev_upload_requires_real_positive_user_before_reservation():
 
 
 def test_git_quota_rejection_is_identical_and_does_not_extract():
-    with patch("backend.api.query.require_project_access"), patch(
-        "backend.api.query.require_upload_user", return_value=1
-    ), patch("backend.api.query.reserve_document", side_effect=quota_error()), patch(
-        "backend.api.query.extract"
+    with patch("backend.api.documents.require_project_access"), patch(
+        "backend.api.documents.require_upload_user", return_value=1
+    ), patch("backend.api.documents.reserve_document", side_effect=quota_error()), patch(
+        "backend.api.documents.extract"
     ) as extract:
         response = client.post(
             "/api/v1/projects/1/git",
@@ -86,12 +84,12 @@ def test_invalid_dev_user_id_returns_upload_user_required_without_side_effects(
 
     with patch("backend.api.auth.get_connection") as auth_db, patch(
         "backend.quota.get_connection"
-    ) as quota_db, patch("backend.api.upload.reserve_document") as multipart_reserve, patch(
-        "backend.api.upload.write_reserved_file"
-    ) as write, patch("backend.api.upload.finalize_document") as multipart_finalize, patch(
-        "backend.api.query.reserve_document"
-    ) as git_reserve, patch("backend.api.query.finalize_document") as git_finalize, patch(
-        "backend.api.query.extract"
+    ) as quota_db, patch("backend.api.documents.reserve_document") as multipart_reserve, patch(
+        "backend.api.documents.write_reserved_file"
+    ) as write, patch("backend.api.documents.finalize_document") as multipart_finalize, patch(
+        "backend.api.documents.reserve_document"
+    ) as git_reserve, patch("backend.api.documents.finalize_document") as git_finalize, patch(
+        "backend.api.documents.extract"
     ) as git_extract:
         if endpoint_kind == "multipart":
             response = client.post(URL, files=FILE)
@@ -131,25 +129,25 @@ def test_positive_dev_user_failure_precedes_access_and_payload_side_effects(
         return_value=ensure_result,
         side_effect=ensure_error,
     ), patch("backend.quota.get_connection", return_value=quota_conn) as quota_db, patch(
-        "backend.api.upload.require_project_access"
+        "backend.api.documents.require_project_access"
     ) as multipart_access, patch(
-        "backend.api.query.require_project_access"
+        "backend.api.documents.require_project_access"
     ) as git_access, patch(
         # payload 처리의 최전방. 사용자 확인이 이보다 먼저 실패해야 한다는 것이
         # 이 테스트의 계약이므로, 변환(_convert_upload)이 아니라 검증 진입점을 잡는다.
-        "backend.api.upload.validate_document_bytes"
+        "backend.api.documents.validate_document_bytes"
     ) as multipart_extract, patch(
-        "backend.api.upload.reserve_document"
+        "backend.api.documents.reserve_document"
     ) as multipart_reserve, patch(
-        "backend.api.upload.write_reserved_file"
+        "backend.api.documents.write_reserved_file"
     ) as write, patch(
-        "backend.api.upload.finalize_document"
+        "backend.api.documents.finalize_document"
     ) as multipart_finalize, patch(
-        "backend.api.query.reserve_document"
+        "backend.api.documents.reserve_document"
     ) as git_reserve, patch(
-        "backend.api.query.finalize_document"
+        "backend.api.documents.finalize_document"
     ) as git_finalize, patch(
-        "backend.api.query.extract"
+        "backend.api.documents.extract"
     ) as git_extract:
         if endpoint_kind == "multipart":
             response = client.post(URL, files=FILE)
@@ -177,17 +175,6 @@ def test_positive_dev_user_failure_precedes_access_and_payload_side_effects(
         quota_conn.close.assert_called_once_with()
 
 
-def test_graph_ingest_requires_explicit_uploader_before_document_creation():
-    with patch("backend.graph.reserve_document") as reserve:
-        try:
-            store_node({"project_id": 1, "filename": "x", "content": "payload"})
-        except RuntimeError as exc:
-            assert str(exc) == "UPLOAD_USER_REQUIRED"
-        else:
-            raise AssertionError("missing uploader must fail closed")
-    reserve.assert_not_called()
-
-
 def test_multipart_cancellation_compensates_reservation_without_masking_cancel():
     reservation = {
         "reservation_id": "multipart-cancel",
@@ -206,11 +193,11 @@ def test_multipart_cancellation_compensates_reservation_without_masking_cancel()
             date="",
         )
 
-    with patch("backend.api.upload.require_project_access"), patch(
-        "backend.api.upload.require_upload_user", return_value=1
-    ), patch("backend.api.upload.reserve_document", return_value=reservation), patch(
-        "backend.api.upload.write_reserved_file", side_effect=asyncio.CancelledError()
-    ), patch("backend.api.upload.cleanup_failed_reservation") as cleanup:
+    with patch("backend.api.documents.require_project_access"), patch(
+        "backend.api.documents.require_upload_user", return_value=1
+    ), patch("backend.api.documents.reserve_document", return_value=reservation), patch(
+        "backend.api.documents.write_reserved_file", side_effect=asyncio.CancelledError()
+    ), patch("backend.api.documents.cleanup_failed_reservation") as cleanup:
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(invoke())
     cleanup.assert_called_once_with("multipart-cancel")
@@ -219,40 +206,23 @@ def test_multipart_cancellation_compensates_reservation_without_masking_cancel()
 def test_git_cancellation_compensates_reservation_without_masking_cancel():
     reservation = {"reservation_id": "git-cancel"}
     endpoint = inspect.unwrap(upload_git_log)
-    with patch("backend.api.query.require_project_access"), patch(
-        "backend.api.query.require_upload_user", return_value=1
-    ), patch("backend.api.query.reserve_document", return_value=reservation), patch(
-        "backend.api.query.finalize_document", side_effect=asyncio.CancelledError()
-    ), patch("backend.api.query.cleanup_failed_reservation") as cleanup:
+    with patch("backend.api.documents.require_project_access"), patch(
+        "backend.api.documents.require_upload_user", return_value=1
+    ), patch("backend.api.documents.reserve_document", return_value=reservation), patch(
+        "backend.api.documents.finalize_document", side_effect=asyncio.CancelledError()
+    ), patch("backend.api.documents.cleanup_failed_reservation") as cleanup:
         with pytest.raises(asyncio.CancelledError):
             endpoint(1, GitLogUpload(content="payload"))
     cleanup.assert_called_once_with("git-cancel")
 
 
-def test_graph_cancellation_compensates_reservation_without_masking_cancel():
-    reservation = {"reservation_id": "graph-cancel"}
-    with patch("backend.graph.reserve_document", return_value=reservation), patch(
-        "backend.graph.finalize_document", side_effect=asyncio.CancelledError()
-    ), patch("backend.graph.cleanup_failed_reservation") as cleanup:
-        with pytest.raises(asyncio.CancelledError):
-            store_node(
-                {
-                    "project_id": 1,
-                    "filename": "graph.txt",
-                    "content": "payload",
-                    "uploaded_by": 1,
-                }
-            )
-    cleanup.assert_called_once_with("graph-cancel")
-
-
 @pytest.mark.parametrize("cancel_stage", ["extract", "ingest"])
 def test_multipart_post_finalize_cancellation_compensates_document(cancel_stage):
-    with patch("backend.api.upload.processing_owned", return_value=True), patch(
-        "backend.api.upload.extract"
-    ) as extract, patch("backend.api.upload.ingest") as ingest, patch(
-        "backend.api.upload.compensate_cancelled_document"
-    ) as compensate, patch("backend.api.upload.cleanup_failed_reservation") as reservation_cleanup:
+    with patch("backend.api.documents.processing_owned", return_value=True), patch(
+        "backend.api.documents.extract"
+    ) as extract, patch("backend.api.documents.ingest") as ingest, patch(
+        "backend.api.documents.compensate_cancelled_document"
+    ) as compensate, patch("backend.api.documents.cleanup_failed_reservation") as reservation_cleanup:
         extract.return_value = []
         if cancel_stage == "extract":
             extract.side_effect = asyncio.CancelledError()
@@ -287,15 +257,15 @@ def test_git_post_finalize_cancellation_compensates_document(cancel_stage):
         "old_doc_ids": [],
     }
     endpoint = inspect.unwrap(upload_git_log)
-    with patch("backend.api.query.require_project_access"), patch(
-        "backend.api.query.require_upload_user", return_value=1
-    ), patch("backend.api.query.reserve_document", return_value=reservation), patch(
-        "backend.api.query.finalize_document", return_value=finalized
-    ), patch("backend.api.query.extract") as extract, patch(
-        "backend.api.query.ingest"
+    with patch("backend.api.documents.require_project_access"), patch(
+        "backend.api.documents.require_upload_user", return_value=1
+    ), patch("backend.api.documents.reserve_document", return_value=reservation), patch(
+        "backend.api.documents.finalize_document", return_value=finalized
+    ), patch("backend.api.documents.extract") as extract, patch(
+        "backend.api.documents.ingest"
     ) as ingest, patch(
-        "backend.api.query.compensate_cancelled_document"
-    ) as compensate, patch("backend.api.query.cleanup_failed_reservation") as reservation_cleanup:
+        "backend.api.documents.compensate_cancelled_document"
+    ) as compensate, patch("backend.api.documents.cleanup_failed_reservation") as reservation_cleanup:
         extract.return_value = []
         if cancel_stage == "extract":
             extract.side_effect = asyncio.CancelledError()
@@ -306,41 +276,6 @@ def test_git_post_finalize_cancellation_compensates_document(cancel_stage):
             endpoint(1, GitLogUpload(content="payload"))
 
     compensate.assert_called_once_with(42)
-    reservation_cleanup.assert_not_called()
-
-
-@pytest.mark.parametrize("cancel_stage", ["extract", "ingest"])
-def test_graph_post_finalize_cancellation_compensates_document(cancel_stage):
-    reservation = {"reservation_id": "graph-finalized"}
-    finalized = {
-        "doc_id": 43,
-        "processing_token": "token-43",
-        "old_doc_ids": [],
-    }
-    with patch("backend.graph.reserve_document", return_value=reservation), patch(
-        "backend.graph.finalize_document", return_value=finalized
-    ), patch("backend.graph.extract") as extract, patch(
-        "backend.graph.ingest"
-    ) as ingest, patch(
-        "backend.graph.compensate_cancelled_document"
-    ) as compensate, patch("backend.graph.cleanup_failed_reservation") as reservation_cleanup:
-        extract.return_value = []
-        if cancel_stage == "extract":
-            extract.side_effect = asyncio.CancelledError()
-        else:
-            ingest.side_effect = asyncio.CancelledError()
-
-        with pytest.raises(asyncio.CancelledError):
-            store_node(
-                {
-                    "project_id": 1,
-                    "filename": "graph.txt",
-                    "content": "payload",
-                    "uploaded_by": 1,
-                }
-            )
-
-    compensate.assert_called_once_with(43)
     reservation_cleanup.assert_not_called()
 
 

@@ -739,7 +739,7 @@ def collect_e0(project_id: int, question: str) -> tuple[list[str], dict]:
 
 def collect_e2_e2e(project_id: int, question: str) -> tuple[list[str], dict]:
     """Agentic evidence retrieval: history context → hybrid search → summary."""
-    from backend.graph import get_project_memory
+    from backend.project_memory import get_project_memory
     from backend.retriever.history_context import resolve_history_context
     mode, scope, tokens, effective = resolve_history_context(question)
     contexts, debug = _build_context_configured(
@@ -961,9 +961,9 @@ def cmd_ingest(args) -> None:
         supersede_mod.detect_supersede = original_detect
 
     # 실서비스는 적재 후 프로젝트 메모리 요약을 만들어 QA 컨텍스트 최상단에
-    # 얹는다(graph.qa_node). E2-e2e가 그 경로를 충실히 재현하도록 eval도 동일
+    # 얹는다(project_memory). E2-e2e가 그 경로를 충실히 재현하도록 eval도 동일
     # 생성한다(리뷰 R-005). checkpoint(mysqldump)에 포함돼 final restore 시 복원.
-    from backend.graph import regenerate_project_memory
+    from backend.project_memory import regenerate_project_memory
     regenerate_project_memory(project_id)
 
     # 적재 결과 덤프(runid 무관 — 코퍼스 상태에 귀속)
@@ -1074,7 +1074,7 @@ def cmd_pmem(args) -> None:
     (dev context 승격분을 지키려면 재적재 대신 이 경로를 사용한다.)"""
     setup_env(args.corpus)
     require_openai_key()
-    from backend.graph import regenerate_project_memory, get_project_memory
+    from backend.project_memory import regenerate_project_memory, get_project_memory
     project_id = get_project_id(args.corpus)
     regenerate_project_memory(project_id)
     mem = get_project_memory(project_id) or ""

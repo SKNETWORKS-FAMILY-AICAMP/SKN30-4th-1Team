@@ -225,7 +225,7 @@ def _resolve_suggestion(project_id: int, suggestion_id: int, status: str) -> dic
         # 프로젝트 요약 캐시도 재생성한다 — 조망형 답변이 이 캐시를 직접 읽으므로,
         # 갱신하지 않으면 방금 숨긴 구 결정이 요약에 남아 계속 노출된다.
         # (삭제 경로들과 동일한 best-effort 헬퍼 재사용, 실패해도 accept 결과는 유지)
-        from ..graph import refresh_project_memory_after_delete
+        from ..project_memory import refresh_project_memory_after_delete
         refresh_project_memory_after_delete(project_id)
 
     return _suggestion_response(updated)

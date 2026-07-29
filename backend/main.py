@@ -16,7 +16,8 @@ from .api.auth import AuthMiddleware
 from .api.auth_routes import router as auth_router
 from .api.member import router as member_router
 from .api.project import router as project_router
-from .api.upload import router as upload_router
+from .api.documents import router as documents_router
+from .api.memory import router as memory_router
 from .api.query import router as query_router
 from .api.repository import router as repository_router
 from .api.suggestion import router as suggestion_router
@@ -200,7 +201,8 @@ async def session_expired_handler(request: Request, exc: SessionExpiredException
 app.include_router(auth_router,       prefix="/api/v1")
 app.include_router(member_router,     prefix="/api/v1")
 app.include_router(project_router,    prefix="/api/v1")
-app.include_router(upload_router,     prefix="/api/v1")
+app.include_router(documents_router,  prefix="/api/v1")
+app.include_router(memory_router,     prefix="/api/v1")
 app.include_router(query_router,      prefix="/api/v1")
 app.include_router(repository_router, prefix="/api/v1")
 app.include_router(suggestion_router, prefix="/api/v1")

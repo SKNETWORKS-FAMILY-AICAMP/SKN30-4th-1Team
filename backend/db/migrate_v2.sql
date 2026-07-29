@@ -174,7 +174,7 @@ BEGIN
         INDEX idx_memory_sources_repo_id   (repo_id)
     );
 
-    -- ── 8) project_memory 테이블 (graph.py 런타임 DDL 정식 등록) ────────
+    -- ── 8) project_memory 테이블 (project_memory.py 런타임 DDL 정식 등록) ─
     CREATE TABLE IF NOT EXISTS project_memory (
         project_id INT PRIMARY KEY,
         summary    TEXT,

@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List
 import anthropic
 from .base import BaseLLMClient, Message, LLMResponse
 

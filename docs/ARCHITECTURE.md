@@ -54,7 +54,7 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 │
 ├── backend/                         # FastAPI 백엔드 (Python, LangChain/LangGraph)
 │   ├── main.py                      # FastAPI 앱 진입점 — 라우터 등록, CORS, lifespan(기동 시 복구 작업)
-│   ├── graph.py                     # 적재 그래프 + 프로젝트 메모리 갱신
+│   ├── project_memory.py            # 활성 memory 기반 프로젝트 요약 캐시
 │   ├── agentic_graph.py             # 프로젝트 Q&A 도구 오케스트레이터
 │   ├── startup.py                   # 서버 재시작 시 stale 문서/repo 작업 복구, watchdog
 │   ├── storage.py                   # 업로드 파일 저장 추상화 (로컬 FS 기본, S3 등 교체 대비)
@@ -62,7 +62,8 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 │   ├── api/                         # REST 엔드포인트 (prefix: /api/v1)
 │   │   ├── auth.py                  # 개발용 임시 인증 (DEV_USER_ID 기반, 4차 로드맵에서 정식 로그인으로 대체 예정)
 │   │   ├── project.py               # 프로젝트 CRUD
-│   │   ├── upload.py                # 문서 업로드/삭제 + 프로젝트 메모리(memory) CRUD
+│   │   ├── documents.py             # 문서 업로드/삭제 + Git 로그 적재
+│   │   ├── memory.py                # 수동 memory CRUD
 │   │   ├── repository.py            # GitHub repo 연결/조회/삭제 + sync 트리거
 │   │   ├── suggestion.py            # Reconciler가 만든 완료 제안 조회/승인/거절
 │   │   ├── delta.py                 # "지난 확인 이후" 델타 브리핑 조회/생성
@@ -86,7 +87,6 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 │   │   ├── sql_project_state.py     # 조망 Tool의 읽기 전용 SQL 상태 조립
 │   │   ├── history_context.py       # 이력 검색 범위 해석
 │   │   ├── mysql_search.py          # 구조화 상태 조회
-│   │   ├── chroma_search.py         # 벡터 유사도 검색
 │   │   ├── qa_engine.py             # 하이브리드 RAG — BM25(한국어 형태소)+dense RRF 융합
 │   │   └── memory_vector.py         # memory 테이블 행을 ChromaDB에 보조 인덱싱(백필 포함)
 │   │
@@ -178,11 +178,12 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 | 모듈 | 라우트 예시 | 역할 |
 | --- | --- | --- |
 | `project.py` | `POST/GET/PATCH/DELETE /projects` | 프로젝트 CRUD |
-| `upload.py` | `POST /projects/{id}/documents`, `.../memory` | 문서 업로드, 메모리(결정/액션/이슈/리스크) CRUD |
+| `documents.py` | `POST /projects/{id}/documents`, `.../git` | 문서 업로드·삭제, Git 로그 적재 |
+| `memory.py` | `GET/POST/PATCH/DELETE .../memory` | 수동 메모리(결정/액션/이슈/리스크) CRUD |
 | `repository.py` | `POST /projects/{id}/repositories`, `.../sync` | GitHub repo 연결, 동기화 트리거 |
 | `suggestion.py` | `.../suggestions/{id}/accept|reject` | 완료 제안 승인/거절 (상태 변경은 항상 사람) |
 | `delta.py` | `GET/POST /projects/{id}/delta`, `.../briefing/delta` | 델타 브리핑 |
-| `query.py` | `POST /projects/{id}/query`, `.../git` | 1회성 Q&A 질의 (첨부파일 임시 컨텍스트 지원) |
+| `query.py` | `POST /projects/{id}/query` | 1회성 Q&A 질의 (첨부파일 임시 컨텍스트 지원) |
 | `chat/router.py` | `/projects/{id}/sessions/...` | 세션 CRUD, 세션 내 질의(`.../{session_id}/query`) — 암호화 대화 이력 |
 | `github/router.py` | `/github/app/sessions`, `/callback` | GitHub App 설치 플로우, JWT 서명, repo preview |
 | `auth.py` | — | 개발용 임시 사용자 인증 (`DEV_USER_ID`) |
@@ -223,10 +224,11 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 
 `memory_vector.py`는 `memory` 테이블 행이 생성/수정될 때 ChromaDB에도 보조 인덱싱해 하이브리드 검색이 구조화 데이터도 커버하도록 합니다.
 
-### 3.6 그래프
+### 3.6 LangGraph 사용 지점
 
-- `graph.py` 적재 그래프: 문서 → [저장] → [메모리] → END
 - `agentic_graph.py` Q&A 그래프: 질문(+ 임시 첨부 근거) → 오케스트레이터 LLM → Tool 호출/결과 반환 반복 → 근거 기반 최종 답변
+- `reconciler/pr_actions.py` 그래프: 머지 PR ↔ 열린 Action 대조 → 확신도·근거가 있는 완료 제안만 생성
+- 문서·Git 적재는 `documents.py`의 백그라운드/동기 처리로 실행하며, 별도 ingest 그래프는 두지 않습니다.
 - 기존 라우터 분기·검증·재기획 그래프는 [archive/legacy_qa_v1](../archive/legacy_qa_v1/README.md)의 비교 기준선으로만 보존합니다.
 
 ### 3.7 chat — 암호화 세션 대화
@@ -300,11 +302,11 @@ Tauri 2(Rust 셸) 위에 React 19 + TypeScript로 구성된 공식 사용자 UI�
 ### 8.1 문서 업로드 → 기억 적재
 
 ```
-사용자 업로드 (api/upload.py)
+사용자 업로드 (api/documents.py)
   → storage.py 로 파일 저장 (BackgroundTasks로 비동기 처리)
   → pipeline/extractor.py: 소스 지침 기반 LLM 구조화 추출
   → pipeline/ingestor.py: MySQL(memory) + ChromaDB 이중 저장
-  → 문서 상태(status)를 polling(api/upload.py: GET .../documents/{id}/status)으로 확인
+  → 문서 상태(status)를 polling(api/documents.py: GET .../documents/{id}/status)으로 확인
 ```
 
 ### 8.2 GitHub repo 동기화 → 완료 제안

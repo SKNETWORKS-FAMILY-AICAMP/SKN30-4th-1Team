@@ -409,8 +409,8 @@ def test_upload_rejects_corrupted_archive_with_corrupt_file_code():
     from backend.main import app
 
     client = TestClient(app, raise_server_exceptions=False)
-    with patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload.require_upload_user", return_value=1):
+    with patch("backend.api.documents.require_project_access"), \
+         patch("backend.api.documents.require_upload_user", return_value=1):
         response = client.post(
             "/api/v1/projects/1/documents",
             files={"file": ("변조.docx", _corrupted_docx(), "application/octet-stream")},
@@ -467,8 +467,8 @@ def test_upload_rejects_oversized_archive_with_400(monkeypatch):
 
     monkeypatch.setattr(module, "_MAX_COMPRESSION_RATIO", 1)
     client = TestClient(app, raise_server_exceptions=False)
-    with patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload.require_upload_user", return_value=1):
+    with patch("backend.api.documents.require_project_access"), \
+         patch("backend.api.documents.require_upload_user", return_value=1):
         response = client.post(
             "/api/v1/projects/1/documents",
             files={"file": ("보통.docx", _ordinary_docx(), "application/octet-stream")},
@@ -890,16 +890,16 @@ def test_upload_accepts_docx_and_passes_structure_to_ingest():
         "processing_token": None,
     }
 
-    with patch("backend.api.upload.get_connection", side_effect=_conn_seq()), \
-         patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload.require_upload_user", return_value=1), \
-         patch("backend.api.upload.reserve_document", return_value=reservation), \
-         patch("backend.api.upload.write_reserved_file"), \
-         patch("backend.api.upload.finalize_document", return_value=finalized), \
-         patch("backend.api.upload.extract", return_value=[]), \
-         patch("backend.api.upload.ingest") as mock_ingest, \
-         patch("backend.api.upload.update_project_memory"), \
-         patch("backend.api.upload._set_doc_status"):
+    with patch("backend.api.documents.get_connection", side_effect=_conn_seq()), \
+         patch("backend.api.documents.require_project_access"), \
+         patch("backend.api.documents.require_upload_user", return_value=1), \
+         patch("backend.api.documents.reserve_document", return_value=reservation), \
+         patch("backend.api.documents.write_reserved_file"), \
+         patch("backend.api.documents.finalize_document", return_value=finalized), \
+         patch("backend.api.documents.extract", return_value=[]), \
+         patch("backend.api.documents.ingest") as mock_ingest, \
+         patch("backend.api.documents.update_project_memory"), \
+         patch("backend.api.documents._set_doc_status"):
 
         response = client.post(
             "/api/v1/projects/1/documents",
@@ -927,8 +927,8 @@ def test_upload_rejects_unsupported_format_with_reason():
     from backend.main import app
 
     client = TestClient(app, raise_server_exceptions=False)
-    with patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload.require_upload_user", return_value=1):
+    with patch("backend.api.documents.require_project_access"), \
+         patch("backend.api.documents.require_upload_user", return_value=1):
         response = client.post(
             "/api/v1/projects/1/documents",
             files={"file": ("보고서.hwp", b"data", "application/octet-stream")},
@@ -947,8 +947,8 @@ def test_upload_rejects_scanned_pdf_with_explicit_code():
     from backend.main import app
 
     client = TestClient(app, raise_server_exceptions=False)
-    with patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload.require_upload_user", return_value=1):
+    with patch("backend.api.documents.require_project_access"), \
+         patch("backend.api.documents.require_upload_user", return_value=1):
         response = client.post(
             "/api/v1/projects/1/documents",
             files={"file": ("스캔본.pdf", _make_pdf([[], []]), "application/pdf")},
@@ -980,8 +980,8 @@ def test_upload_error_detail_is_string_for_every_conversion_failure():
         ("스캔.pdf", _make_pdf([[], []]), ErrorCode.NO_TEXT_LAYER),
     ]
     for name, data, expected_code in cases:
-        with patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload.require_upload_user", return_value=1):
+        with patch("backend.api.documents.require_project_access"), \
+         patch("backend.api.documents.require_upload_user", return_value=1):
             response = client.post(
                 "/api/v1/projects/1/documents",
                 files={"file": (name, data, "application/octet-stream")},
@@ -1078,8 +1078,8 @@ def test_upload_unsupported_format_returns_top_level_code():
     from backend.main import app
 
     client = TestClient(app, raise_server_exceptions=False)
-    with patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload.require_upload_user", return_value=1):
+    with patch("backend.api.documents.require_project_access"), \
+         patch("backend.api.documents.require_upload_user", return_value=1):
         response = client.post(
             "/api/v1/projects/1/documents",
             files={"file": ("문서.hwp", b"whatever", "application/octet-stream")},
@@ -1110,8 +1110,8 @@ def _upload_and_get_body(name: str, data: bytes):
     from backend.main import app
 
     client = TestClient(app, raise_server_exceptions=False)
-    with patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload.require_upload_user", return_value=1):
+    with patch("backend.api.documents.require_project_access"), \
+         patch("backend.api.documents.require_upload_user", return_value=1):
         response = client.post(
             "/api/v1/projects/1/documents",
             files={"file": (name, data, "application/octet-stream")},

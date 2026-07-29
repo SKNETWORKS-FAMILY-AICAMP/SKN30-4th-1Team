@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from backend import graph
+from backend import project_memory
 from backend.retriever import memory_vector
 
 
@@ -24,7 +24,7 @@ def test_regenerate_project_memory_deletes_summary_when_no_memory(monkeypatch):
     select_cursor.fetchall.return_value = []
     delete_cursor = MagicMock()
     monkeypatch.setattr(
-        graph,
+        project_memory,
         "get_connection",
         MagicMock(side_effect=[
             _conn_with_cursor(select_cursor),
@@ -32,7 +32,7 @@ def test_regenerate_project_memory_deletes_summary_when_no_memory(monkeypatch):
         ]),
     )
 
-    assert graph.regenerate_project_memory(1) == ""
+    assert project_memory.regenerate_project_memory(1) == ""
 
     delete_cursor.execute.assert_called_once_with(
         "DELETE FROM project_memory WHERE project_id = %s",
@@ -54,16 +54,16 @@ def test_regenerate_project_memory_summarizes_remaining_memory(monkeypatch):
     ]
     upsert_cursor = MagicMock()
     monkeypatch.setattr(
-        graph,
+        project_memory,
         "get_connection",
         MagicMock(side_effect=[
             _conn_with_cursor(select_cursor),
             _conn_with_cursor(upsert_cursor),
         ]),
     )
-    monkeypatch.setattr(graph, "get_chat_model", lambda **kwargs: _FakeLLM())
+    monkeypatch.setattr(project_memory, "get_chat_model", lambda **kwargs: _FakeLLM())
 
-    assert graph.regenerate_project_memory(1) == "남은 항목 기반 새 요약"
+    assert project_memory.regenerate_project_memory(1) == "남은 항목 기반 새 요약"
 
     sql_calls = [call.args[0] for call in upsert_cursor.execute.call_args_list]
     assert any("ON DUPLICATE KEY UPDATE summary" in sql for sql in sql_calls)

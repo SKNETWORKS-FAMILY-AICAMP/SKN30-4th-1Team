@@ -65,7 +65,9 @@ def test_runtime_qna_entrypoints_are_agentic_only():
     streamlit_chat = (REPO_ROOT / "frontend" / "views" / "chat.py").read_text(
         encoding="utf-8"
     )
-    ingest_graph = (REPO_ROOT / "backend" / "graph.py").read_text(encoding="utf-8")
+    project_memory = (REPO_ROOT / "backend" / "project_memory.py").read_text(
+        encoding="utf-8"
+    )
     retrieval_engine = (REPO_ROOT / "backend" / "retriever" / "qa_engine.py").read_text(
         encoding="utf-8"
     )
@@ -78,6 +80,9 @@ def test_runtime_qna_entrypoints_are_agentic_only():
     assert "_to_langchain_messages" not in session_router
     assert "run_agentic_qa" in streamlit_chat
     assert "qa_engine import answer" not in streamlit_chat
-    assert "def run_qa(" not in ingest_graph
+    assert "def run_ingest(" not in project_memory
     assert "def answer(" not in retrieval_engine
+    assert not (REPO_ROOT / "backend" / "graph.py").exists()
     assert not (REPO_ROOT / "backend" / "retriever" / "query_intent.py").exists()
+    assert not (REPO_ROOT / "backend" / "retriever" / "classifier.py").exists()
+    assert not (REPO_ROOT / "backend" / "retriever" / "chroma_search.py").exists()

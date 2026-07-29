@@ -364,7 +364,7 @@ def test_callback_requires_state():
 # 통째로 되돌려도) 전부 통과한다. 실제로 구형 HTML이 그대로 통과하는 것이 확인됐다.
 # 여기서는 endpoint 대조 로직은 건드리지 않고 **필드 집합 검사만** 추가한다.
 
-# POST /documents 201 응답의 실제 계약 (backend/api/upload.py)
+# POST /documents 201 응답의 실제 계약 (backend/api/documents.py)
 _UPLOAD_SUCCESS_FIELDS = {"doc_id", "status", "format", "blocks", "pages", "warnings"}
 
 
@@ -444,9 +444,9 @@ def test_upload_success_response_matches_openapi_contract():
     """계약 상수가 실제 코드와 어긋나지 않는지 확인한다."""
     import inspect
 
-    from backend.api import upload
+    from backend.api import documents
 
-    source = inspect.getsource(upload.upload_document)
+    source = inspect.getsource(documents.upload_document)
     for field in _UPLOAD_SUCCESS_FIELDS:
         assert f'"{field}"' in source, f"업로드 응답에 {field}가 없다(계약 상수가 낡음)"
 

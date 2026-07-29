@@ -134,14 +134,14 @@ def test_login_actual_endpoint_enforces_configured_boundary_and_peer_ip_key():
 
 def test_upload_actual_endpoint_enforces_configured_boundary():
     with patch("backend.rate_limit.get_current_user_id", return_value=11), patch(
-        "backend.api.upload.require_project_access"
-    ), patch("backend.api.upload.require_upload_user", return_value=11), patch(
-        "backend.api.upload.reserve_document",
+        "backend.api.documents.require_project_access"
+    ), patch("backend.api.documents.require_upload_user", return_value=11), patch(
+        "backend.api.documents.reserve_document",
         return_value={"reservation_id": "r", "temp_path": "/tmp/r.tmp", "target_path": "/tmp/r.txt"},
-    ), patch("backend.api.upload.write_reserved_file"), patch(
-        "backend.api.upload.finalize_document",
+    ), patch("backend.api.documents.write_reserved_file"), patch(
+        "backend.api.documents.finalize_document",
         return_value={"doc_id": 1, "old_doc_ids": [], "file_path": "/tmp/r.txt", "processing_token": "t"},
-    ), patch("backend.api.upload._process_upload"):
+    ), patch("backend.api.documents._process_upload"):
         _assert_http_boundary(
             lambda: _client.post(
                 "/api/v1/projects/1/documents",

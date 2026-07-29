@@ -106,7 +106,7 @@ def test_content_tokens_no_fallback_to_raw_text():
 @pytest.mark.parametrize("module", [
     "backend.retriever.history_intent",
     "backend.retriever.qa_engine",
-    "backend.graph",
+    "backend.project_memory",
     "backend.api.query",
 ])
 def test_module_imports_standalone(module):
