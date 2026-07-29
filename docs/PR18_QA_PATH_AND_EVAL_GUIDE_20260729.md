@@ -2,6 +2,7 @@
 
 - 작성일: 2026-07-29 (KST)
 - 코드 기준: `integration/pr18-stabilized-20260729` (`74ace2520da9ab4863def34272f34fe82952ea58`)
+- 레거시 평가 runner commit: `0b68860` (프로덕션 코드 변경 없음)
 - 모델 범위: 공식 OpenAI API `gpt-4.1-mini`
 - 런타임 원칙: Agentic Tool Calling 단일 경로, 레거시 fallback 없음
 - 상태: #18 안정화 수정과 #14 프롬프트 선택 이식 반영 완료
@@ -396,3 +397,45 @@ user: 그 전에는?
 먼저 코드를 변경하지 말고 기준선을 수집하고,
 실패를 Tool 선택 / 인자 / 검색 / 답변 합성 / citation으로 분류해 보고해 주세요.
 ```
+
+## 13. 레거시 비교 베이스라인 실행
+
+레거시는 프로덕션 import, runtime fallback, API 분기로 복원하지 않는다. 비교할 때만 `archive/legacy_qa_v1/scripts/run_comparison.py`가 고정된 레거시 commit과 지정한 candidate commit을 서로 다른 detached worktree로 materialize한다.
+
+API 키 없이 먼저 실행 계획과 비교 계약을 확인한다.
+
+```bash
+uv run python archive/legacy_qa_v1/scripts/run_comparison.py \
+  plan both \
+  --candidate-ref 74ace2520da9ab4863def34272f34fe82952ea58 \
+  --output-dir /tmp/paim-eval-plan-modu \
+  --corpus modu \
+  --phase dev \
+  --run-id pr18-modu-dev-01
+```
+
+`both` 대신 `legacy` 또는 `current`를 주면 한쪽만 별도로 준비·실행할 수 있다. 성능 개선 commit을 평가할 때는 `--candidate-ref`를 그 정확한 SHA로 바꾼다.
+
+실제 평가는 OpenAI quota와 격리된 Docker MySQL/Chroma 상태를 사용하므로 명시적으로 승인해야 한다.
+
+```bash
+OPENAI_API_KEY=... uv run python archive/legacy_qa_v1/scripts/run_comparison.py \
+  run both \
+  --candidate-ref <PERFORMANCE_COMMIT_SHA> \
+  --output-dir /tmp/paim-eval-run-modu \
+  --corpus modu \
+  --phase dev \
+  --run-id pr18-modu-dev-01 \
+  --acknowledge-live-eval-state
+```
+
+비교 계약:
+
+- baseline/candidate SHA, 평가 데이터 Git object, 각 ref의 평가 runner object를 `comparison.json`에 기록한다.
+- 같은 평가셋을 강제하지만 ref별 architecture adapter가 달라 `same_harness=false`다. aggregate만 보지 말고 문항별 context, answer, source, Tool/history debug와 METHODS를 함께 검토한다.
+- `route`는 교차 버전 점수에서 제외한다. 레거시는 실제 router label이고 #18은 deprecated 호환 필드라 의미가 다르다.
+- `legacy/`와 `candidate/` 결과를 분리하고 artifact hash를 기록한다.
+- 고정 컨테이너 `paim-eval-db`와 `127.0.0.1:3316`을 사용하므로 runner는 양쪽을 순차 실행한다. 기존 컨테이너가 있으면 채택하거나 삭제하지 않고 실행을 거부한다.
+- shallow clone에 레거시 baseline object가 없으면 다른 ref로 대체하지 않고 필요한 fetch 방법과 함께 중단한다.
+
+세부 운영 절차는 `archive/legacy_qa_v1/README.md`를 정본으로 본다.

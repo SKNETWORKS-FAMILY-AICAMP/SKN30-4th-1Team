@@ -17,6 +17,8 @@
 | H-02 첨부와 Agentic 근거 규칙 충돌 | 첨부를 저장하지 않는 비신뢰 임시 근거로 분리하고, 첨부·프로젝트 출처 예산을 독립 보존 |
 | H-03 provider/model 불명확 | Agentic Q&A를 공식 OpenAI endpoint + `gpt-4.1-mini`로 고정하고 키·모델·endpoint 계약 검증 추가 |
 | M-01 후속 이력 질문 미연결 | 결정적 이력 감지 결과와 직전 사용자 주제를 `search_project_evidence`의 실제 검색어에 연결 |
+| M-04 archive가 단위 suite 비교에 한정 | key-free plan과 opt-in live `legacy | current | both` 비교 runner 추가 |
+| M-05 shallow clone에서 baseline materialize 실패 | baseline object 누락을 명확히 진단하고 trusted remote의 history/exact commit fetch를 안내; 임의 ref 대체 금지 |
 | #14 프롬프트 경계 | 범위·대상 보존, 비신뢰 검색 문맥, 제한된 부재 단정, 허위 citation 방지 규칙을 선택 이식 |
 
 검증 결과는 핵심 회귀 `123 passed, 1 skipped`, 실행 가능한 제품 비-DB suite `936 passed, 3 skipped`이다. 별도로 `tests/test_check_scope_secrets.py` 13건은 개인용 에이전트 코딩 자산인 `scripts/check-scope.sh`와 `.agent-workflow/config.sh`가 없는 환경에서 발생한 setup error다. 이 개인 도구 자산은 제품 통합본에 복원하지 않으며 #18/#14 회귀나 제품 blocker로 세지 않는다. live skip은 실제 OpenAI 키가 필요한 opt-in smoke이며, 현재 합의에 따라 API 키를 주입하지 않았다. 따라서 코드·mock 계약 검증은 완료됐지만 실제 OpenAI/MySQL/Chroma E2E와 성능 기준선 수집은 아직 남아 있다.
