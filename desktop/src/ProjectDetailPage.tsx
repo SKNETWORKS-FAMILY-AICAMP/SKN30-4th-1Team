@@ -29,6 +29,7 @@ import {
   type KeyboardEvent,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { formatRelativeAge, parsePaimTimestamp } from "./format";
@@ -399,6 +400,7 @@ export function ProjectDetailPage({
   projectRole,
   refreshRevision = 0,
 }: ProjectDetailPageProps) {
+  const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [data, setData] = useState<DetailData | null>(null);
   const [error, setError] = useState("");
   const [pendingDeleteFileId, setPendingDeleteFileId] = useState<string | null>(
@@ -619,7 +621,11 @@ export function ProjectDetailPage({
             variant="ghost"
           />
         </header>
-        <div className="project-detail-state" role={error ? "alert" : "status"}>
+        <div
+          className="project-detail-state"
+          data-tone={error ? "error" : "loading"}
+          role={error ? "alert" : "status"}
+        >
           {error ? <AlertTriangle size={22} /> : <Spinner size="md" />}
           <p>
             {error ||
@@ -1071,7 +1077,11 @@ export function ProjectDetailPage({
           </p>
         ) : null}
         {teamMembersError ? (
-          <p className="project-detail-team-feedback" role="status">
+          <p
+            className="project-detail-team-feedback"
+            data-tone="error"
+            role="alert"
+          >
             <AlertTriangle aria-hidden="true" size={13} />
             {teamMembersError}
           </p>
@@ -1284,8 +1294,25 @@ export function ProjectDetailPage({
       >
         <form
           className="project-detail-composer"
+          data-disabled={
+            Boolean(composerDisabledMessage) || isComposerSending
+              ? "true"
+              : undefined
+          }
           data-drop-zone="prompt"
           data-testid="project-detail-chat-composer"
+          onPointerDown={(event) => {
+            const target = event.target;
+            if (
+              !(target instanceof Element) ||
+              target.closest("button, textarea, input, a, [role='button']") ||
+              composerDisabledMessage ||
+              isComposerSending
+            ) {
+              return;
+            }
+            composerTextareaRef.current?.focus();
+          }}
           onSubmit={(event) => {
             event.preventDefault();
             if (canSubmitComposer) {
@@ -1309,6 +1336,7 @@ export function ProjectDetailPage({
                   ? "이 프로젝트에 무엇이든 요청하세요"
                   : "Ask anything about this project"
               }
+              ref={composerTextareaRef}
               rows={1}
               value={composerPrompt}
             />
@@ -1357,6 +1385,12 @@ export function ProjectDetailPage({
             >
               <Plus aria-hidden="true" size={18} />
             </button>
+            <p id="project-detail-composer-helper">
+              {composerDisabledMessage ||
+                (isKorean
+                  ? "메시지를 보내면 이 프로젝트 아래에 새 채팅이 생성됩니다"
+                  : "Sending creates a new chat under this project")}
+            </p>
             <button
               aria-label={isKorean ? "메시지 보내기" : "Send message"}
               className="project-detail-composer-send"
@@ -1366,12 +1400,6 @@ export function ProjectDetailPage({
               <ArrowUp aria-hidden="true" size={18} />
             </button>
           </div>
-          <p id="project-detail-composer-helper">
-            {composerDisabledMessage ||
-              (isKorean
-                ? "메시지를 보내면 이 프로젝트 아래에 새 채팅이 생성됩니다"
-                : "Sending creates a new chat under this project")}
-          </p>
         </form>
       </section>
     );
@@ -1393,7 +1421,7 @@ export function ProjectDetailPage({
       </header>
 
       {error ? (
-        <div className="project-detail-load-warning" role="status">
+        <div className="project-detail-load-warning" role="alert">
           <AlertTriangle aria-hidden="true" size={15} />
           <span>{error}</span>
         </div>
@@ -1697,7 +1725,11 @@ export function ProjectDetailPage({
                 </p>
               ) : null}
               {serverActivityError ? (
-                <p className="project-detail-activity-feedback" role="status">
+                <p
+                  className="project-detail-activity-feedback"
+                  data-tone="error"
+                  role="alert"
+                >
                   <AlertTriangle aria-hidden="true" size={13} />
                   {serverActivityError}
                 </p>
