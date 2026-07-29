@@ -86,6 +86,7 @@ export type GitRepositoryInfo = {
   commitSha?: string | null;
   remoteHeadSha?: string | null;
   remoteCheckedAt?: number | null;
+  remoteCheckAttemptedAt?: number | null;
   remoteCheckStatus?: GitRepositoryRemoteCheckStatus;
   remoteCheckError?: GitRepositoryRemoteCheckError | null;
   indexedFiles?: number | null;

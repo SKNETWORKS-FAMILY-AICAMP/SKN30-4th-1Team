@@ -201,7 +201,7 @@ def test_generation_cleanup_deletes_only_the_exact_run():
     }
 
     with patch("backend.api.repository.get_connection", return_value=conn), patch(
-        "backend.db.chroma.get_collection", return_value=collection
+        "backend.db.chroma.get_existing_collection", return_value=collection
     ):
         _cleanup_repo_generation(7, ACTIVE_RUN_ID)
 
@@ -209,7 +209,32 @@ def test_generation_cleanup_deletes_only_the_exact_run():
     assert "repo_sync_run_id <=> %s" in sql
     assert "NOT (r.active_sync_run_id <=> %s)" in sql
     assert params == (7, ACTIVE_RUN_ID, ACTIVE_RUN_ID)
+    collection.get.assert_called_once_with(where={"repo_id": 7})
     collection.delete.assert_called_once_with(ids=["old-memory"])
+
+
+def test_first_publish_cleanup_removes_legacy_vectors_without_generation_metadata():
+    conn, cursor = _connection()
+    cursor.fetchone.return_value = {"active_sync_run_id": RUN_ID}
+    collection = MagicMock()
+    collection.get.return_value = {
+        "ids": ["missing", "empty", "published"],
+        "metadatas": [
+            {},
+            {"repo_sync_run_id": ""},
+            {"repo_sync_run_id": RUN_ID},
+        ],
+    }
+
+    with patch("backend.api.repository.get_connection", return_value=conn), patch(
+        "backend.db.chroma.get_existing_collection", return_value=collection
+    ):
+        _cleanup_repo_generation(7, None)
+
+    sql, params = cursor.execute.call_args_list[-1].args
+    assert "repo_sync_run_id <=> %s" in sql
+    assert params == (7, None, None)
+    collection.delete.assert_called_once_with(ids=["missing", "empty"])
 
 
 def test_generation_cleanup_never_deletes_the_active_generation():
@@ -217,22 +242,22 @@ def test_generation_cleanup_never_deletes_the_active_generation():
     cursor.fetchone.return_value = {"active_sync_run_id": RUN_ID}
 
     with patch("backend.api.repository.get_connection", return_value=conn), patch(
-        "backend.db.chroma.get_collection"
-    ) as get_collection:
+        "backend.db.chroma.get_existing_collection"
+    ) as get_existing_collection:
         _cleanup_repo_generation(7, RUN_ID)
 
     assert cursor.execute.call_count == 1
-    get_collection.assert_not_called()
+    get_existing_collection.assert_not_called()
 
 
 def test_generation_cleanup_skips_chroma_when_mysql_state_is_unavailable():
     with patch(
         "backend.api.repository.get_connection",
         side_effect=RuntimeError("mysql unavailable"),
-    ), patch("backend.db.chroma.get_collection") as get_collection:
+    ), patch("backend.db.chroma.get_existing_collection") as get_existing_collection:
         _cleanup_repo_generation(7, RUN_ID)
 
-    get_collection.assert_not_called()
+    get_existing_collection.assert_not_called()
 
 
 def test_status_uses_repository_row_and_counts_only_active_generation():

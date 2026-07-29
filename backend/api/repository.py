@@ -389,8 +389,10 @@ def _delete_repo_data(repo_id: int):
             conn.close()
 
     try:
-        from ..db.chroma import get_collection
-        get_collection().delete(where={"repo_id": repo_id})
+        # Metadata-only deletion does not require the embedding client or
+        # OPENAI_API_KEY, so use the existing-collection cleanup path.
+        from ..db.chroma import delete_from_existing_collection
+        delete_from_existing_collection(where={"repo_id": repo_id})
     except Exception:
         logger.warning("ChromaDB vector cleanup failed for repo_id=%s", repo_id, exc_info=True)
     if project_id is not None:
@@ -439,20 +441,25 @@ def _cleanup_repo_generation(repo_id: int, run_id: str | None) -> None:
         return
 
     try:
-        from ..db.chroma import get_collection
+        # Read/delete through the persisted collection directly so cleanup
+        # never instantiates the embedding client or requires OPENAI_API_KEY.
+        # Normalizing a missing/empty metadata value to None also removes
+        # pre-generation vectors during the first generation publish.
+        from ..db.chroma import get_existing_collection
 
-        collection = get_collection()
-        raw = collection.get(where={"repo_id": repo_id})
-        delete_ids = []
-        for vector_id, metadata in zip(
-            raw.get("ids") or [],
-            raw.get("metadatas") or [],
-        ):
-            vector_run_id = (metadata or {}).get("repo_sync_run_id") or None
-            if vector_run_id == run_id:
-                delete_ids.append(vector_id)
-        if delete_ids:
-            collection.delete(ids=delete_ids)
+        collection = get_existing_collection()
+        if collection is not None:
+            raw = collection.get(where={"repo_id": repo_id})
+            delete_ids = [
+                vector_id
+                for vector_id, metadata in zip(
+                    raw.get("ids") or [],
+                    raw.get("metadatas") or [],
+                )
+                if ((metadata or {}).get("repo_sync_run_id") or None) == run_id
+            ]
+            if delete_ids:
+                collection.delete(ids=delete_ids)
     except Exception:
         logger.warning(
             "repository_chroma_generation_cleanup_failed repo_id=%s",

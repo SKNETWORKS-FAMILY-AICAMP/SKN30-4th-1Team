@@ -8,13 +8,16 @@ from fastapi.testclient import TestClient
 
 from backend.api import query as query_api
 from backend.document_content import (
+    ALLOWED_SUFFIXES,
     DOCUMENT_PARSERS,
     PROJECT_DOCUMENT_MAX_FILE_BYTES,
     QUERY_ATTACHMENT_MAX_FILE_BYTES,
     QUERY_ATTACHMENT_MAX_TOTAL_BYTES,
     extract_document_text,
+    validate_document_bytes,
 )
 from backend.main import app
+from backend.pipeline.converters import supported_suffixes
 
 client = TestClient(app, raise_server_exceptions=False)
 
@@ -64,7 +67,9 @@ def test_capabilities_exactly_match_parser_registry():
     response = client.get("/api/v1/capabilities")
     assert response.status_code == 200
     body = response.json()
-    expected = sorted(suffix.removeprefix(".") for suffix in DOCUMENT_PARSERS)
+    registry_suffixes = supported_suffixes()
+    assert set(DOCUMENT_PARSERS) == set(ALLOWED_SUFFIXES) == set(registry_suffixes)
+    expected = sorted(suffix.removeprefix(".") for suffix in registry_suffixes)
     assert body == {
         "schema_version": 1,
         "project_documents": {
@@ -145,12 +150,23 @@ def test_query_total_size_is_checked_after_text_context_is_full(monkeypatch):
 
 
 def test_advertised_parsers_extract_content():
-    assert extract_document_text("notes.md", b"markdown body") == "markdown body"
-    assert extract_document_text("notes.txt", b"text body") == "text body"
-    assert "PDF body" in extract_document_text("notes.pdf", _make_pdf("PDF body"))
-    docx_text = extract_document_text("meeting.docx", _make_docx("DOCX 본문 추출 성공"))
-    assert "DOCX 본문 추출 성공" in docx_text
-    assert "담당 | 김개발" in docx_text
+    samples = {
+        ".md": (b"markdown body", ("markdown body",)),
+        ".markdown": (b"long markdown body", ("long markdown body",)),
+        ".txt": (b"text body", ("text body",)),
+        ".pdf": (_make_pdf("PDF body"), ("PDF body",)),
+        ".docx": (
+            _make_docx("DOCX 본문 추출 성공"),
+            ("DOCX 본문 추출 성공", "담당 | 김개발"),
+        ),
+    }
+    assert set(samples) == set(supported_suffixes())
+
+    for suffix, (data, expected_fragments) in samples.items():
+        filename = f"advertised{suffix}"
+        validate_document_bytes(filename, data)
+        extracted = extract_document_text(filename, data)
+        assert all(fragment in extracted for fragment in expected_fragments)
 
 
 def test_frontend_has_no_supported_extension_or_size_fallback():
@@ -158,6 +174,8 @@ def test_frontend_has_no_supported_extension_or_size_fallback():
     assert 'extensions: ["md", "txt", "pdf", "docx"]' not in source
     assert "10 * 1024 * 1024" not in source
     assert "getUploadMimeType" not in source
+    assert "extensions: projectDocumentExtensions" in source
+    assert "extensions: queryAttachmentExtensions" in source
 
     capability_source = (Path(__file__).parents[1] / "desktop/src/capabilities.ts").read_text()
     assert "extensions.includes(getFileExtension(name))" in capability_source

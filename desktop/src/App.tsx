@@ -101,10 +101,10 @@ import {
   fetchGithubRepository,
   fetchGithubRepositoryHead,
   fetchGithubUserProfile,
-  getGithubRemoteCheckStatus,
   getGithubOAuthErrorMessage,
   getGithubPanelStateLabel,
   githubCommitShasMatch,
+  shouldRefreshGithubRemote,
 } from "./github";
 import {
   fetchPaimFormData,
@@ -469,7 +469,6 @@ type GithubRepositoryStatusPoll = {
 
 type GithubRepositoryRefreshOptions = {
   force?: boolean;
-  onlyIfRemoteStale?: boolean;
   session?: GithubLoginSessionState | null;
 };
 
@@ -1392,6 +1391,9 @@ function mergeGithubRepositoryInfo(
     commitSha: canPreserveBranchState ? preservedRepository?.commitSha : undefined,
     remoteHeadSha: canPreserveBranchState ? preservedRepository?.remoteHeadSha : null,
     remoteCheckedAt: canPreserveBranchState ? preservedRepository?.remoteCheckedAt : null,
+    remoteCheckAttemptedAt: canPreserveBranchState
+      ? preservedRepository?.remoteCheckAttemptedAt
+      : null,
     remoteCheckStatus: canPreserveBranchState
       ? preservedRepository?.remoteCheckStatus
       : "unknown",
@@ -1431,6 +1433,9 @@ function applyGithubRepositoryStatus(
     commitSha: status.commit_sha ?? null,
     remoteHeadSha: canPreserveRemoteCheck ? repository.remoteHeadSha : null,
     remoteCheckedAt: canPreserveRemoteCheck ? repository.remoteCheckedAt : null,
+    remoteCheckAttemptedAt: canPreserveRemoteCheck
+      ? repository.remoteCheckAttemptedAt
+      : null,
     remoteCheckStatus: canPreserveRemoteCheck
       ? repository.remoteCheckStatus
       : "unknown",
@@ -3099,7 +3104,23 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       return;
     }
 
+    const previousServerUrl = resolvePaimApiRootUrl(serverUrlSyncRef.current);
+    const nextServerUrl = resolvePaimApiRootUrl(settings.serverUrl);
     serverUrlSyncRef.current = settings.serverUrl;
+    if (previousServerUrl !== nextServerUrl) {
+      setProjects((currentProjects) =>
+        currentProjects.map((project) =>
+          project.githubRepository
+            ? {
+                ...project,
+                githubRepository: resetGithubRemoteCheckState(
+                  project.githubRepository,
+                ),
+              }
+            : project,
+        ),
+      );
+    }
     const timeoutId = window.setTimeout(() => {
       void syncProjectsWithServer(false);
     }, 450);
@@ -3606,7 +3627,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     }
 
     const projectId = selectedProjectId;
-    void refreshGithubRepositoryActivity(projectId, { onlyIfRemoteStale: true });
+    void refreshGithubRepositoryActivity(projectId);
 
     const handleWindowFocus = () => {
       void refreshGithubRepositoryHead(projectId);
@@ -4086,6 +4107,19 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         ? { ...project, githubRepository: updater(project.githubRepository) }
         : project,
     );
+  }
+
+  function resetGithubRemoteCheckState(
+    repository: GitRepositoryInfo,
+  ): GitRepositoryInfo {
+    return {
+      ...repository,
+      remoteHeadSha: null,
+      remoteCheckedAt: null,
+      remoteCheckAttemptedAt: null,
+      remoteCheckStatus: "unknown",
+      remoteCheckError: null,
+    };
   }
 
   function getGithubRepositoryPollKey(projectId: string, repoId: number) {
@@ -6273,6 +6307,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         ...currentSessions,
         [projectId]: session,
       }));
+      updateGithubRepository(projectId, resetGithubRemoteCheckState);
       await openExternalUrl(session.verificationUri);
       if (!isGithubOperationCurrent(operation)) {
         return;
@@ -6342,6 +6377,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         ...currentSessions,
         [projectId]: session,
       }));
+      updateGithubRepository(projectId, resetGithubRemoteCheckState);
       await openExternalUrl(session.verificationUri);
       if (!isGithubOperationCurrent(operation)) {
         return;
@@ -6565,6 +6601,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       delete nextRepositories[projectId];
       return nextRepositories;
     });
+    updateGithubRepository(projectId, resetGithubRemoteCheckState);
     setGithubRepositoryQueryForProject(projectId, "");
     setDemoStatus({
       ok: true,
@@ -6717,13 +6754,15 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         return;
       }
 
+      const checkedAt = Date.now();
       updateProject(projectId, (project) => ({
         ...project,
         githubConnected: true,
         githubEvents: events,
         githubRepository: {
           ...repository,
-          remoteCheckedAt: Date.now(),
+          remoteCheckedAt: checkedAt,
+          remoteCheckAttemptedAt: checkedAt,
           remoteCheckStatus: "unknown",
           remoteCheckError: null,
         },
@@ -6773,19 +6812,17 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     if (!project || !repository || !repositoryUrl) {
       return;
     }
-    if (
-      options.onlyIfRemoteStale &&
-      !["error", "unknown"].includes(getGithubRemoteCheckStatus(repository))
-    ) {
-      return;
-    }
     if (repository.authProvider === "github_app" && !session?.state) {
       updateGithubRepository(projectId, (currentRepository) => ({
         ...currentRepository,
+        remoteCheckAttemptedAt: Date.now(),
         remoteCheckStatus: "error",
         remoteCheckError: "session_expired",
       }));
       handleGithubRemoteSessionExpired(projectId);
+      return;
+    }
+    if (!options.force && !shouldRefreshGithubRemote(repository)) {
       return;
     }
 
@@ -6874,6 +6911,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
             commitSha: currentRepository.commitSha,
             remoteHeadSha,
             remoteCheckedAt: Date.now(),
+            remoteCheckAttemptedAt: Date.now(),
             remoteCheckStatus:
               currentRepository.commitSha && remoteHeadSha
                 ? githubCommitShasMatch(currentRepository.commitSha, remoteHeadSha)
@@ -6915,6 +6953,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
           ...currentProject,
           githubRepository: {
             ...currentRepository,
+            remoteCheckAttemptedAt: Date.now(),
             remoteCheckStatus: "error",
             remoteCheckError: sessionExpired ? "session_expired" : "unavailable",
           },
@@ -6946,19 +6985,17 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     if (!project || !repository || !repositoryUrl) {
       return;
     }
-    if (
-      !options.force &&
-      !["error", "unknown"].includes(getGithubRemoteCheckStatus(repository))
-    ) {
-      return;
-    }
     if (repository.authProvider === "github_app" && !session?.state) {
       updateGithubRepository(projectId, (currentRepository) => ({
         ...currentRepository,
+        remoteCheckAttemptedAt: Date.now(),
         remoteCheckStatus: "error",
         remoteCheckError: "session_expired",
       }));
       handleGithubRemoteSessionExpired(projectId);
+      return;
+    }
+    if (!options.force && !shouldRefreshGithubRemote(repository)) {
       return;
     }
 
@@ -7038,6 +7075,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
             ...currentRepository,
             remoteHeadSha: head.remoteHeadSha,
             remoteCheckedAt: Date.now(),
+            remoteCheckAttemptedAt: Date.now(),
             remoteCheckStatus:
               currentRepository.commitSha && head.remoteHeadSha
                 ? githubCommitShasMatch(currentRepository.commitSha, head.remoteHeadSha)
@@ -7076,6 +7114,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
           ...currentProject,
           githubRepository: {
             ...currentRepository,
+            remoteCheckAttemptedAt: Date.now(),
             remoteCheckStatus: "error",
             remoteCheckError: sessionExpired ? "session_expired" : "unavailable",
           },
@@ -7189,20 +7228,28 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
           return;
         }
 
-        updateGithubRepository(projectId, (repository) => ({
-          ...repository,
-          repoId: connected.repo_id,
-          branch: connected.branch ?? repository.branch,
-          syncStatus: connected.status,
-          syncRunId:
-            connected.status === "syncing"
-              ? connected.run_id ?? repository.syncRunId ?? null
-              : connected.run_id ?? null,
-          syncStartedAt: parseGithubSyncStartedAt(connected.sync_started_at),
-          syncStatusCheck: connected.status === "syncing" ? "active" : undefined,
-          lastError: null,
-          syncWarnings: undefined,
-        }));
+        updateGithubRepository(projectId, (repository) => {
+          const branch = connected.branch ?? repository.branch;
+          const repositoryForBranch =
+            branch === repository.branch
+              ? repository
+              : resetGithubRemoteCheckState(repository);
+
+          return {
+            ...repositoryForBranch,
+            repoId: connected.repo_id,
+            branch,
+            syncStatus: connected.status,
+            syncRunId:
+              connected.status === "syncing"
+                ? connected.run_id ?? repository.syncRunId ?? null
+                : connected.run_id ?? null,
+            syncStartedAt: parseGithubSyncStartedAt(connected.sync_started_at),
+            syncStatusCheck: connected.status === "syncing" ? "active" : undefined,
+            lastError: null,
+            syncWarnings: undefined,
+          };
+        });
 
         if (!isGithubOperationCurrent(operation)) {
           return;

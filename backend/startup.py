@@ -271,6 +271,23 @@ def ensure_schema_v10() -> None:
                     "ALTER TABLE repositories ADD COLUMN sync_started_at"
                     " DATETIME(6) NULL AFTER current_sync_run_id"
                 )
+            else:
+                cursor.execute(
+                    "SELECT DATETIME_PRECISION FROM information_schema.COLUMNS"
+                    " WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='repositories'"
+                    " AND COLUMN_NAME='sync_started_at'"
+                )
+                sync_started_at = cursor.fetchone()
+                if (
+                    sync_started_at
+                    and sync_started_at.get("DATETIME_PRECISION") != 6
+                ):
+                    # main의 선행 migration이 DATETIME(0)으로 만든 기존 볼륨도
+                    # fresh v10 schema와 같은 정밀도로 정규화한다.
+                    cursor.execute(
+                        "ALTER TABLE repositories MODIFY COLUMN sync_started_at"
+                        " DATETIME(6) NULL AFTER current_sync_run_id"
+                    )
             if not _column_exists(cursor, "memory", "repo_sync_run_id"):
                 cursor.execute(
                     "ALTER TABLE memory ADD COLUMN repo_sync_run_id"
@@ -437,9 +454,11 @@ def cleanup_stale_repository_generations() -> None:
             conn.close()
 
     try:
-        from .db.chroma import get_collection
+        from .db.chroma import get_existing_collection
 
-        collection = get_collection()
+        collection = get_existing_collection()
+        if collection is None:
+            return
         for repo in repositories:
             raw = collection.get(where={"repo_id": repo["id"]})
             active_run_id = repo.get("active_sync_run_id")

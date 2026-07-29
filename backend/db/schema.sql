@@ -95,6 +95,8 @@ CREATE TABLE IF NOT EXISTS repositories (
     last_reconciled_pr INT      NULL,
     active_sync_run_id CHAR(36) NULL,
     current_sync_run_id CHAR(36) NULL,
+    -- 현재 실행 중인 generation의 시작 시각. 저장소 연결 시각(connected_at)과
+    -- 의미가 다르며 상태 표시와 운영 진단에 사용한다.
     sync_started_at DATETIME(6) NULL,
     connected_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (project_id) REFERENCES projects(id),

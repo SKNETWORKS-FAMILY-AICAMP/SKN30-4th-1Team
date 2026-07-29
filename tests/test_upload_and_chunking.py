@@ -1,9 +1,11 @@
 """_split_text() chunk size 불변식 및 upload_document 비동기 경로 테스트."""
 from unittest.mock import patch, MagicMock, call, ANY
 
+import pytest
 from fastapi.testclient import TestClient
 
 from backend.main import app
+from backend.pipeline.converters import Block, ConvertedDocument
 
 _client = TestClient(app, raise_server_exceptions=False)
 
@@ -272,3 +274,95 @@ def test_upload_preserves_folder_relative_filename():
         assert resp.status_code == 201
         assert reserve.call_args.kwargs["filename"] == "docs/README.md"
         assert finalize.call_args.args[1] == "docs/README.md"
+
+
+# ─── main 동기화 경계 회귀 (N1~N3) ──────────────────────────────────────────
+# origin/main 의 ConvertedDocument·구조 청킹과 이 브랜치의 완료 판정이 upload→ingest
+# 경계에서 자동 병합됐다. git 이 서로 다른 줄이라 합쳐준 것뿐이라, 결합이 의미상
+# 맞는지는 별도로 고정해야 한다.
+
+
+def test_chunk_source_coordinates_reach_chroma_metadata():
+    """N2: 구조 청킹의 출처 좌표가 실제 collection.add 까지 도달하는지 '값'으로 확인한다.
+
+    source_format 은 _build_chunks() 가 아니라 ingest() 가 collection.add 직전에 붙이므로
+    청커 단위 테스트로는 덮이지 않는다. 그리고 평문 폴백 경로도 같은 키를 갖기 때문에
+    (_UNKNOWN_CHUNK_META) **키 존재만 검사하면 구조 경로가 죽어도 통과한다.** 그래서
+    -1/"" 이 아닌 실제 좌표값을 대조한다.
+    """
+    from backend.pipeline import ingestor
+
+    document = ConvertedDocument(
+        source="보고서.pdf", format="pdf",
+        blocks=[Block(order=7, kind="paragraph", text="본문 조각", page=3)],
+    )
+    collection = MagicMock()
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = MagicMock()
+    conn.cursor.return_value.__exit__.return_value = False
+
+    with patch.object(ingestor, "get_connection", return_value=conn), \
+         patch.object(ingestor, "upsert_memory_vectors"), \
+         patch.object(ingestor, "get_collection", return_value=collection):
+        ingestor.ingest(
+            project_id=1, doc_id=5, items=[], raw_text=document.text,
+            source="보고서.pdf", date="2026-04-13", doc_type="meeting",
+            source_metadata={"source_kind": "document"},
+            converted=document,
+        )
+
+    meta = collection.add.call_args.kwargs["metadatas"][0]
+    assert meta["source_format"] == "pdf"   # ingest 가 converted.format 에서 붙이는 값
+    assert meta["page_start"] == 3          # Block.page → chunk_document → to_metadata
+    assert meta["block_start"] == 7         # Block.order 에서 온 실제 좌표
+
+
+@pytest.mark.parametrize("failing_step", ["upsert_memory_vectors", "chunk_add"])
+def test_vector_write_failure_rolls_back_and_leaves_document_unindexed(failing_step):
+    """N3: 벡터 쓰기 두 지점의 실패가 각각 rollback 되고 indexed 로 넘어가지 않는다.
+
+    upsert_memory_vectors(memory 벡터)와 collection.add(문서 청크)는 실패 시점과 남을 수
+    있는 Chroma 기록이 달라 한쪽만 검증하면 다른 쪽 회귀를 놓친다. 기존
+    test_ingest_failure_sets_failed_status 는 ingest 전체를 mock 으로 실패시켜 이 내부
+    두 지점을 구분하지 못하고, test_ingest_skips_supersede_when_chunk_add_fails 는
+    예외 전파와 supersede 미호출만 본다.
+    """
+    from backend.pipeline import ingestor
+
+    document = ConvertedDocument(
+        source="보고서.pdf", format="pdf",
+        blocks=[Block(order=0, kind="paragraph", text="본문 조각", page=1)],
+    )
+    cursor = MagicMock()
+    cursor.fetchone.return_value = {"status": "processing", "processing_token": "tok"}
+    cursor.fetchall.return_value = []
+    cursor.rowcount = 1
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cursor
+    conn.cursor.return_value.__exit__.return_value = False
+
+    collection = MagicMock()
+    boom = RuntimeError("벡터 저장소 장애")
+    upsert_patch = {"side_effect": boom} if failing_step == "upsert_memory_vectors" else {}
+    if failing_step == "chunk_add":
+        collection.add.side_effect = boom
+
+    with patch.object(ingestor, "get_connection", return_value=conn), \
+         patch.object(ingestor, "get_collection", return_value=collection), \
+         patch.object(ingestor, "upsert_memory_vectors", **upsert_patch):
+        with pytest.raises(RuntimeError, match="벡터 저장소 장애"):
+            ingestor.ingest(
+                project_id=1, doc_id=5, items=[], raw_text=document.text,
+                source="보고서.pdf", date="2026-04-13", doc_type="meeting",
+                source_metadata={"source_kind": "document"},
+                converted=document, processing_token="tok",
+            )
+
+    # 예외가 ingest 밖으로 전파됐고(위 raises), 트랜잭션은 되돌려졌다
+    assert conn.rollback.called, "실패 시 rollback 이 호출돼야 한다"
+    # 문서가 indexed 로 확정되지 않았다 — 이게 없으면 벡터 없는 문서가 색인 완료로 남는다
+    indexed_updates = [
+        c for c in cursor.execute.call_args_list
+        if c.args and "status='indexed'" in str(c.args[0])
+    ]
+    assert not indexed_updates, "실패 경로에서 indexed UPDATE 가 실행되면 안 된다"

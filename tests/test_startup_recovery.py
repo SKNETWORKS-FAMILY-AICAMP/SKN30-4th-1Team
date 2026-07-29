@@ -1,4 +1,4 @@
-"""startup recovery: stale processing/syncing 작업 failed 전환 + dev user backfill 테스트."""
+"""Startup recovery, repository generation schema, and dev-user backfill tests."""
 from unittest.mock import patch, MagicMock
 
 from backend.startup import (
@@ -222,7 +222,7 @@ def test_startup_cleanup_retries_all_inactive_generations_before_serving():
     }
 
     with patch("backend.startup.get_connection", return_value=conn), patch(
-        "backend.db.chroma.get_collection", return_value=collection
+        "backend.db.chroma.get_existing_collection", return_value=collection
     ):
         cleanup_stale_repository_generations()
 

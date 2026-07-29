@@ -418,7 +418,7 @@ button:not(:disabled):not([aria-disabled="true"]) {
 .app-shell[data-platform="windows"] {
   --titlebar-offset: 34px;
   --window-control-cluster-width: 48px;
-  grid-template-rows: 34px minmax(0, 1fr);
+  grid-template-rows: var(--titlebar-offset) var(--chrome-height) minmax(0, 1fr);
 }
 
 .app-shell[data-platform="macos"] {
@@ -453,7 +453,10 @@ button:not(:disabled):not([aria-disabled="true"]) {
 }
 
 .windows-titlebar {
+  position: relative;
+  z-index: 100;
   grid-column: 1 / -1;
+  grid-row: 1;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -1291,7 +1294,15 @@ button:not(:disabled):not([aria-disabled="true"]) {
 }
 
 .app-shell[data-platform="windows"] .app-chrome {
-  margin-top: var(--titlebar-offset);
+  grid-row: 2;
+}
+
+.app-shell[data-platform="windows"] .sidebar {
+  grid-row: 2 / -1;
+}
+
+.app-shell[data-platform="windows"] .chat {
+  grid-row: 3;
 }
 
 .chat-context-bar {

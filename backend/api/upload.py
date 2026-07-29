@@ -11,8 +11,14 @@ from ..document_content import (
     ALLOWED_SUFFIXES as _ALLOWED_SUFFIXES,
     PROJECT_DOCUMENT_MAX_FILE_BYTES as _MAX_FILE_BYTES,
     DocumentContentError,
-    extract_document_text,
     supported_formats_label,
+    validate_document_bytes,
+)
+from ..pipeline.converters import (
+    ConversionError,
+    ConvertedDocument,
+    ErrorCode,
+    convert,
 )
 from ..pipeline.extractor import extract
 from ..pipeline.ingestor import ingest
@@ -33,6 +39,7 @@ from ..quota import (
 from ..graph import refresh_project_memory_after_delete, update_project_memory
 from ..rate_limit import RATE_LIMIT_UPLOAD, authenticated_user_key, limiter
 from .auth import get_current_user_id, require_project_access
+from .errors import error_response
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -52,25 +59,46 @@ def _infer_doc_type(filename: str) -> str:
     return "document"
 
 
-# ── 파일 텍스트 추출 ──────────────────────────────────────────────
+# ── 파일 변환 ─────────────────────────────────────────────────────
 
-def _read_pdf(data: bytes) -> str:
-    return extract_document_text("document.pdf", data)
+def _conversion_error_response(exc: ConversionError):
+    """변환 실패를 400 응답으로 만든다.
+
+    `detail`은 반드시 **문자열**이어야 한다. 객체로 내리면 데스크톱 클라이언트가
+    사유를 버리고 "PaiM API 요청 실패"만 표시하던 이력이 있다. 구조화 코드는
+    최상위 `code`에 싣는다 — 클라이언트가 이미 그 자리를 읽는다.
+
+    `error_response()`를 쓰는 이유는 `request_id`를 함께 실어 운영 추적 계약을
+    지키기 위해서다. 직접 JSONResponse를 만들면 그 필드가 빠진다.
+
+    단, 추출 내용의 입력 경계 위반(NUL·과다 제어문자)은 변환 실패가 아니라 검증
+    실패다. `document_content`의 같은 판정과 형식·상태를 맞춰 415로 내보낸다.
+    """
+    if exc.code == ErrorCode.INVALID_CONTENT:
+        return error_response(415, {"code": exc.code, "message": exc.message})
+    return error_response(400, exc.message, code=exc.code)
 
 
-def _extract_text(filename: str, data: bytes) -> str:
-    return extract_document_text(filename, data)
+def _content_error_response(exc: DocumentContentError):
+    """입력 검증 실패(MIME·인코딩·제어문자)를 415 응답으로 만든다.
+
+    변환 실패(400)와 달리 nested `detail` 형태를 유지한다 — main의 기존 계약이며
+    `tests/test_document_content.py`가 이 형식을 고정한다. 데스크톱 클라이언트는
+    nested와 문자열 detail을 모두 읽는다.
+    """
+    return error_response(415, {"code": exc.code, "message": exc.message})
+
+
+def _convert_upload(filename: str, data: bytes) -> ConvertedDocument:
+    """업로드 파일을 구조 보존 변환한다.
+
+    변환은 백그라운드가 아니라 요청 경로에서 수행한다 — 실패 사유를 즉시
+    사용자에게 알려야 하고, 변환된 문서를 폴링 없이 확인할 수 있어야 한다.
+    """
+    return convert(filename, data)
 
 
 # ── 내부 헬퍼 ─────────────────────────────────────────────────────
-
-def _delete_chroma_vectors(doc_id: int):
-    try:
-        from ..db.chroma import get_collection
-        get_collection().delete(where={"doc_id": doc_id})
-    except Exception:
-        logger.warning("ChromaDB vector cleanup failed for doc_id=%s", doc_id)
-
 
 def _delete_document(doc_id: int, refresh_project_memory: bool = True):
     """Transfer document accounting to durable cleanup, then retry cleanup."""
@@ -154,7 +182,7 @@ def _process_upload(
     project_id: int,
     doc_id: int,
     old_doc_ids: list,
-    content: str,
+    document: ConvertedDocument,
     filename: str,
     date: str,
     doc_type: str,
@@ -168,7 +196,7 @@ def _process_upload(
             return
     try:
         _process_upload_locked(
-            project_id, doc_id, old_doc_ids, content, filename, date, doc_type,
+            project_id, doc_id, old_doc_ids, document, filename, date, doc_type,
             file_path, processing_token,
         )
     finally:
@@ -179,7 +207,7 @@ def _process_upload_locked(
     project_id: int,
     doc_id: int,
     old_doc_ids: list,
-    content: str,
+    document: ConvertedDocument,
     filename: str,
     date: str,
     doc_type: str,
@@ -187,6 +215,7 @@ def _process_upload_locked(
     processing_token: str | None = None,
 ):
     """실제 업로드 처리 본문. 호출자는 동시 실행을 제한한다."""
+    content = document.text
     try:
         if processing_token is not None and not processing_owned(doc_id, processing_token, renew=True):
             return
@@ -219,6 +248,7 @@ def _process_upload_locked(
                 "source_type": doc_type,
                 "source_path": filename,
             },
+            converted=document,
             processing_token=processing_token,
         )
     except asyncio.CancelledError:
@@ -260,25 +290,44 @@ async def upload_document(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid filename")
     if Path(filename).suffix.lower() not in _ALLOWED_SUFFIXES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"지원하지 않는 파일 형식입니다. ({supported_formats_label()})",
+        # 최상위 code가 없으면 명세에 있는 unsupported_format을 클라이언트가 받을 수
+        # 없어, 기계 판독 계약이 코드 안에서만 참이 된다.
+        return error_response(
+            400,
+            f"지원하지 않는 파일 형식입니다. ({supported_formats_label()})",
+            code=ErrorCode.UNSUPPORTED_FORMAT,
         )
     doc_type = _infer_doc_type(filename)
+
+    # 인증·인가를 본문 소비보다 먼저 한다. 이 순서가 뒤집혀 있으면 AuthMiddleware 를
+    # 통과한 사용자가 "해당 프로젝트의 구성원이 아니어도" 본문 전체를 Python 메모리로
+    # 올릴 수 있다. 크기 상한 검사도 read() 뒤에 있으면 상한 초과 요청조차 전부 읽은
+    # 뒤에야 413 이 나가므로 상한이 소비 차단 역할을 못 한다.
+    #
+    # 한계: FastAPI 는 UploadFile 의존성을 만들려고 엔드포인트 진입 전에 multipart 를
+    # 파싱·스풀한다. 따라서 이 순서는 "메모리로 다시 읽는 것"을 막을 뿐 네트워크 수신과
+    # 임시 파일 스풀은 이미 일어난다. 스트리밍 단계 상한은 별도 ASGI/프록시 작업이다.
+    user_id = require_upload_user()
+    require_project_access(project_id, min_role="member")
 
     data = await file.read()
     if len(data) > _MAX_FILE_BYTES:
         raise HTTPException(status_code=413, detail="파일 크기는 10 MB를 초과할 수 없습니다.")
-    user_id = require_upload_user()
-    require_project_access(project_id, min_role="member")
+
+    # 안전성 검증(MIME·인코딩·제어문자)이 먼저다 — 415.
     try:
-        content = extract_document_text(filename, data)
+        validate_document_bytes(filename, data)
     except DocumentContentError as exc:
-        raise HTTPException(
-            status_code=415,
-            detail={"code": exc.code, "message": exc.message},
-        ) from exc
-    if not content.strip():
+        return _content_error_response(exc)
+
+    # 구조 보존 변환 — 400. 예약 전에 수행해 실패 시 정리할 예약이 없게 한다.
+    try:
+        document = _convert_upload(filename, data)
+    except ConversionError as exc:
+        logger.info("문서 변환 실패 filename=%s code=%s", filename, exc.code)
+        return _conversion_error_response(exc)
+
+    if not document.text.strip():
         raise HTTPException(status_code=400, detail="content must not be empty")
     reservation = reserve_document(
         project_id, user_id, len(data), "physical", filename=filename
@@ -292,10 +341,26 @@ async def upload_document(
 
     background_tasks.add_task(
         _process_upload, project_id, finalized["doc_id"], finalized["old_doc_ids"],
-        content, filename, date, doc_type, finalized["file_path"], finalized["processing_token"],
+        document, filename, date, doc_type, finalized["file_path"], finalized["processing_token"],
     )
 
-    return {"doc_id": finalized["doc_id"], "status": "processing"}
+    if document.warnings:
+        logger.info(
+            "문서 변환 경고 doc_id=%s count=%s codes=%s",
+            finalized["doc_id"], len(document.warnings),
+            sorted({w.code for w in document.warnings}),
+        )
+
+    # 변환 경고는 폴링 없이 즉시 돌려준다 — 표 평탄화·머리말 제거처럼 "성공했지만
+    # 원본과 다른" 부분을 사용자가 업로드 직후에 알 수 있어야 한다.
+    return {
+        "doc_id": finalized["doc_id"],
+        "status": "processing",
+        "format": document.format,
+        "blocks": len(document.blocks),
+        "pages": document.page_count,
+        "warnings": document.warning_dicts(),
+    }
 
 
 @router.get("/projects/{project_id}/documents")

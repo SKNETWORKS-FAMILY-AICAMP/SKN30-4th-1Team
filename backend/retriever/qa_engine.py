@@ -396,7 +396,12 @@ def _row_line_body(r: Dict) -> str:
             meta.append(f"상태 근거: {r['completion_status_source']}")
 
     meta_text = f" ({', '.join(meta)})" if meta else ""
-    return f"{r['content']}{meta_text} (출처: {_row_source_label(r)})"
+    line = f"{r['content']}{meta_text} (출처: {_row_source_label(r)})"
+    # reason 은 여기서 한 번만 붙인다 — 일반 행·이력 행·structured tool 출력이 모두
+    # 이 함수를 거치므로, 호출부에서 또 붙이면 "이유: X 이유: X" 가 된다.
+    if r.get("reason"):
+        line += f" 이유: {r['reason']}"
+    return line
 
 
 def _format_mysql_row(r: Dict) -> str:
@@ -427,11 +432,12 @@ def _annotation_for(r: Dict, preds: Dict[int, List[int]]) -> str:
 
 
 def _format_history_row(r: Dict, annotation: str) -> str:
-    """관계 참여 행의 컨텍스트 라인: 주석 접두 + 공통 꼬리 + (있으면) 이유."""
-    line = f"{annotation} {_row_line_body(r)}"
-    if r.get("reason"):
-        line += f" 이유: {r['reason']}"
-    return line
+    """관계 참여 행의 컨텍스트 라인: 주석 접두 + 공통 꼬리.
+
+    reason 렌더링은 _row_line_body() 가 전담한다 — 여기서 또 붙이면 LLM 입력과
+    RAGAS rendered 컨텍스트에 "이유: X 이유: X" 가 들어간다.
+    """
+    return f"{annotation} {_row_line_body(r)}"
 
 
 def _reverse_bfs_levels(

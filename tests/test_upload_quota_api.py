@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from backend.api.query import GitLogUpload, upload_git_log
 from backend.api.upload import _process_upload_locked, upload_document
+from backend.pipeline.converters import convert
 from backend import quota as quota_module
 from backend.graph import store_node
 from backend.main import app
@@ -134,7 +135,9 @@ def test_positive_dev_user_failure_precedes_access_and_payload_side_effects(
     ) as multipart_access, patch(
         "backend.api.query.require_project_access"
     ) as git_access, patch(
-        "backend.api.upload.extract_document_text"
+        # payload 처리의 최전방. 사용자 확인이 이보다 먼저 실패해야 한다는 것이
+        # 이 테스트의 계약이므로, 변환(_convert_upload)이 아니라 검증 진입점을 잡는다.
+        "backend.api.upload.validate_document_bytes"
     ) as multipart_extract, patch(
         "backend.api.upload.reserve_document"
     ) as multipart_reserve, patch(
@@ -261,7 +264,9 @@ def test_multipart_post_finalize_cancellation_compensates_document(cancel_stage)
                 project_id=1,
                 doc_id=41,
                 old_doc_ids=[],
-                content="payload",
+                # 변환 계층 도입으로 인자가 평문 content에서 ConvertedDocument로 바뀌었다.
+                # 이 테스트의 관심사는 취소 보상이므로 최소 구조만 만들어 넘긴다.
+                document=convert("cancel.txt", b"payload"),
                 filename="cancel.txt",
                 date="",
                 doc_type="meeting",
@@ -354,3 +359,58 @@ def test_cancel_compensation_does_not_consume_base_exception(signal_type):
     with patch.object(quota_module, "fail_document", side_effect=signal_type()):
         with pytest.raises(signal_type):
             quota_module.compensate_cancelled_document(45)
+
+
+def _cleanup_conns(doc_status: str):
+    """transfer_document_to_cleanup용 get_connection 목록(snapshot conn, 본 conn)."""
+    snap_cur = MagicMock()
+    snap_cur.fetchone.return_value = {"project_id": 1, "uploaded_by": 7}
+    snap = MagicMock()
+    snap.cursor.return_value.__enter__.return_value = snap_cur
+    snap.cursor.return_value.__exit__.return_value = False
+
+    cur = MagicMock()
+    cur.fetchone.side_effect = [
+        {"id": 7},                       # 사용자 행 잠금
+        {"id": 1},                       # 프로젝트 행 잠금
+        {                                # 대상 문서
+            "id": 5, "project_id": 1, "status": doc_status,
+            "uploaded_by": 7, "file_path": None, "size_bytes": 0,
+            "processing_token": None,
+        },
+    ]
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    conn.cursor.return_value.__exit__.return_value = False
+    return [snap, conn], cur
+
+
+def test_user_delete_removes_failed_document():
+    """failed 문서도 사용자 삭제로 지워져야 한다.
+
+    delete_document는 204를 돌려주는데 행이 남아 재시도해도 지울 수 없었다. LLM 실패로
+    생긴 failed 문서가 목록에 영구히 쌓이고 정리할 방법이 없다."""
+    conns, cur = _cleanup_conns("failed")
+    with patch.object(quota_module, "get_connection", side_effect=conns):
+        project_id = quota_module.transfer_document_to_cleanup(
+            5, "DOCUMENT_DELETED", delete_row=True
+        )
+
+    assert project_id == 1
+    deletes = [c.args[0] for c in cur.execute.call_args_list if c.args[0].startswith("DELETE FROM documents")]
+    assert deletes == ["DELETE FROM documents WHERE id=%s"]  # status 필터로 다시 막지 않는다
+
+
+def test_failure_path_still_skips_already_failed_document():
+    """실패 처리 경로는 이미 failed인 문서를 다시 정리 큐에 넣지 않는다(멱등성).
+
+    위 수정이 이 구분까지 지우지 않았는지 고정한다 — 지우면 fail_document가 반복 호출될
+    때마다 cleanup 행과 파일 삭제를 다시 시도한다."""
+    conns, cur = _cleanup_conns("failed")
+    with patch.object(quota_module, "get_connection", side_effect=conns):
+        project_id = quota_module.transfer_document_to_cleanup(5, "UPLOAD_INGEST_FAILED")
+
+    assert project_id is None
+    assert not any(
+        "storage_cleanup_pending" in c.args[0] for c in cur.execute.call_args_list
+    )

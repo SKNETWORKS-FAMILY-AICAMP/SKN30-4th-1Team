@@ -23,9 +23,13 @@ def _delete_project_chroma(project_id: int, has_indexed_children: bool) -> None:
     if not has_indexed_children:
         return
 
-    from ..db.chroma import get_collection
+    # get_collection()이 아니라 delete_from_existing_collection을 쓴다 — 전자는 임베딩
+    # 클라이언트를 만들려고 OPENAI_API_KEY를 요구하는데, metadata 조건 삭제에는 임베딩이
+    # 필요 없다. 키가 없거나 placeholder면 프로젝트 삭제가 통째로 500으로 실패했다.
+    # (같은 이유로 quota.py의 문서 정리 경로는 이미 이 함수를 쓴다.)
+    from ..db.chroma import delete_from_existing_collection
 
-    get_collection().delete(where={"project_id": project_id})
+    delete_from_existing_collection(where={"project_id": project_id})
 
 
 def _delete_project_files(project_id: int, document_rows: list[dict]) -> None:
@@ -270,6 +274,9 @@ def delete_project(project_id: int):
             logger.error(
                 "project_delete_failed",
                 extra={"project_id": project_id, "code": "PROJECT_DELETE_FAILED"},
+                # 원인 예외를 남긴다 — 없으면 500만 보이고 무엇이 터졌는지 알 수 없다.
+                # 실제로 이 가드가 OPENAI_API_KEY 관련 RuntimeError를 통째로 삼키고 있었다.
+                exc_info=True,
             )
             raise HTTPException(status_code=500, detail="Project delete failed")
         finally:

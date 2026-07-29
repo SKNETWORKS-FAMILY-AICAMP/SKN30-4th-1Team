@@ -140,6 +140,21 @@ export function githubCommitShasMatch(left?: string | null, right?: string | nul
   );
 }
 
+export function shouldRefreshGithubRemote(
+  repository: GitRepositoryInfo,
+  now = Date.now(),
+) {
+  const attemptedAt =
+    repository.remoteCheckAttemptedAt ?? repository.remoteCheckedAt;
+
+  return (
+    typeof attemptedAt !== "number" ||
+    !Number.isFinite(attemptedAt) ||
+    now < attemptedAt ||
+    now - attemptedAt >= GITHUB_REMOTE_HEAD_TTL_MS
+  );
+}
+
 export function getGithubRemoteCheckStatus(
   repository: GitRepositoryInfo,
   now = Date.now(),

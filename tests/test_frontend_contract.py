@@ -197,9 +197,15 @@ def _conn_for_memory_patch(row):
 
 
 def test_upload_oversized_file_returns_413():
-    """10 MB 초과 파일 업로드는 413을 반환한다."""
+    """10 MB 초과 파일 업로드는 413을 반환한다.
+
+    F-012 이후 인증·인가가 크기 검사보다 먼저 실행되므로 `require_upload_user` 도
+    함께 목으로 잡아야 이 계약(정상 구성원의 대용량 업로드 → 413)에 도달한다.
+    비구성원은 크기 검사에 이르기 전에 403 으로 거부되며, 그것이 의도된 동작이다.
+    """
     big_data = b"x" * (10 * 1024 * 1024 + 1)
-    with patch("backend.api.upload.require_project_access"), \
+    with patch("backend.api.upload.require_upload_user", return_value=1), \
+         patch("backend.api.upload.require_project_access"), \
          patch("backend.api.upload.get_connection",
                side_effect=_conn_seq_upload({"id": 1}, {"id": 1})):
         resp = _client.post(

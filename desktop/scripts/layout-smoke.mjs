@@ -282,11 +282,11 @@ function createPaimApiMockScript() {
           return json({
             schema_version: 1,
             project_documents: {
-              extensions: ["docx", "md", "pdf", "txt"],
+              extensions: ["docx", "markdown", "md", "pdf", "txt"],
               max_file_bytes: 10 * 1024 * 1024,
             },
             query_attachments: {
-              extensions: ["docx", "md", "pdf", "txt"],
+              extensions: ["docx", "markdown", "md", "pdf", "txt"],
               max_file_bytes: 8 * 1024 * 1024,
               max_total_bytes: 8 * 1024 * 1024,
             },
@@ -3974,7 +3974,7 @@ async function verifyProjectCreationFlow(send) {
 }
 
 // 프로젝트 홈 native drop은 로컬 행만 남기지 않고 PDF를 서버 문서로 확정해야 한다.
-async function verifyProjectHomeDroppedPdfUpload(send) {
+async function verifyProjectHomeDroppedDynamicUpload(send) {
   const seededProjectState = createProjectStorage(
     "project-drop-upload",
     "Drop Upload Project",
@@ -4038,7 +4038,7 @@ async function verifyProjectHomeDroppedPdfUpload(send) {
         return {
           emittedListeners: window.__paimLayoutEmitTauriEvent?.(
             'tauri://drag-drop',
-            { paths: ['/mock/drop.pdf'], position },
+            { paths: ['/mock/drop.markdown'], position },
           ) ?? 0,
           foundCanvas: true,
         };
@@ -4071,7 +4071,7 @@ async function verifyProjectHomeDroppedPdfUpload(send) {
           (project) => project.id === savedState.selectedProjectId,
         );
         const storedFile = activeProject?.files?.find(
-          (file) => file.name === 'drop.pdf',
+          (file) => file.name === 'drop.markdown',
         );
         const apiCalls = window.__paimLayoutApiCalls || [];
         const summary = Object.fromEntries(
@@ -4120,37 +4120,37 @@ async function verifyProjectHomeDroppedPdfUpload(send) {
     if (value.upload.projectPostCalls.length !== 1 ||
         value.upload.documentPostCalls.length !== 1 ||
         value.upload.apiProjectId !== 1000) {
-      failures.push("dropping a PDF should create its server project and upload one document");
+      failures.push("dropping a runtime-advertised extension should create its server project and upload one document");
     }
 
     const lastFile = value.upload.documentControl?.lastFile;
     if (value.upload.documentControl?.requested !== 1 ||
         value.upload.documentControl?.resolved !== 1 ||
         !lastFile ||
-        lastFile.name !== "drop.pdf" ||
+        lastFile.name !== "drop.markdown" ||
         lastFile.type !== "application/octet-stream" ||
         lastFile.size <= 0) {
-      failures.push("native PDF drop should send one non-empty generic binary multipart file");
+      failures.push("runtime-advertised native drop should send one non-empty generic binary multipart file");
     }
 
     if (value.upload.documentControl?.deleted !== 0 ||
         value.upload.deleteCalls.length !== 0) {
-      failures.push("a completed native PDF drop must not issue a compensating document DELETE");
+      failures.push("a completed runtime-advertised drop must not issue a compensating document DELETE");
     }
 
-    if (value.upload.storedFile?.name !== "drop.pdf" ||
+    if (value.upload.storedFile?.name !== "drop.markdown" ||
         value.upload.storedFile?.docId !== 7000 ||
         value.upload.storedFile?.documentStatus !== "indexed" ||
-        value.upload.rowName !== "drop.pdf" ||
+        value.upload.rowName !== "drop.markdown" ||
         value.upload.rowStatus !== "indexed" ||
         value.upload.rowStatusText !== "완료") {
-      failures.push("a dropped PDF should remain linked to its indexed server document");
+      failures.push("a runtime-advertised dropped file should remain linked to its indexed server document");
     }
 
     if (value.upload.summary.ready !== "1개 완료" ||
         value.upload.summary.processing !== "0개 처리 중" ||
         value.upload.summary.failed !== "0개 실패") {
-      failures.push("project home should count the dropped PDF as one completed document");
+      failures.push("project home should count the runtime-advertised file as one completed document");
     }
   } finally {
     await send("Page.removeScriptToEvaluateOnNewDocument", {
@@ -8874,8 +8874,29 @@ async function verifyGithubRemoteFreshnessStates(send) {
       const repository = stored.projects?.[0]?.githubRepository || {};
       return {
         cardText: document.querySelector('.overview-github-sync-summary[data-status="error"]')?.textContent.trim() || "",
+        headCalls: window.__paimGithubFreshness?.headCalls ?? 0,
         quietStatus: document.querySelector('.overview-github-sync-quiet')?.textContent.trim() || "",
+        remoteCheckAttemptedAt: repository.remoteCheckAttemptedAt || null,
         remoteCheckError: repository.remoteCheckError || null,
+        remoteCheckStatus: repository.remoteCheckStatus || null,
+      };
+    })()`,
+  });
+  await send("Runtime.evaluate", {
+    expression: `(() => {
+      window.dispatchEvent(new Event('focus'));
+      window.dispatchEvent(new Event('focus'));
+    })()`,
+  });
+  await sleep(100);
+  const cachedFailureResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const stored = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
+      const repository = stored.projects?.[0]?.githubRepository || {};
+      return {
+        headCalls: window.__paimGithubFreshness?.headCalls ?? 0,
+        remoteCheckAttemptedAt: repository.remoteCheckAttemptedAt || null,
         remoteCheckStatus: repository.remoteCheckStatus || null,
       };
     })()`,
@@ -8906,6 +8927,7 @@ async function verifyGithubRemoteFreshnessStates(send) {
         headCalls: window.__paimGithubFreshness?.headCalls ?? 0,
         metadataCalls: window.__paimGithubFreshness?.metadataCalls ?? 0,
         quietStatus: document.querySelector('.overview-github-sync-quiet')?.textContent.trim() || "",
+        remoteCheckAttemptedAt: repository.remoteCheckAttemptedAt || null,
         remoteCheckedAt: repository.remoteCheckedAt || null,
         remoteCheckError: repository.remoteCheckError || null,
         remoteCheckStatus: repository.remoteCheckStatus || null,
@@ -9037,19 +9059,224 @@ async function verifyGithubRemoteFreshnessStates(send) {
     })()`,
   });
 
+  const unknownAttemptState = createProjectStorage(
+    "project-github-freshness-unknown",
+    "GitHub Freshness Unknown",
+    [
+      {
+        id: "session-github-freshness-unknown",
+        title: "GitHub Freshness Unknown Chat",
+        createdAt: now,
+        messages: [],
+      },
+    ],
+    "session-github-freshness-unknown",
+    [],
+    {
+      apiProjectId: 94,
+      githubConnected: true,
+      githubRepository: {
+        path: repositoryUrl,
+        name: "Freshness",
+        branch: "release/1.x",
+        isDirty: false,
+        remoteRepo: "smoke/Freshness",
+        issuePrStatus: "서버 연결됨",
+        visibility: "public",
+        authProvider: "public",
+        repoId: 707,
+        syncStatus: "indexed",
+        syncRunId: "run-freshness-unknown",
+        commitSha: null,
+        remoteHeadSha: indexedSha,
+        remoteCheckedAt: now,
+        remoteCheckAttemptedAt: now,
+        remoteCheckStatus: "unknown",
+      },
+    },
+  );
+
+  await evaluateAndNavigateToSelector(
+    send,
+    `
+      const settings = JSON.parse(
+        localStorage.getItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}) || '{}',
+      );
+      settings.language = 'ko';
+      settings.serverUrl = ${JSON.stringify(API_SERVER_A)};
+      localStorage.setItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}, JSON.stringify(settings));
+      localStorage.setItem(${JSON.stringify(AUTH_SCENARIO_STORAGE_KEY)}, 'owner');
+      localStorage.setItem(${JSON.stringify(AUTH_STORAGE_KEY)}, ${JSON.stringify(JSON.stringify(AUTH_SESSION))});
+      localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)});
+      localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false');
+      localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(unknownAttemptState)});
+
+      const unknownBaseFetch = window.fetch.bind(window);
+      const unknownAttempt = {
+        activityCalls: 0,
+        headCalls: 0,
+        metadataCalls: 0,
+      };
+      window.__paimGithubUnknownAttempt = unknownAttempt;
+      const response = (payload, status = 200) => Promise.resolve(new Response(
+        JSON.stringify(payload),
+        { status, headers: { 'Content-Type': 'application/json' } },
+      ));
+      window.fetch = async (input, init = {}) => {
+        const rawUrl = typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+        const url = new URL(rawUrl, location.origin);
+        const method = String(init?.method || 'GET').toUpperCase();
+
+        if (url.pathname === '/api/v1/projects/94/repositories' && method === 'GET') {
+          return response([{
+            id: 707,
+            provider: 'github',
+            repository_url: ${JSON.stringify(repositoryUrl)},
+            branch: 'release/1.x',
+            status: 'indexed',
+            run_id: 'run-freshness-unknown',
+          }]);
+        }
+        if (url.pathname === '/api/v1/projects/94/repositories/707/status' && method === 'GET') {
+          return response({
+            repo_id: 707,
+            status: 'indexed',
+            provider: 'github',
+            repository_url: ${JSON.stringify(repositoryUrl)},
+            branch: 'release/1.x',
+            run_id: 'run-freshness-unknown',
+            commit_sha: null,
+            indexed_files: 0,
+            last_error: null,
+            sync_warning: null,
+          });
+        }
+        if (url.href === ${JSON.stringify(repositoryUrl.replace("github.com", "api.github.com/repos"))}) {
+          unknownAttempt.metadataCalls += 1;
+          return response({
+            default_branch: 'main',
+            full_name: 'smoke/Freshness',
+            html_url: ${JSON.stringify(repositoryUrl)},
+            name: 'Freshness',
+            private: false,
+          });
+        }
+        if (url.href.startsWith(${JSON.stringify(
+          repositoryUrl.replace("github.com", "api.github.com/repos") + "/commits",
+        )})) {
+          if (url.searchParams.get('per_page') === '1') {
+            unknownAttempt.headCalls += 1;
+          } else {
+            unknownAttempt.activityCalls += 1;
+          }
+          return response([{
+            html_url: ${JSON.stringify(`${repositoryUrl}/commit/${indexedSha}`)},
+            sha: ${JSON.stringify(indexedSha)},
+            commit: {
+              author: { date: ${JSON.stringify(new Date(now - 60_000).toISOString())} },
+              message: 'unknown head',
+            },
+          }]);
+        }
+        if (url.href.startsWith(${JSON.stringify(
+          repositoryUrl.replace("github.com", "api.github.com/repos") + "/issues",
+        )}) || url.href.startsWith(${JSON.stringify(
+          repositoryUrl.replace("github.com", "api.github.com/repos") + "/pulls",
+        )})) {
+          return response([]);
+        }
+
+        return unknownBaseFetch(input, init);
+      };
+    `,
+    APP_URL,
+    ".project-panel-menu",
+  );
+  await send("Runtime.evaluate", {
+    expression: `Array.from(document.querySelectorAll('.project-panel-menu button'))
+      .find((button) => button.textContent.includes('GitHub'))?.click()`,
+  });
+  await waitForSelector(send, '.overview-github-sync-summary[data-status="unknown"]');
+  await send("Runtime.evaluate", {
+    expression: `(() => {
+      window.dispatchEvent(new Event('focus'));
+      window.dispatchEvent(new Event('focus'));
+    })()`,
+  });
+  await sleep(100);
+  const unknownAutomaticResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const stored = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
+      const repository = stored.projects?.[0]?.githubRepository || {};
+      return {
+        activityCalls: window.__paimGithubUnknownAttempt?.activityCalls ?? 0,
+        headCalls: window.__paimGithubUnknownAttempt?.headCalls ?? 0,
+        metadataCalls: window.__paimGithubUnknownAttempt?.metadataCalls ?? 0,
+        remoteCheckAttemptedAt: repository.remoteCheckAttemptedAt || null,
+        remoteCheckStatus: repository.remoteCheckStatus || null,
+      };
+    })()`,
+  });
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector('.overview-github-sync-summary[data-status="unknown"] button')?.click()`,
+  });
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const manualHeadCalls = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `window.__paimGithubUnknownAttempt?.headCalls ?? 0`,
+    });
+    if (manualHeadCalls.result.value >= 1) {
+      break;
+    }
+    await sleep(25);
+  }
+  await sleep(50);
+  const unknownManualResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const stored = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
+      const repository = stored.projects?.[0]?.githubRepository || {};
+      return {
+        activityCalls: window.__paimGithubUnknownAttempt?.activityCalls ?? 0,
+        headCalls: window.__paimGithubUnknownAttempt?.headCalls ?? 0,
+        metadataCalls: window.__paimGithubUnknownAttempt?.metadataCalls ?? 0,
+        remoteCheckAttemptedAt: repository.remoteCheckAttemptedAt || null,
+        remoteCheckStatus: repository.remoteCheckStatus || null,
+      };
+    })()`,
+  });
+
   const value = {
+    cachedFailure: cachedFailureResult.result.value,
     expired: expiredResult.result.value,
     failure: failureResult.result.value,
     recovered: recoveredResult.result.value,
+    unknownAutomatic: unknownAutomaticResult.result.value,
+    unknownManual: unknownManualResult.result.value,
   };
   const failures = [];
 
   if (value.failure.remoteCheckStatus !== "error" ||
       value.failure.remoteCheckError !== "unavailable" ||
+      value.failure.headCalls !== 1 ||
+      value.failure.remoteCheckAttemptedAt <= now ||
       !value.failure.cardText.includes("다시 확인") ||
       value.failure.quietStatus === "최신 상태") {
     failures.push(
       "a failed stale HEAD check should stop advertising the previous success and offer a retry",
+    );
+  }
+
+  if (value.cachedFailure.headCalls !== 1 ||
+      value.cachedFailure.remoteCheckStatus !== "error" ||
+      value.cachedFailure.remoteCheckAttemptedAt !== value.failure.remoteCheckAttemptedAt) {
+    failures.push(
+      "automatic focus events should respect the failed-attempt cache instead of retrying GitHub immediately",
     );
   }
 
@@ -9059,6 +9286,7 @@ async function verifyGithubRemoteFreshnessStates(send) {
       value.recovered.headCalls !== 2 ||
       value.recovered.remoteCheckStatus !== "current" ||
       value.recovered.remoteCheckError ||
+      value.recovered.remoteCheckAttemptedAt < value.failure.remoteCheckAttemptedAt ||
       value.recovered.remoteCheckedAt <= now ||
       value.recovered.quietStatus !== "최신 상태" ||
       !value.recovered.requestedBranches.every((branch) => branch === "release/1.x")) {
@@ -9077,6 +9305,26 @@ async function verifyGithubRemoteFreshnessStates(send) {
       !value.expired.syncDisabled) {
     failures.push(
       `an expired GitHub App session should preserve the indexed repository and require reauthentication: ${JSON.stringify(value.expired)}`,
+    );
+  }
+
+  if (value.unknownAutomatic.activityCalls !== 0 ||
+      value.unknownAutomatic.headCalls !== 0 ||
+      value.unknownAutomatic.metadataCalls !== 0 ||
+      value.unknownAutomatic.remoteCheckAttemptedAt !== now ||
+      value.unknownAutomatic.remoteCheckStatus !== "unknown") {
+    failures.push(
+      "a fresh attempt should suppress automatic activity and HEAD reads even when indexed SHA is absent",
+    );
+  }
+
+  if (value.unknownManual.activityCalls !== 0 ||
+      value.unknownManual.headCalls !== 1 ||
+      value.unknownManual.metadataCalls !== 0 ||
+      value.unknownManual.remoteCheckAttemptedAt < now ||
+      value.unknownManual.remoteCheckStatus !== "unknown") {
+    failures.push(
+      "manual latest-state checks should bypass the attempt cache and stay explicit when indexed SHA is absent",
     );
   }
 
@@ -10780,14 +11028,14 @@ try {
     console.log("PASS new projects are created as active workspaces");
   }
 
-  const projectHomeDroppedPdfResult = await verifyProjectHomeDroppedPdfUpload(send);
+  const projectHomeDroppedDynamicResult = await verifyProjectHomeDroppedDynamicUpload(send);
 
-  if (projectHomeDroppedPdfResult.failures.length > 0) {
+  if (projectHomeDroppedDynamicResult.failures.length > 0) {
     hasFailures = true;
-    console.log("FAIL project home native PDF drop upload");
-    projectHomeDroppedPdfResult.failures.forEach((failure) => console.log(`  - ${failure}`));
+    console.log("FAIL project home runtime-advertised native drop upload");
+    projectHomeDroppedDynamicResult.failures.forEach((failure) => console.log(`  - ${failure}`));
   } else {
-    console.log("PASS project home native PDF drop uploads without cancellation");
+    console.log("PASS project home accepts a runtime-advertised extension without frontend changes");
   }
 
   const projectHomeDroppedPdfCancellationResult =

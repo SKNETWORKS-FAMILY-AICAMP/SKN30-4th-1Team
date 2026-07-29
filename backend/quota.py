@@ -378,7 +378,13 @@ def transfer_document_to_cleanup(
                 return None
             cursor.execute("SELECT * FROM documents WHERE id=%s FOR UPDATE", (doc_id,))
             row = cursor.fetchone()
-            if not row or row["status"] == "failed":
+            if not row:
+                return None
+            if row["status"] == "failed" and not delete_row:
+                # 실패 처리 경로(fail_document/fail_stale_document)는 이미 failed인 문서를
+                # 다시 정리 큐에 넣지 않는다 — 멱등성 장치. 반면 사용자 삭제(delete_row=True)는
+                # failed 문서에도 적용돼야 한다. 이 구분이 없어 DELETE 요청이 204를 돌려주면서
+                # 행은 그대로 남았고, 재시도해도 같아서 지울 방법이 아예 없었다.
                 return None
             if expected_processing_token is not None:
                 if (
@@ -403,7 +409,9 @@ def transfer_document_to_cleanup(
             )
             cursor.execute("DELETE FROM memory WHERE doc_id=%s", (doc_id,))
             if delete_row:
-                cursor.execute("DELETE FROM documents WHERE id=%s AND status<>'failed'", (doc_id,))
+                # status 조건 없음 — 위 분기에서 delete_row=True만 failed를 통과시키므로,
+                # 여기서 다시 거르면 그 문서가 영구히 안 지워진다(이중 차단이었다).
+                cursor.execute("DELETE FROM documents WHERE id=%s", (doc_id,))
             else:
                 cursor.execute(
                     "UPDATE documents SET status='failed',last_error=%s,size_bytes=0,file_path=NULL,"
