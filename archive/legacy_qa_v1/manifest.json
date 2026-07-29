@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "name": "legacy_qa_v1",
   "purpose": "Immutable router-branching Q&A comparison baseline",
   "baseline": {
@@ -25,5 +25,20 @@
   },
   "tracked_files": "source/file_blobs.tsv",
   "legacy_test_targets": "tests/baseline_pytest.txt",
-  "current_test_targets": "tests/current_pytest.txt"
+  "current_test_targets": "tests/current_pytest.txt",
+  "comparison_evaluation": {
+    "runner": "backend/test/golden/run_eval.py",
+    "dataset_paths": [
+      "backend/test/golden/Test_modu",
+      "backend/test/golden/Test_CS-Bot",
+      "backend/test/golden/routing_expected.json",
+      "backend/test/golden/golden_supersede_pairs.json"
+    ],
+    "execution": "sequential detached worktrees",
+    "shared_mutable_resources": [
+      "Docker container paim-eval-db",
+      "127.0.0.1:3316",
+      "OpenAI API quota"
+    ]
+  }
 }

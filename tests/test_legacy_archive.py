@@ -3,13 +3,29 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
+import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE_ROOT = REPO_ROOT / "archive" / "legacy_qa_v1"
+COMPARISON_SCRIPT = ARCHIVE_ROOT / "scripts" / "run_comparison.py"
+
+
+def _load_comparison_module():
+    spec = importlib.util.spec_from_file_location(
+        "legacy_qa_comparison", COMPARISON_SCRIPT
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 def _imports_archive(path: Path) -> bool:
@@ -55,6 +71,111 @@ def test_archive_is_excluded_from_the_runtime_build_inputs():
 
     assert 'packages = ["backend", "frontend"]' in pyproject
     assert "COPY archive/" not in dockerfile
+
+
+def test_comparison_plan_is_key_free_sha_pinned_and_route_neutral(tmp_path):
+    candidate = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    output = tmp_path / "comparison"
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key != "OPENAI_API_KEY"
+    }
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(COMPARISON_SCRIPT),
+            "plan",
+            "both",
+            "--candidate-ref",
+            candidate,
+            "--output-dir",
+            str(output),
+            "--corpus",
+            "modu",
+            "--phase",
+            "dev",
+            "--run-id",
+            "unit-plan-01",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    metadata = json.loads((output / "comparison.json").read_text(encoding="utf-8"))
+    manifest = json.loads((ARCHIVE_ROOT / "manifest.json").read_text(encoding="utf-8"))
+    assert metadata["refs"]["legacy"]["commit"] == manifest["baseline"]["commit"]
+    assert metadata["refs"]["candidate"]["commit"] == candidate
+    assert {item["label"] for item in metadata["executions"]} == {
+        "legacy",
+        "candidate",
+    }
+    assert all(
+        item["baseline_object"] == item["candidate_object"]
+        for item in metadata["dataset_objects"]
+    )
+    assert metadata["comparison_contract"]["cross_version_route_is_scored"] is False
+    assert metadata["comparison_contract"]["same_harness"] is False
+    assert metadata["refs"]["legacy"]["runner_object"]
+    assert metadata["refs"]["candidate"]["runner_object"]
+    assert (
+        metadata["refs"]["legacy"]["runner_object"]
+        != metadata["refs"]["candidate"]["runner_object"]
+    )
+    assert "OPENAI_API_KEY" not in json.dumps(metadata)
+
+
+def test_comparison_run_requires_explicit_live_state_acknowledgement(tmp_path):
+    candidate = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(COMPARISON_SCRIPT),
+            "run",
+            "legacy",
+            "--candidate-ref",
+            candidate,
+            "--output-dir",
+            str(tmp_path / "live-refused"),
+            "--corpus",
+            "modu",
+            "--run-id",
+            "unit-live-refused",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "--acknowledge-live-eval-state" in result.stderr
+
+
+def test_missing_legacy_object_has_shallow_clone_recovery_hint(monkeypatch):
+    comparison = _load_comparison_module()
+    failed = subprocess.CompletedProcess(
+        args=["git"], returncode=128, stdout="", stderr="bad object"
+    )
+    monkeypatch.setattr(comparison, "_git", lambda *args, **kwargs: failed)
+
+    with pytest.raises(comparison.ComparisonError, match="fetch --unshallow"):
+        comparison._resolve_commit("missing", "legacy baseline")
 
 
 def test_runtime_qna_entrypoints_are_agentic_only():
