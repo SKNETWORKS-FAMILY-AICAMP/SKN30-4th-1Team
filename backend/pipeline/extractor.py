@@ -108,7 +108,7 @@ _CHUNK_OVERLAP = 200  # 청크 경계에서 문맥 유지를 위해 앞 청크�
 
 
 def _system_prompt(source_kind: str, reference_date: Optional[str] = None) -> str:
-    """기본 회의록 프롬프트는 유지하고 repo 소스에만 우선 지침을 더한다."""
+    """기본 추출 프롬프트에 소스별 우선 지침을 더한다."""
     source_prompt = (
         _TRANSCRIPT_PROMPT
         if source_kind == "transcript"

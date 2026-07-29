@@ -335,7 +335,7 @@ def test_transcribe_and_ingest_wires_both_stages():
 # ─── 제공자 레지스트리 ─────────────────────────────────────────────────────
 
 def test_diarizing_providers_are_registered():
-    """화자 분리가 필요한 회의 녹음에는 clova/google을 쓸 수 있어야 한다."""
+    """화자 분리가 필요한 회의 녹음에는 clova를 쓸 수 있어야 한다."""
     from backend.stt import available_providers, diarizing_providers
 
     assert {"openai", "clova"} <= set(available_providers())

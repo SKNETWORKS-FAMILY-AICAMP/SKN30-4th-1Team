@@ -88,7 +88,7 @@ def transcribe(
     """오디오 바이트를 Transcript로 전사한다.
 
     provider를 지정하지 않으면 `STT_PROVIDER`(기본 openai)를 쓴다. 화자 구분이
-    필요한 회의 녹음은 `clova`(한국어 권장) 또는 `google`을 선택한다.
+    필요한 회의 녹음은 `clova`(한국어 권장)를 선택한다.
 
     language를 지정하지 않으면 제공자가 추정한다. 회의 녹음은 대개 한국어라
     `STT_LANGUAGE`로 기본값을 고정해 두면 오인식이 줄어든다.
