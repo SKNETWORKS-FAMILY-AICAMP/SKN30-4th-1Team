@@ -19,7 +19,7 @@
 | M-01 후속 이력 질문 미연결 | 결정적 이력 감지 결과와 직전 사용자 주제를 `search_project_evidence`의 실제 검색어에 연결 |
 | #14 프롬프트 경계 | 범위·대상 보존, 비신뢰 검색 문맥, 제한된 부재 단정, 허위 citation 방지 규칙을 선택 이식 |
 
-검증 결과는 핵심 회귀 `123 passed, 1 skipped`이다. skip은 실제 OpenAI 키가 필요한 opt-in live smoke이며, 현재 합의에 따라 API 키를 주입하지 않았다. 따라서 코드·mock 계약 검증은 완료됐지만 실제 OpenAI/MySQL/Chroma E2E와 성능 기준선 수집은 아직 남아 있다.
+검증 결과는 핵심 회귀 `123 passed, 1 skipped`, 실행 가능한 제품 비-DB suite `936 passed, 3 skipped`이다. 별도로 `tests/test_check_scope_secrets.py` 13건은 개인용 에이전트 코딩 자산인 `scripts/check-scope.sh`와 `.agent-workflow/config.sh`가 없는 환경에서 발생한 setup error다. 이 개인 도구 자산은 제품 통합본에 복원하지 않으며 #18/#14 회귀나 제품 blocker로 세지 않는다. live skip은 실제 OpenAI 키가 필요한 opt-in smoke이며, 현재 합의에 따라 API 키를 주입하지 않았다. 따라서 코드·mock 계약 검증은 완료됐지만 실제 OpenAI/MySQL/Chroma E2E와 성능 기준선 수집은 아직 남아 있다.
 
 ## 1. 요약
 
