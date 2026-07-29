@@ -52,6 +52,7 @@ def test_system_qa_has_citation_rule():
     assert "출처 인용" in qa_engine.SYSTEM_QA
     # 유형 라벨을 출처로 쓰지 말라는 지시가 있어야 한다.
     assert "유형 이름을" in qa_engine.SYSTEM_QA
+    assert "컨텍스트에 없는 출처를 지어내지 마라" in qa_engine.SYSTEM_QA
 
 
 # ── 원문 청크 컨텍스트에 출처 마커가 실리는지 (_build_context 수준) ────────────

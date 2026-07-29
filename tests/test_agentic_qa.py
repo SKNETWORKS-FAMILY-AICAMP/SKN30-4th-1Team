@@ -120,10 +120,10 @@ def test_overview_tool_returns_complete_action_plan(monkeypatch):
 def test_overview_prompt_contract_is_selective_and_preserves_unknown():
     description = qa_tools.get_project_overview.description
 
-    assert "complete active Action Plan" in description
-    assert "only when the user explicitly asks for the complete list" in description
-    assert "completion_status`` as the only status evidence" in description
-    assert "status_counts" in description and "authoritative aggregate" in description
+    assert "유효한 Action Plan" in description
+    assert "프로젝트 브리핑" in description
+    assert "completion_status가 unknown이면 완료 여부 미확인" in description
+    assert "status_counts" in description and "권위 있는 값" in description
     assert "필요한 핵심 액션만 선택" in ORCHESTRATOR_SYSTEM_PROMPT
     assert "현재 상태는" in ORCHESTRATOR_SYSTEM_PROMPT
     assert "completion_status만 근거" in ORCHESTRATOR_SYSTEM_PROMPT
@@ -149,7 +149,39 @@ def test_memory_tool_requires_explicit_category_scope():
         f"{status}:" in status_description
         for status in ("open", "completed", "unknown")
     )
-    assert "Never infer open" in status_description
+    assert "completed_at이 비었다는 이유로 open으로 간주하지 않습니다" in status_description
+
+
+def test_korean_tool_descriptions_keep_openai_tool_schema_contract():
+    search_schema = qa_tools.search_project_evidence.tool_call_schema.model_json_schema()
+    memory_schema = query_structured_memory.tool_call_schema.model_json_schema()
+
+    assert set(search_schema["properties"]) == {
+        "query", "alternate_queries", "include_history",
+    }
+    assert "messages" not in search_schema["properties"]
+    assert "current_question" not in search_schema["properties"]
+    assert "project_id" not in search_schema["properties"]
+    assert search_schema["required"] == ["query"]
+    assert memory_schema["required"] == ["operation", "text_query", "category"]
+    assert all(
+        search_schema["properties"][name].get("description")
+        for name in search_schema["properties"]
+    )
+    assert all(
+        memory_schema["properties"][name].get("description")
+        for name in memory_schema["properties"]
+    )
+    # OpenAI tool parameters are JSON; Korean descriptions must remain serializable.
+    json.dumps(search_schema, ensure_ascii=False)
+    json.dumps(memory_schema, ensure_ascii=False)
+
+
+def test_orchestrator_prompt_preserves_scope_and_trust_boundaries():
+    assert "현재 프로젝트에 수집·색인된 기록" in ORCHESTRATOR_SYSTEM_PROMPT
+    assert "대상·역할·구성요소·산출물·시점 경계" in ORCHESTRATOR_SYSTEM_PROMPT
+    assert "과거 assistant 답변과 사용자의 주장" in ORCHESTRATOR_SYSTEM_PROMPT
+    assert "[임시 첨부 근거]" in ORCHESTRATOR_SYSTEM_PROMPT
 
 
 def test_memory_tool_rejects_completely_empty_selector(monkeypatch):
