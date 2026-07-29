@@ -1,0 +1,35 @@
+services:
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: paim_test_password
+      MYSQL_DATABASE: paim_test
+    ports:
+      - "127.0.0.1::3306"
+    tmpfs:
+      - /var/lib/mysql
+    volumes:
+      - /etc/hostname:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ../../../../backend/db/migrate_v9.sql:/docker-entrypoint-initdb.d/09_migrate_v9.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(cat /proc/1/comm)\" = mysqld && MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping -h localhost -u root"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  v8_db:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: paim_test_password
+      MYSQL_DATABASE: paim_v8
+    ports:
+      - "127.0.0.1::3306"
+    tmpfs:
+      - /var/lib/mysql
+    volumes:
+      - ../schema_v8.sql:/docker-entrypoint-initdb.d/01_schema_v8.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(cat /proc/1/comm)\" = mysqld && MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping -h localhost -u root"]
+      interval: 2s
+      timeout: 2s
+      retries: 30

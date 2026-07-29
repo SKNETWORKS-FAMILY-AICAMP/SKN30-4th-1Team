@@ -97,8 +97,14 @@
 # 의존성 (bcrypt 추가됨)
 uv sync
 
-# 테스트 (DB 불필요 — 전부 mock)
-uv run pytest tests/ -q          # 174 passed 여야 정상
+# 전체 백엔드 게이트 — 비통합 pytest + 실제 MySQL 통합 (Docker 필요)
+./tests/integration/mysql/run.sh
+
+# 경로 계약만 확인 (Docker 미기동)
+./tests/integration/mysql/run.sh --check
+
+# 비통합만 (DB 불필요 — 전부 mock)
+uv run pytest -q --ignore=tests/integration/mysql
 
 # 로컬 개발 실행 (데스크톱 UI 나오기 전)
 # .env: PAIM_AUTH_MODE=dev, DEV_USER_ID=1

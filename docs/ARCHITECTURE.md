@@ -119,7 +119,11 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 │       └── rag_eval_*.csv           # 평가 실행 결과 스냅샷
 │
 ├── tests/                           # pytest 자동화 테스트 스위트 (CI/로컬 `pytest` 대상)
-│   └── test_*.py                    # API·인증·암호화·Reconciler·QA 라우팅 등 단위/통합 테스트
+│   ├── test_*.py                    # API·인증·암호화·Reconciler·QA 라우팅 등 단위/통합 테스트
+│   └── integration/mysql/
+│       ├── run.sh                   # 전체 백엔드 게이트 (비통합 pytest + 실제 MySQL)
+│       ├── compose.yml              # 통합용 MySQL 컨테이너
+│       └── fixtures/                # preflight 음성 fixture (의도적으로 깨진 compose)
 │
 ├── evals/                           # 청킹 품질 평가 (golden fixture 기반, RAG 검색과 별개로 "추출 전 분할 단계"를 검증)
 │   ├── eval_chunking.py             # 실행: `python -m evals.eval_chunking`
