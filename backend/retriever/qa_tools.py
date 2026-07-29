@@ -111,6 +111,7 @@ def search_project_evidence(
     content = "\n\n".join(parts) or "프로젝트 기록에서 관련 근거를 찾지 못했습니다."
     return content, {
         "tool": "search_project_evidence",
+        "status": "ok" if parts else "empty",
         "sources": sources,
         "debug": _compact_retrieval_debug(debug),
     }
@@ -268,6 +269,7 @@ def get_project_overview(
         context, ensure_ascii=False, default=str
     ), {
         "tool": "get_project_overview",
+        "status": "ok" if context.get("overview_summary") or rows else "empty",
         "sources": sources,
         "category_stats": context.get("category_stats") or {},
         "total_rows": len(rows),

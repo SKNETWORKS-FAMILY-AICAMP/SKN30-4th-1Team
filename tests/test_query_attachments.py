@@ -92,6 +92,23 @@ def test_legacy_routing_mode_cannot_bypass_agentic_runtime():
     run_agentic_qa.assert_called_once()
 
 
+def test_agentic_tool_failure_is_hidden_as_503_at_query_boundary():
+    with patch("backend.api.query.require_project_access"), \
+         patch("backend.api.query.get_connection", return_value=_project_conn()), \
+         patch(
+             "backend.api.query.run_agentic_qa",
+             side_effect=ConnectionError("database credentials must stay private"),
+         ):
+        response = _client.post(
+            "/api/v1/projects/1/query",
+            json={"question": "현재 상태는?"},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Q&A 처리 중 오류가 발생했습니다. 서버 로그를 확인하세요."
+    assert "credentials" not in response.text
+
+
 def test_query_attachment_context_marks_truncation(monkeypatch):
     from backend.api import query as query_api
 
