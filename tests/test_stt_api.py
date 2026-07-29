@@ -106,6 +106,62 @@ def test_upload_queues_the_real_stt_to_ingest_path():
     assert tasks.tasks[0].func.__name__ == "_process_audio"
 
 
+def test_upload_reserves_quota_before_reading_large_audio():
+    endpoint = inspect.unwrap(upload_audio)
+    upload = UploadFile(filename="meeting.mp3", file=io.BytesIO(AUDIO))
+    reserve = MagicMock(return_value=_reservation())
+
+    async def read_after_reservation(_size):
+        assert reserve.called
+        return AUDIO
+
+    upload.read = read_after_reservation
+    with patch("backend.stt.router.require_upload_user", return_value=7), patch(
+        "backend.stt.router.require_project_access"
+    ), patch("backend.stt.router.reserve_document", reserve), patch(
+        "backend.stt.router.write_reserved_file"
+    ), patch("backend.stt.router.finalize_document", return_value=_finalized()):
+        asyncio.run(endpoint(None, 1, BackgroundTasks(), upload, ""))
+
+
+def test_upload_read_failure_cleans_preallocated_reservation():
+    endpoint = inspect.unwrap(upload_audio)
+    upload = UploadFile(filename="meeting.mp3", file=io.BytesIO(AUDIO))
+    upload.read = AsyncMock(side_effect=OSError("read failed"))
+
+    with patch("backend.stt.router.require_upload_user", return_value=7), patch(
+        "backend.stt.router.require_project_access"
+    ), patch("backend.stt.router.reserve_document", return_value=_reservation()), patch(
+        "backend.stt.router.cleanup_failed_reservation"
+    ) as cleanup:
+        with pytest.raises(OSError):
+            asyncio.run(endpoint(None, 1, BackgroundTasks(), upload, ""))
+
+    cleanup.assert_called_once_with("stt-reservation")
+
+
+def test_upload_size_mismatch_cleans_preallocated_reservation():
+    endpoint = inspect.unwrap(upload_audio)
+    upload = UploadFile(
+        filename="meeting.mp3",
+        file=io.BytesIO(AUDIO),
+        size=len(AUDIO) + 1,
+    )
+    upload.read = AsyncMock(return_value=AUDIO)
+
+    with patch("backend.stt.router.require_upload_user", return_value=7), patch(
+        "backend.stt.router.require_project_access"
+    ), patch("backend.stt.router.reserve_document", return_value=_reservation()), patch(
+        "backend.stt.router.cleanup_failed_reservation"
+    ) as cleanup:
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(endpoint(None, 1, BackgroundTasks(), upload, ""))
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail["code"] == "audio_size_mismatch"
+    cleanup.assert_called_once_with("stt-reservation")
+
+
 def test_background_worker_transcribes_then_ingests_with_document_fence():
     transcript = assemble(
         source="meeting.mp3",
@@ -144,6 +200,31 @@ def test_background_provider_failure_persists_only_normalized_code():
         _process_audio_locked(1, 71, [], "meeting.mp3", "/tmp/meeting.mp3", "", "token")
 
     fail.assert_called_once_with(71, "STT_PROVIDER_ERROR")
+
+
+def test_background_ingest_failure_keeps_old_document_and_fails_new_one():
+    transcript = assemble(
+        source="meeting.mp3",
+        raw_segments=[{"text": "FastAPI로 결정", "start": 0.0, "end": 2.0}],
+        provider="openai",
+        model="whisper-1",
+    )
+    with patch("backend.stt.router.processing_owned", return_value=True), patch(
+        "backend.stt.router.validate_managed_file"
+    ) as managed_file, patch(
+        "backend.stt.router.transcribe", return_value=transcript
+    ), patch(
+        "backend.stt.router.ingest_transcript", side_effect=RuntimeError("DB down")
+    ), patch("backend.stt.router.fail_document") as fail, patch(
+        "backend.stt.router.delete_document"
+    ) as delete_old:
+        managed_file.return_value.read_bytes.return_value = AUDIO
+        _process_audio_locked(
+            1, 71, [70], "meeting.mp3", "/tmp/meeting.mp3", "", "token"
+        )
+
+    fail.assert_called_once_with(71, "STT_INGEST_FAILED")
+    delete_old.assert_not_called()
 
 
 def test_transcript_source_adds_untrusted_input_system_boundary():

@@ -43,6 +43,27 @@ def _fail_audio_document(doc_id: int, error_code: str) -> None:
     fail_document(doc_id, error_code)
 
 
+def _upload_size(file: UploadFile) -> int:
+    """Return the parser-counted size without copying the whole upload into memory."""
+    if file.size is not None:
+        return int(file.size)
+    try:
+        stream = file.file
+        position = stream.tell()
+        stream.seek(0, 2)
+        size = stream.tell()
+        stream.seek(position)
+        return int(size)
+    except (AttributeError, OSError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "audio_size_unavailable",
+                "message": "오디오 크기를 확인할 수 없습니다.",
+            },
+        ) from exc
+
+
 def _process_audio_locked(
     project_id: int,
     doc_id: int,
@@ -170,8 +191,11 @@ async def upload_audio(
     user_id = require_upload_user()
     require_project_access(project_id, min_role="member")
 
-    data = await file.read(size_limit + 1)
-    if len(data) > size_limit:
+    # Reserve quota before materializing a potentially 200 MB CLOVA upload in memory.
+    # Starlette has already counted/spooled the multipart part, so this also bounds
+    # concurrent memory use by the project's durable quota rather than request rate alone.
+    expected_size = _upload_size(file)
+    if expected_size > size_limit:
         raise HTTPException(
             status_code=413,
             detail={
@@ -179,16 +203,33 @@ async def upload_audio(
                 "message": f"오디오 크기는 {size_limit // (1024 * 1024)} MB를 초과할 수 없습니다.",
             },
         )
-    if not data:
+    if expected_size == 0:
         raise HTTPException(
             status_code=400,
             detail={"code": "empty_audio", "message": "오디오 파일이 비어 있습니다."},
         )
 
     reservation = reserve_document(
-        project_id, user_id, len(data), "physical", filename=filename
+        project_id, user_id, expected_size, "physical", filename=filename
     )
     try:
+        data = await file.read(size_limit + 1)
+        if len(data) > size_limit:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "code": "audio_too_large",
+                    "message": f"오디오 크기는 {size_limit // (1024 * 1024)} MB를 초과할 수 없습니다.",
+                },
+            )
+        if len(data) != expected_size:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "audio_size_mismatch",
+                    "message": "업로드된 오디오 크기가 요청 정보와 일치하지 않습니다.",
+                },
+            )
         write_reserved_file(reservation["temp_path"], reservation["target_path"], data)
         finalized = finalize_document(reservation["reservation_id"], filename, "meeting")
     except BaseException:

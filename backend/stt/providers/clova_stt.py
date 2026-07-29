@@ -14,9 +14,9 @@
   **CSR(단문 인식) 시크릿과 다르다.** CSR은 화자 분리를 지원하지 않으므로
   이 제공자에는 쓸 수 없다.
 
-> **검증 완료**: 합성 회의록(화자 4명·발화 9개)을 실제 서비스로 왕복 검증했다.
-> 구간 9개·화자 4명(A~D)이 정확히 분리됐고, 밀리초→초 변환과 화자 라벨 매핑이
-> 의도대로 동작했다. 추출 단계에서 6개 항목의 owner가 모두 올바른 화자로 귀속됐다.
+현재 자동 테스트는 공식 응답 계약을 재현한 payload로 밀리초→초 변환과 화자 라벨
+매핑을 검증한다. 실제 서비스 왕복은 CLOVA 자격증명이 있는 배포 환경에서 별도로
+확인해야 한다.
 
 화자 분리로 얻는 라벨은 `화자 1`·`화자 2` 같은 **익명 식별자**다. 실제 이름 매핑은
 계획서가 후속 과제로 미룬 항목이므로 여기서 추측하지 않는다.
@@ -63,7 +63,7 @@ logger = logging.getLogger(__name__)
 
 NAME = "clova"
 SUPPORTED_SUFFIXES = frozenset({
-    ".mp3", ".mp4", ".m4a", ".wav", ".aac", ".ac3", ".ogg", ".flac", ".wma",
+    ".mp3", ".mp4", ".m4a", ".wav", ".aac", ".ac3", ".ogg", ".flac",
 })
 # CLOVA Speech는 대용량 파일을 받지만, 서버 메모리와 처리 시간을 감안해 상한을 둔다.
 MAX_AUDIO_BYTES = 200 * 1024 * 1024
@@ -128,7 +128,12 @@ def _segments_from_payload(payload: dict) -> tuple[list[dict], list[Transcriptio
             # CLOVA는 밀리초 단위로 준다.
             "start": (raw.get("start") or 0) / 1000.0,
             "end": (raw.get("end") or 0) / 1000.0,
-            "speaker": _speaker_label(raw.get("speaker")),
+            # 공식 응답에는 자동 인식 라벨(`diarization`)과 사용자가 편집한
+            # 라벨(`speaker`)이 별도로 온다. 편집값을 우선하되, 없으면 자동
+            # 라벨을 사용해야 화자 분리 결과가 조용히 사라지지 않는다.
+            "speaker": _speaker_label(
+                raw.get("speaker") or raw.get("diarization")
+            ),
         })
 
     if low_confidence:

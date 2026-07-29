@@ -55,6 +55,7 @@ def ingest_transcript(
         transcript.llm_text,
         default_source=transcript.source,
         source_kind=SOURCE_KIND,
+        reference_date=date,
         on_progress=on_progress,
     )
 

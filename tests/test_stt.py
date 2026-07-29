@@ -277,6 +277,7 @@ def test_ingest_transcript_feeds_extractor_and_ingestor():
     extract_text = mock_extract.call_args.args[0]
     assert "[00:00]" in extract_text and "FastAPI" in extract_text
     assert mock_extract.call_args.kwargs["source_kind"] == "transcript"
+    assert mock_extract.call_args.kwargs["reference_date"] == "2026-07-28"
 
     # 적재는 전사 출처로 기록된다.
     kwargs = mock_ingest.call_args.kwargs
@@ -367,6 +368,11 @@ def test_size_limit_is_per_provider():
     assert max_audio_bytes("clova") > max_audio_bytes("openai")
 
 
+def test_clova_does_not_advertise_unsupported_wma_container():
+    """제공자 공식 장문 인식 형식에 없는 WMA를 업로드 단계에서 허용하지 않는다."""
+    assert ".wma" not in supported_suffixes("clova")
+
+
 # ─── 실측으로 발견한 결함 (왕복 검증 회귀) ─────────────────────────────────
 
 def test_vocabulary_hint_is_sent_to_fix_term_transliteration():
@@ -428,6 +434,20 @@ def test_clova_payload_maps_speakers_and_milliseconds():
     assert segments[0]["start"] == 0.0 and segments[0]["end"] == 2.5
     assert segments[0]["speaker"] == "화자1"
     assert segments[1]["speaker"] == "화자 2"
+
+
+def test_clova_payload_falls_back_to_recognized_diarization_label():
+    """편집 speaker가 없어도 공식 응답의 자동 화자 라벨을 보존한다."""
+    from backend.stt.providers.clova_stt import _segments_from_payload
+
+    segments, _ = _segments_from_payload({"segments": [{
+        "text": "제안합니다.",
+        "start": 0,
+        "end": 2500,
+        "diarization": {"label": "3"},
+    }]})
+
+    assert segments[0]["speaker"] == "화자 3"
 
 
 def test_clova_missing_credentials_has_distinct_code(monkeypatch):
