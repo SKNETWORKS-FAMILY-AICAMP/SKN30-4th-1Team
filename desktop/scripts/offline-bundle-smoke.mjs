@@ -455,7 +455,7 @@ try {
     deviceScaleFactor: 1,
     mobile: false,
   });
-  await navigateAndWaitForSelector(send, fileUrl, ".project-start", 8000);
+  await navigateAndWaitForSelector(send, fileUrl, ".portfolio-page", 8000);
 
   const fontLoadResult = await send("Runtime.evaluate", {
     awaitPromise: true,
@@ -480,11 +480,11 @@ try {
       hasShell: Boolean(document.querySelector('.app-shell')),
       hasPrompt: Boolean(document.querySelector('.prompt')),
       hasSidebar: Boolean(document.querySelector('.sidebar')),
-      hasProjectStart: Boolean(document.querySelector('.project-start')),
-      startMarkText: document.querySelector('.project-start-mark')?.textContent.trim() || '',
-      startMarkAriaHidden: document.querySelector('.project-start-mark')?.getAttribute('aria-hidden') || '',
-      hasLegacyWatermark: Boolean(document.querySelector('.project-start-watermark')),
-      startButtonText: document.querySelector('.project-start-button')?.textContent.trim() || '',
+      hasProjectPortfolio: Boolean(document.querySelector('.portfolio-page')),
+      portfolioTitle: document.querySelector('.portfolio-header h1')?.textContent.trim() || '',
+      portfolioStateText: document.querySelector('.portfolio-state')?.textContent.trim() || '',
+      portfolioCreateText: document.querySelector('.portfolio-create')?.textContent.trim() || '',
+      firstProjectCreateText: document.querySelector('.portfolio-state button')?.textContent.trim() || '',
       projectCreateCount: document.querySelectorAll('.project-create-trigger').length,
       customTrafficLightCount: document.querySelectorAll('.mac-traffic-button').length,
       hasWindowControlCluster: Boolean(document.querySelector('.window-control-cluster')),
@@ -500,7 +500,7 @@ try {
       sidebarAccountHasPopup: document.querySelector('.sidebar-account-button')?.getAttribute('aria-haspopup') || '',
       sidebarAccountLabel: document.querySelector('.sidebar-account-button')?.getAttribute('aria-label') || '',
       rootFont: getComputedStyle(document.documentElement).fontFamily,
-      headingFont: getComputedStyle(document.querySelector('.project-start-copy h1')).fontFamily,
+      headingFont: getComputedStyle(document.querySelector('.portfolio-header h1')).fontFamily,
       scrollWidth: document.documentElement.scrollWidth,
       networkAttempts: window.__paimOfflineNetworkAttempts || [],
     }))()`,
@@ -537,11 +537,11 @@ try {
   }
 
   if (
-    !value.hasProjectStart ||
-    value.startMarkText !== "PaiM" ||
-    value.startMarkAriaHidden !== "true" ||
-    value.hasLegacyWatermark ||
-    !value.startButtonText.includes("새 프로젝트 시작하기") ||
+    !value.hasProjectPortfolio ||
+    value.portfolioTitle !== "프로젝트" ||
+    !value.portfolioStateText.includes("아직 프로젝트가 없습니다") ||
+    !value.portfolioCreateText.includes("새 프로젝트 만들기") ||
+    !value.firstProjectCreateText.includes("첫 프로젝트 만들기") ||
     value.projectCreateCount !== 0 ||
     value.customTrafficLightCount !== 0 ||
     value.hasWindowControlCluster ||
@@ -555,7 +555,27 @@ try {
     value.sidebarAccountHasPopup !== 'menu' ||
     !value.sidebarAccountLabel.includes('계정 메뉴')
   ) {
-    failures.push("offline bundle should render the empty first-run project start UI");
+    failures.push(
+      `offline bundle should render the empty Project Home as the first-run UI: ${JSON.stringify({
+        hasProjectPortfolio: value.hasProjectPortfolio,
+        portfolioTitle: value.portfolioTitle,
+        portfolioStateText: value.portfolioStateText,
+        portfolioCreateText: value.portfolioCreateText,
+        firstProjectCreateText: value.firstProjectCreateText,
+        projectCreateCount: value.projectCreateCount,
+        customTrafficLightCount: value.customTrafficLightCount,
+        hasWindowControlCluster: value.hasWindowControlCluster,
+        sidebarCollapsed: value.sidebarCollapsed,
+        sidebarWidth: value.sidebarWidth,
+        sidebarPanelDisplay: value.sidebarPanelDisplay,
+        sidebarBorderRightWidth: value.sidebarBorderRightWidth,
+        hasSidebarCollapseButton: value.hasSidebarCollapseButton,
+        hasSidebarAccountButton: value.hasSidebarAccountButton,
+        hasLegacySidebarSettingsButton: value.hasLegacySidebarSettingsButton,
+        sidebarAccountHasPopup: value.sidebarAccountHasPopup,
+        sidebarAccountLabel: value.sidebarAccountLabel,
+      })}`,
+    );
   }
 
   if (value.scrollWidth > 1280) {
@@ -610,10 +630,12 @@ try {
     projects: [
       {
         id: "offline-project",
-        apiProjectId: 1,
+        currentUserRole: "owner",
         name: "Offline Project",
         files: [],
         createdAt: Date.now(),
+        setupCompletedAt: Date.now(),
+        setupMode: "existing",
         sessions: [
           {
             id: "offline-session",
@@ -631,7 +653,11 @@ try {
   await send("Runtime.evaluate", {
     expression: `localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(offlineProjectState)}); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, "false")`,
   });
-  await navigateAndWaitForSelector(send, fileUrl, ".project-panel-menu", 8000);
+  await navigateAndWaitForSelector(send, fileUrl, ".portfolio-page", 8000);
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector('.project-item')?.click()`,
+  });
+  await waitForSelector(send, ".project-panel-menu", 8000);
   await send("Runtime.evaluate", {
     expression: `Array.from(document.querySelectorAll('.project-panel-menu button'))
       .find((button) => button.textContent.includes('GitHub'))?.click()`,
