@@ -18,7 +18,9 @@ class RuntimeConfigError(RuntimeError):
 _REQUIRED = (
     "PAIM_AUTH_MODE",
     "PAIM_JWT_SECRET",
+    "LLM_PROVIDER",
     "OPENAI_API_KEY",
+    "OPENAI_MODEL",
     "SESSION_MEMORY_KEY",
     "DB_HOST",
     "DB_PORT",
@@ -182,6 +184,14 @@ def validate_runtime_config() -> None:
 
     if values["PAIM_AUTH_MODE"].lower() != "jwt":
         _fail(["PAIM_AUTH_MODE"], "non-dev 실행은 jwt만 허용합니다")
+
+    # #18 Agentic Q&A의 운영 계약을 앱 시작 시에도 검사한다. 배포 preflight만
+    # 믿으면 wrapper를 우회한 실행이나 환경 drift가 첫 Q&A에서야 503으로 드러난다.
+    from .llm.chat_model_factory import AgenticQAConfigError, validate_agentic_qa_config
+    try:
+        validate_agentic_qa_config()
+    except AgenticQAConfigError as exc:
+        raise RuntimeConfigError(str(exc)) from None
 
     try:
         port = int(values["DB_PORT"])

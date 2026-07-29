@@ -20,7 +20,9 @@ _ALWAYS_REQUIRED = {
     "DB_NAME": "paiM",
     "PAIM_JWT_SECRET": "x" * 48,
     "SESSION_MEMORY_KEY": "base64key",
+    "LLM_PROVIDER": "openai",
     "OPENAI_API_KEY": "sk-test",
+    "OPENAI_MODEL": "gpt-4.1-mini",
     "DB_HOST": "db",
     "DB_PORT": "3306",
     "PAIM_AUTH_MODE": "jwt",
@@ -102,27 +104,20 @@ def test_each_required_value_is_enforced(tmp_path: Path, missing: str):
     assert missing in result.stderr
 
 
-def test_openai_key_required_even_for_other_providers(tmp_path: Path):
-    """backend/db/chroma.py가 LLM_PROVIDER와 무관하게 임베딩용으로 요구한다.
-    lazy 검사라 누락돼도 기동·/health를 통과한 뒤 적재·검색에서 터진다."""
-    env = _write_env(
-        tmp_path, OPENAI_API_KEY=None, LLM_PROVIDER="claude", ANTHROPIC_API_KEY="k"
-    )
+def test_openai_key_is_required_for_agentic_qa_and_embeddings(tmp_path: Path):
+    env = _write_env(tmp_path, OPENAI_API_KEY=None)
     result = _run(env)
     assert result.returncode == 1
     assert "OPENAI_API_KEY" in result.stderr
 
 
-# ── provider 조건부 ──────────────────────────────────────────────────────────
+# ── Agentic Q&A MVP 모델 계약 ────────────────────────────────────────────────
 
-def test_claude_requires_anthropic_key(tmp_path: Path):
-    result = _run(_write_env(tmp_path, LLM_PROVIDER="claude"))
+@pytest.mark.parametrize("provider", ["claude", "google", "local", "gemini-pro"])
+def test_non_openai_provider_is_rejected(tmp_path: Path, provider: str):
+    result = _run(_write_env(tmp_path, LLM_PROVIDER=provider))
     assert result.returncode == 1
-    assert "ANTHROPIC_API_KEY" in result.stderr
-
-
-def test_claude_passes_with_its_key(tmp_path: Path):
-    assert _run(_write_env(tmp_path, LLM_PROVIDER="claude", ANTHROPIC_API_KEY="k")).returncode == 0
+    assert "LLM_PROVIDER" in result.stderr
 
 
 def test_unused_provider_keys_are_not_required(tmp_path: Path):
@@ -130,38 +125,35 @@ def test_unused_provider_keys_are_not_required(tmp_path: Path):
     assert _run(_write_env(tmp_path, LLM_PROVIDER="openai")).returncode == 0
 
 
-def test_unknown_provider_fails(tmp_path: Path):
-    result = _run(_write_env(tmp_path, LLM_PROVIDER="gemini-pro"))
+def test_wrong_openai_model_is_rejected(tmp_path: Path):
+    result = _run(_write_env(tmp_path, OPENAI_MODEL="gpt-4o-mini"))
     assert result.returncode == 1
-    assert "LLM_PROVIDER" in result.stderr
+    assert "OPENAI_MODEL" in result.stderr
 
 
 @pytest.mark.parametrize(
-    ("provider", "extra"),
-    [("google", {"GOOGLE_API_KEY": "g"}), ("local", {"LOCAL_LLM_URL": "http://x"})],
+    "key",
+    ["OPENAI_BASE_URL", "OPENAI_API_BASE"],
 )
-def test_extraction_incapable_providers_are_rejected_for_rollout(
-    tmp_path: Path, provider: str, extra: dict
-):
-    """google은 google_client.py가 tool_schema에서 NotImplementedError를,
-    local은 llm/factory.py가 지원 분기 부재로 ValueError를 던진다.
-    환경변수가 완비돼도 문서·저장소 적재가 실패하므로 운영에 올리면 안 된다."""
-    env = _write_env(tmp_path, LLM_PROVIDER=provider, PAIM_DOMAIN="paim.example.org", **extra)
-    result = _run(env, mode="rollout")
+def test_custom_openai_compatible_endpoint_is_rejected(tmp_path: Path, key: str):
+    result = _run(_write_env(tmp_path, **{key: "https://compatible.example/v1"}))
     assert result.returncode == 1
-    assert provider in result.stderr
+    assert key in result.stderr
 
 
 @pytest.mark.parametrize(
-    ("provider", "extra"),
-    [("google", {"GOOGLE_API_KEY": "g"}), ("local", {"LOCAL_LLM_URL": "http://x"})],
+    "key",
+    ["OPENAI_BASE_URL", "OPENAI_API_BASE"],
 )
-def test_extraction_incapable_providers_only_warn_locally(
-    tmp_path: Path, provider: str, extra: dict
-):
-    result = _run(_write_env(tmp_path, LLM_PROVIDER=provider, **extra))
+def test_explicit_official_openai_endpoint_is_allowed(tmp_path: Path, key: str):
+    result = _run(_write_env(tmp_path, **{key: "https://api.openai.com/v1/"}))
     assert result.returncode == 0
-    assert "WARN" in result.stderr
+
+
+def test_deploy_template_pins_agentic_openai_contract():
+    template = (_ROOT / "deploy" / ".env.deploy.example").read_text(encoding="utf-8")
+    assert "LLM_PROVIDER=openai" in template
+    assert "OPENAI_MODEL=gpt-4.1-mini" in template
 
 
 # ── 도메인 모드 계약 ─────────────────────────────────────────────────────────
@@ -259,45 +251,44 @@ def _write_raw(tmp_path: Path, extra: str) -> Path:
 
 
 def test_quoted_value_with_inline_comment(tmp_path: Path):
-    """Compose는 claude로 읽는다. 순진한 파서는 주석까지 값으로 삼아 rollout을 막았다."""
-    env = _write_raw(tmp_path, 'LLM_PROVIDER="claude" # 주석\nANTHROPIC_API_KEY=key\n')
+    """Compose는 openai로 읽는다. 순진한 파서는 주석까지 값으로 삼으면 안 된다."""
+    env = _write_raw(tmp_path, 'LLM_PROVIDER="openai" # 주석\n')
     result = _run(env)
     assert result.returncode == 0, result.stderr
-    assert "provider=claude" in result.stderr
+    assert "provider=openai" in result.stderr
 
 
 def test_empty_quoted_value_with_inline_comment_is_empty(tmp_path: Path):
-    """Compose는 빈 값으로 읽는다. 순진한 파서는 `"" # ...`를 non-empty로 보아
-    자격증명 없이 통과시켰고, 컨테이너는 첫 LLM 호출에서 실패했다."""
-    env = _write_raw(tmp_path, 'LLM_PROVIDER=claude\nANTHROPIC_API_KEY="" # 의도적 빈 값\n')
+    """Compose는 빈 모델로 읽으므로 Agentic 모델 계약에서 거부해야 한다."""
+    env = _write_raw(tmp_path, 'OPENAI_MODEL="" # 의도적 빈 값\n')
     result = _run(env)
     assert result.returncode == 1
-    assert "ANTHROPIC_API_KEY" in result.stderr
+    assert "OPENAI_MODEL" in result.stderr
 
 
 def test_single_quoted_value(tmp_path: Path):
-    env = _write_raw(tmp_path, "LLM_PROVIDER='claude'\nANTHROPIC_API_KEY='key'\n")
+    env = _write_raw(tmp_path, "LLM_PROVIDER='openai'\n")
     assert _run(env).returncode == 0
 
 
 def test_unquoted_inline_comment_is_stripped(tmp_path: Path):
-    env = _write_raw(tmp_path, "LLM_PROVIDER=claude # 주석\nANTHROPIC_API_KEY=key\n")
+    env = _write_raw(tmp_path, "LLM_PROVIDER=openai # 주석\n")
     result = _run(env)
     assert result.returncode == 0
-    assert "provider=claude" in result.stderr
+    assert "provider=openai" in result.stderr
 
 
 def test_export_prefix_is_accepted(tmp_path: Path):
-    env = _write_raw(tmp_path, "export LLM_PROVIDER=claude\nexport ANTHROPIC_API_KEY=key\n")
+    env = _write_raw(tmp_path, "export LLM_PROVIDER=openai\n")
     assert _run(env).returncode == 0
 
 
 def test_duplicate_key_last_wins(tmp_path: Path):
     """Compose·dotenv 관례. 마지막 정의가 이긴다."""
-    env = _write_raw(tmp_path, "LLM_PROVIDER=google\nLLM_PROVIDER=claude\nANTHROPIC_API_KEY=key\n")
+    env = _write_raw(tmp_path, "LLM_PROVIDER=google\nLLM_PROVIDER=openai\n")
     result = _run(env)
     assert result.returncode == 0
-    assert "provider=claude" in result.stderr
+    assert "provider=openai" in result.stderr
 
 
 # ── DB 계정 계약 ─────────────────────────────────────────────────────────────

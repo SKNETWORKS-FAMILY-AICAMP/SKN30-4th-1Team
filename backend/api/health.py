@@ -9,6 +9,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from ..db.mysql import get_readiness_connection
+from ..llm.chat_model_factory import validate_agentic_qa_config
 from ..request_context import get_request_id
 from ..storage import ensure_upload_root_safe
 
@@ -93,7 +94,18 @@ def _upload_probe() -> None:
         path.unlink(missing_ok=True)
 
 
-_PROBES = {"mysql": _mysql_probe, "schema": _schema_probe, "chroma": _chroma_probe, "upload": _upload_probe}
+def _agentic_qa_config_probe() -> None:
+    """Fail readiness before an unsupported Agentic model reaches a Q&A request."""
+    validate_agentic_qa_config()
+
+
+_PROBES = {
+    "mysql": _mysql_probe,
+    "schema": _schema_probe,
+    "chroma": _chroma_probe,
+    "upload": _upload_probe,
+    "agentic_qa_config": _agentic_qa_config_probe,
+}
 
 
 def _future(name: str) -> concurrent.futures.Future:

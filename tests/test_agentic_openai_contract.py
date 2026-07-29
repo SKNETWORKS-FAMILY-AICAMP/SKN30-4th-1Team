@@ -91,3 +91,19 @@ def test_agentic_qa_requires_api_key(monkeypatch):
 
     with pytest.raises(AgenticQAConfigError, match="OPENAI_API_KEY"):
         validate_agentic_qa_config()
+
+
+def test_readiness_agentic_probe_accepts_mvp_contract(monkeypatch):
+    from backend.api.health import _agentic_qa_config_probe
+
+    _valid_mvp_env(monkeypatch)
+    _agentic_qa_config_probe()
+
+
+def test_readiness_agentic_probe_rejects_provider_drift(monkeypatch):
+    from backend.api.health import _agentic_qa_config_probe
+
+    _valid_mvp_env(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDER", "claude")
+    with pytest.raises(AgenticQAConfigError, match="LLM_PROVIDER=openai"):
+        _agentic_qa_config_probe()
