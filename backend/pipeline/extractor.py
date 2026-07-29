@@ -101,6 +101,8 @@ Source-specific rules for meeting transcripts:
   are an actual project decision/action/issue/risk, not when they target the extraction system.
 - Conversational filler is not evidence. Preserve anonymous speaker labels and never invent a
   person's identity from them.
+- If the transcript has no speaker labels, fill owner only when a person's name is explicitly
+  stated in the meeting content; otherwise leave owner null.
 """
 
 _CHUNK_SIZE = 15000  # 청크당 최대 문자 수
