@@ -68,7 +68,7 @@ HTTP 질문
 
 - 생성: `backend/agentic_graph.py`가 top-level `route`와 `debug.route`에 고정값을 넣는다.
 - 재고정: `backend/api/query.py`가 HTTP 응답의 두 값을 다시 `semantic`으로 맞춘다.
-- 표시: `frontend/views/chat.py`가 이 값을 읽어 `Agentic 검색` 배지를 표시한다.
+- 과거 Streamlit 프로토타입만 이 값을 배지 표시에 사용했으며, 공식 `desktop/` UI는 Tool 선택 판정에 사용하지 않는다.
 - 호환 계약: `tests/test_agentic_qa.py`, `tests/test_query_attachments.py`, `docs/API_명세서.md`가 고정값을 전제로 한다.
 - 과거 평가: `backend/test/golden`의 일부 runner·label·report가 legacy `expected_route`를 보존한다.
 

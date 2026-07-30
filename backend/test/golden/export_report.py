@@ -1,7 +1,7 @@
 """골든셋 평가 결과를 하나의 엑셀 파일로 정리(export).
 
 `results/summary.csv`를 읽어 최종 결과·계층 기여·관측 지표·인용 분석·한계를
-시트별로 담은 `docs/EVAL_REPORT.xlsx`를 pandas ExcelWriter(openpyxl)로 쓴다.
+시트별로 담은 `docs/archive/evaluation/golden-v1/EVAL_REPORT.xlsx`를 pandas ExcelWriter(openpyxl)로 쓴다.
 
 사용: .venv/bin/python backend/test/golden/export_report.py [--runid RID]
 """
@@ -13,7 +13,7 @@ import pandas as pd
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 SUMMARY = HERE / "results" / "summary.csv"
-OUT = REPO / "docs" / "EVAL_REPORT.xlsx"
+OUT = REPO / "docs" / "archive" / "evaluation" / "golden-v1" / "EVAL_REPORT.xlsx"
 
 MAIN = ["R0-sql", "R0-vec", "R0-both", "E0", "E1", "E2-e2e"]
 CORPORA = ["modu", "csbot"]

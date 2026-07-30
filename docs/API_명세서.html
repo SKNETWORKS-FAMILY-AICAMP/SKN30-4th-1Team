@@ -1063,7 +1063,7 @@
     <h2 id="suggestions">제안 (Suggestions)</h2>
     <p class="note" style="margin-bottom:16px;">
       <code>kind</code>: <code>complete_action</code>(기본)·<code>set_due_date</code>·<code>supersede</code>·<code>all</code>.
-      상세 계약·에러는 <code>HANDOVER_SUPERSEDE_FRONTEND.md</code>.
+      상세 계약·에러는 <code>handovers/frontend/HANDOVER_SUPERSEDE_FRONTEND.md</code>.
     </p>
 
     <div class="endpoint">
@@ -1312,7 +1312,7 @@
           <strong>answer 출처 마커 (2026-07-22 추가)</strong>: 답변 본문에 근거 출처가
           <code>(출처: 파일명)</code>으로 포함된다(저장소 파일은 <code>(출처: 파일명 (repo#N))</code>).
           프론트는 파싱해 출처 칩으로 표시하거나 그대로 둘 수 있다. <code>sources</code>는 변경
-          없음. <code>debug.*.source_label</code>이 추가됐다(무시 가능). 상세: HANDOVER_CITATION_FRONTEND.md
+          없음. <code>debug.*.source_label</code>이 추가됐다(무시 가능). 상세: handovers/frontend/HANDOVER_CITATION_FRONTEND.md
         </div>
         <div class="endpoint-desc">
           <strong>route</strong>: 기존 클라이언트 호환을 위해 이 엔드포인트는 항상 <code>semantic</code>을 반환한다. 질문 유형은 Agentic 오케스트레이터가 <code>search_project_evidence</code>, <code>query_structured_memory</code>, <code>get_project_overview</code>를 필요에 따라 조합해 처리한다. 사용한 도구와 라운드는 <code>debug.tools_used</code>/<code>debug.tool_rounds</code>에서 확인할 수 있으며, 검색 도구에 따라 <code>debug.mysql_rows</code>/<code>debug.chroma_chunks</code>가 포함될 수 있다. <code>plan</code>은 하위호환 필드이며 현재 기본 Agentic Q&amp;A에서는 <code>[]</code>이다.

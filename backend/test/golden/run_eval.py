@@ -1689,7 +1689,8 @@ def render_methods(runid: str, phase: str) -> str:
     L.append(f"- git commit: `{_git_describe()}`")
     L.append(f"- Python: {platform.python_version()} / {platform.platform()}")
     L.append("- 설계 근거(의도)는 `EVAL_DESIGN.md`, 결과 해석은 "
-             "`docs/EVAL_REPORT.md` 참조. 이 문서는 *실제로 어떻게 돌렸는가*만 담는다.")
+             "`docs/archive/evaluation/golden-v1/EVAL_REPORT.md` 참조. "
+             "이 문서는 *실제로 어떻게 돌렸는가*만 담는다.")
     L.append("")
 
     L.append("## 1. 소프트웨어 환경 (재현용 버전)")

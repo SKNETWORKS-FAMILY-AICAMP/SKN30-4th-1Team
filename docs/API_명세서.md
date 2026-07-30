@@ -341,7 +341,7 @@ MySQL, schema, ChromaDB, upload 저장소의 준비 상태를 확인한다. 인�
 | `date` | string | - | 문서 날짜 `YYYY-MM-DD` |
 
 > **멀티포맷 지원 (2026-07-25)**: `.docx`와 텍스트 기반 PDF를 지원합니다. 스캔 이미지 PDF(OCR)는
-> 지원하지 않으며 `no_text_layer` 오류로 거절됩니다. 전처리 규칙은 [문서 전처리 정책서](DOCUMENT_INGESTION_POLICY.md) 참고.
+> 지원하지 않으며 `no_text_layer` 오류로 거절됩니다. 전처리 규칙은 [문서 전처리 정책서](policies/DOCUMENT_INGESTION_POLICY.md) 참고.
 
 > **`doc_type` 변경 (2026-07-02)**: 프론트에서 전송하지 않습니다. 서버가 파일명 기반으로 자동 추론합니다.
 > - `회의`, `meeting`, `minutes` 포함 → `meeting`
@@ -387,7 +387,7 @@ MySQL, schema, ChromaDB, upload 저장소의 준비 상태를 확인한다. 인�
 > **변환 경고**: 변환은 요청 경로에서 수행되므로 폴링 없이 즉시 확인할 수 있습니다.
 > `duplicate_block_dropped`와 `repeated_line_dropped`는 블록마다 발생해도 **개수만
 > 요약한 1건**으로 반환됩니다(`location` 없음). 나머지는 위치마다 별도 항목입니다.
-> 각 규칙의 판정 기준은 [문서 전처리 정책서](DOCUMENT_INGESTION_POLICY.md) 참고.
+> 각 규칙의 판정 기준은 [문서 전처리 정책서](policies/DOCUMENT_INGESTION_POLICY.md) 참고.
 
 **응답 `400`** — 미지원 확장자
 ```json
@@ -860,7 +860,7 @@ Memory 항목 수정. (최소 역할: member) 수정할 필드만 부분 전송�
 >
 > 수정할 필드가 하나도 없으면 **400**(`수정할 필드가 없습니다.`).
 > `category`를 `decision` 밖으로 바꾸는 변경이 supersede 관계와 충돌하면 **409**
-> (상세는 [HANDOVER_SUPERSEDE_FRONTEND.md](HANDOVER_SUPERSEDE_FRONTEND.md) §4).
+> (상세는 [HANDOVER_SUPERSEDE_FRONTEND.md](handovers/frontend/HANDOVER_SUPERSEDE_FRONTEND.md) §4).
 
 **응답 `200`**
 ```json
@@ -986,7 +986,7 @@ Memory 항목 삭제.
 LLM이 만든 메모리 변경 제안(pending)을 사람이 승인/거절한다. `kind`는
 `complete_action`(액션 완료), `set_due_date`(상대 마감일 후보 확정) 또는
 `supersede`(결정 번복). 상세 supersede 계약·에러는
-[HANDOVER_SUPERSEDE_FRONTEND.md](HANDOVER_SUPERSEDE_FRONTEND.md).
+[HANDOVER_SUPERSEDE_FRONTEND.md](handovers/frontend/HANDOVER_SUPERSEDE_FRONTEND.md).
 
 ### `GET /api/v1/projects/{project_id}/suggestions`
 
@@ -1353,7 +1353,7 @@ OpenAPI operation에는 `x-paim-chat-persistence: none`이 표시된다.
 > `(출처: 파일명)` 형태로 포함된다. 프론트는 이 마커를 파싱해 출처 칩/링크로
 > 렌더링하거나 그대로 표시할 수 있다(선택). 저장소 연결 파일은 동명 충돌
 > 방지를 위해 `(출처: 파일명 (repo#N))` 형태가 될 수 있다. 상세는 프론트
-> 핸드오버 [HANDOVER_CITATION_FRONTEND.md](HANDOVER_CITATION_FRONTEND.md).
+> 핸드오버 [HANDOVER_CITATION_FRONTEND.md](handovers/frontend/HANDOVER_CITATION_FRONTEND.md).
 >
 > **`sources`**: 변경 없음 — 답변 근거로 검색된 출처 파일명 리스트. `answer`
 > 마커와 별개로 그대로 제공된다.

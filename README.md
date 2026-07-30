@@ -5,6 +5,8 @@
 
 **Download:** https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/releases
 
+문서 정본과 보관 자료는 [문서 인덱스](docs/README.md)에서 확인할 수 있습니다.
+
 ![Python](https://img.shields.io/badge/Python-3.14-3776AB?style=flat-square&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-Backend-009688?style=flat-square&logo=fastapi&logoColor=white)
 ![LangChain](https://img.shields.io/badge/LangChain-LangGraph-1C3C3C?style=flat-square&logo=langchain&logoColor=white)
