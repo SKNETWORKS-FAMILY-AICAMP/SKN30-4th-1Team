@@ -45,6 +45,8 @@ _EXPIRED_GRACE_SECONDS = 5 * 60
 class GithubRepositoryPreviewRequest(BaseModel):
     repository_url: str
     state: str | None = None
+    branch: str | None = None
+    head_only: bool = False
 
 
 def _base64url(raw: bytes) -> str:
@@ -223,17 +225,21 @@ def _installation_token(state: str) -> str:
     return token
 
 
-def _github_repo_preview(repository_url: str, state: str | None = None):
+def _github_repo_preview(
+    repository_url: str,
+    state: str | None = None,
+    requested_branch: str | None = None,
+):
     full_name = _repo_full_name(repository_url)
     token = _installation_token(state) if state else None
     auth_provider = "github_app" if token else "public"
 
     try:
         repo = _json_request("GET", f"/repos/{full_name}", token=token)
-        branch = repo.get("default_branch") or "main"
+        branch = (requested_branch or "").strip() or repo.get("default_branch") or "main"
         commits = _json_request(
             "GET",
-            f"/repos/{full_name}/commits?sha={parse.quote(branch)}&per_page=6",
+            f"/repos/{full_name}/commits?sha={parse.quote(branch, safe='')}&per_page=6",
             token=token,
         )
         issues = _json_request(
@@ -268,6 +274,7 @@ def _github_repo_preview(repository_url: str, state: str | None = None):
             "issuePrStatus": f"{len(open_issues)} open issues · {len(pulls)} open PRs",
             "visibility": "private" if repo.get("private") else "public",
             "authProvider": auth_provider,
+            "remoteHeadSha": commits[0].get("sha") if commits else None,
         },
     }
 
@@ -396,7 +403,28 @@ def list_github_app_repositories(state: str):
 
 @router.post("/repository-preview")
 def preview_github_repository(body: GithubRepositoryPreviewRequest):
-    return _github_repo_preview(body.repository_url, state=body.state)
+    if body.head_only:
+        full_name = _repo_full_name(body.repository_url)
+        token = _installation_token(body.state) if body.state else None
+        branch = (body.branch or "").strip()
+        if not branch:
+            raise HTTPException(status_code=400, detail="branch is required")
+
+        commits = _json_request(
+            "GET",
+            f"/repos/{full_name}/commits?sha={parse.quote(branch, safe='')}&per_page=1",
+            token=token,
+        )
+        return {
+            "branch": branch,
+            "remoteHeadSha": commits[0].get("sha") if commits else None,
+        }
+
+    return _github_repo_preview(
+        body.repository_url,
+        state=body.state,
+        requested_branch=body.branch,
+    )
 
 
 @router.get("/callback", response_class=HTMLResponse)

@@ -85,15 +85,28 @@ export type GitRepositoryInfo = {
   authProvider?: "public" | "github_oauth" | "github_app";
   repoId?: number;
   syncStatus?: GitRepositorySyncStatus;
+  syncRunId?: string | null;
   syncStartedAt?: number;
   connectedAt?: string;
   commitSha?: string | null;
+  remoteHeadSha?: string | null;
+  remoteCheckedAt?: number | null;
+  remoteCheckAttemptedAt?: number | null;
+  remoteCheckStatus?: GithubRemoteCheckStatus;
+  remoteCheckError?: GithubRemoteCheckError | null;
   indexedFiles?: number | null;
   lastError?: string | null;
   syncWarnings?: GitRepositorySyncWarning[];
 };
 
 export type GitRepositorySyncStatus = "connected" | "syncing" | "indexed" | "failed" | "delayed";
+export type GithubRemoteCheckStatus =
+  | "current"
+  | "needs_sync"
+  | "checking"
+  | "unknown"
+  | "error";
+export type GithubRemoteCheckError = "session_expired" | "unavailable";
 
 export type GitRepositorySyncWarning = {
   source_type?: string;

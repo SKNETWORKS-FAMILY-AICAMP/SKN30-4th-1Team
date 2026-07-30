@@ -5585,6 +5585,97 @@ button:not(:disabled):not([aria-disabled="true"]) {
   min-width: 0;
 }
 
+.overview-github-sync-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--action-fg) 32%, var(--border));
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--action-fg) 9%, var(--surface));
+}
+
+.overview-github-sync-quiet {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  margin-top: 4px;
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.overview-github-sync-quiet::before {
+  width: 5px;
+  height: 5px;
+  margin-right: 5px;
+  border-radius: 999px;
+  background: var(--faint);
+  content: "";
+}
+
+.overview-github-sync-quiet[data-verified="true"]::before {
+  background: var(--accent-green);
+}
+
+.overview-github-sync-summary[data-status="error"] {
+  border-color: color-mix(in srgb, var(--issue-fg) 38%, var(--border));
+  background: color-mix(in srgb, var(--issue-fg) 8%, var(--surface));
+}
+
+.overview-github-sync-summary[data-status="needs_sync"] {
+  border-color: color-mix(in srgb, var(--issue-fg) 46%, var(--border));
+  background: color-mix(in srgb, var(--issue-fg) 11%, var(--surface));
+}
+
+.overview-github-sync-summary[data-status="unknown"] {
+  border-color: color-mix(in srgb, var(--muted) 34%, var(--border));
+  background: color-mix(in srgb, var(--muted) 7%, var(--surface));
+}
+
+.overview-github-sync-summary > div,
+.overview-github-sync-summary > div > span {
+  display: flex;
+  min-width: 0;
+}
+
+.overview-github-sync-summary > div {
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.overview-github-sync-summary > div > span {
+  flex-direction: column;
+  gap: 2px;
+}
+
+.overview-github-sync-summary strong,
+.overview-github-sync-summary small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.overview-github-sync-summary strong {
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.overview-github-sync-summary small {
+  color: var(--faint);
+  font-size: 10.5px;
+  font-weight: 650;
+  line-height: 1.4;
+}
+
+.overview-github-sync-summary > .astryx-button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .overview-github-summary-strip {
   display: flex;
   align-items: center;
