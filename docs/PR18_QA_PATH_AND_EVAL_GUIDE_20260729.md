@@ -1,11 +1,11 @@
 # PR #18 Q&A 실행 경로·평가셋 설계 가이드
 
 - 작성일: 2026-07-29 (KST)
-- 코드 기준: `integration/pr18-stabilized-20260729` (`74ace2520da9ab4863def34272f34fe82952ea58`)
+- 코드 기준: `integration/pr18-stabilized-20260729` (Draft PR #21 최신 head)
 - 레거시 평가 runner commit: `0b68860` (프로덕션 코드 변경 없음)
 - 모델 범위: 공식 OpenAI API `gpt-4.1-mini`
 - 런타임 원칙: Agentic Tool Calling 단일 경로, 레거시 fallback 없음
-- 상태: #18 안정화 수정과 #14 프롬프트 선택 이식 반영 완료
+- 상태: #18 안정화·#14 프롬프트·#9·#11·#13·#19·#20 통합 완료
 
 ## 1. 목적
 
@@ -357,7 +357,7 @@ user: 그 전에는?
 
 ## 11. 최적화 작업 규칙
 
-1. #14까지 통합된 기준 SHA `74ace2520da9ab4863def34272f34fe82952ea58`에서 첫 기준선을 만든다.
+1. 작업 시작 시 Draft PR #21 최신 head의 정확한 SHA를 기록하고 그 SHA에서 첫 기준선을 만든다.
 2. 기준선 수집 중에는 코드·프롬프트·데이터를 바꾸지 않는다.
 3. 한 번의 PR에 하나의 가설만 검증한다.
 4. 각 수정 후 동일 fixture·모델·평가로 재실행한다.
@@ -375,10 +375,53 @@ user: 그 전에는?
 
 제안 목표치는 최종 기준선 수집 후 팀이 합의한다. 과거 실험 수치를 #18에 즉시 적용하지 않는다.
 
+### 11.1 성능 개선 변경 후 검증 범위
+
+성능 작업 중 모든 커밋마다 전체 스위트와 배포 리허설을 반복하지 않는다. 변경
+영향에 맞춰 아래 세 단계로 검증한다.
+
+1. 작업 중에는 변경 영역의 빠른 회귀를 실행한다. 프롬프트·Tool 선택·답변 합성
+   변경은 Agentic, history, OpenAI 계약, citation, 첨부 회귀를 실행하고, 검색
+   구현 변경은 semantic retrieval 회귀를 추가한다.
+2. 통합 후보를 제출할 때는 비-DB Python 전체 스위트와 데스크톱 build·계약
+   테스트를 실행한다.
+3. 최종 반영 직전에만 실제 MySQL v9, 배포·백업·복구 rehearsal,
+   `gpt-4.1-mini` live Tool Calling smoke, 고정 질문셋 전후 비교를 실행한다.
+
+프롬프트만 바꾼 커밋은 DB·배포 rehearsal을 매번 반복할 필요가 없다. 반대로 Tool
+스키마, 라우팅, retrieval, 공개 API, DB 계약을 바꾸면 해당 계층 테스트를 작업
+중 단계부터 추가한다. 어떤 경우에도 고정 질문셋의 하드 게이트가 깨지면 전체 평균이
+올라도 채택하지 않는다.
+
+빠른 Agentic 회귀 예시:
+
+```bash
+uv run pytest -q \
+  tests/test_agentic_qa.py \
+  tests/test_agentic_history.py \
+  tests/test_agentic_openai_contract.py \
+  tests/test_qa_citation.py \
+  tests/test_query_attachments.py \
+  tests/test_semantic_retrieval.py
+```
+
+통합 후보 비-DB 전체 회귀 예시:
+
+```bash
+uv run pytest -q \
+  --ignore=tests/integration/mysql \
+  --ignore=tests/test_check_scope_secrets.py
+```
+
+`tests/test_check_scope_secrets.py`는 제품 저장소에 없는 개인용
+`.agent-workflow/scripts/check-scope.sh`를 전제로 하는 고아 harness이므로 제품 성능
+게이트에 포함하지 않는다. 실제 MySQL 테스트는 격리된 DB 접속 정보를 주입한 별도
+게이트에서 실행한다.
+
 ## 12. 성능 작업자에게 전달할 요청문
 
 ```text
-#18 + #14 최종 기준 SHA에서 Agentic Q&A 성능 기준선을 새로 생성해 주세요.
+Draft PR #21 최신 head의 정확한 SHA에서 Agentic Q&A 성능 기준선을 새로 생성해 주세요.
 
 - 모델: 공식 OpenAI API gpt-4.1-mini
 - 정본 endpoint: POST /api/v1/projects/{project_id}/query
@@ -396,6 +439,10 @@ user: 그 전에는?
 
 먼저 코드를 변경하지 말고 기준선을 수집하고,
 실패를 Tool 선택 / 인자 / 검색 / 답변 합성 / citation으로 분류해 보고해 주세요.
+
+변경 중에는 영향 영역의 빠른 회귀만 실행하고, 통합 후보 제출 시 비-DB 전체
+회귀와 데스크톱 계약을 실행해 주세요. 실제 MySQL v9·배포 rehearsal·live Tool
+Calling은 최종 후보에서 한 번 실행합니다.
 ```
 
 ## 13. 레거시 비교 베이스라인 실행
@@ -407,7 +454,7 @@ API 키 없이 먼저 실행 계획과 비교 계약을 확인한다.
 ```bash
 uv run python archive/legacy_qa_v1/scripts/run_comparison.py \
   plan both \
-  --candidate-ref 74ace2520da9ab4863def34272f34fe82952ea58 \
+  --candidate-ref <PR21_HEAD_SHA> \
   --output-dir /tmp/paim-eval-plan-modu \
   --corpus modu \
   --phase dev \
