@@ -7,6 +7,17 @@ PaiM은 회의록, 문서, 음성 기록과 GitHub 활동을 하나의 **프로�
 
 [최신 버전 다운로드](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/releases) · [문서 모음](docs/README.md) · [API 명세](docs/API_명세서.md) · [배포 가이드](deploy/README.md)
 
+![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-Backend-009688?style=flat-square&logo=fastapi&logoColor=white)
+![LangGraph](https://img.shields.io/badge/LangGraph-Agentic_AI-1C3C3C?style=flat-square)
+![OpenAI](https://img.shields.io/badge/OpenAI-LLM-412991?style=flat-square&logo=openai&logoColor=white)
+![MySQL](https://img.shields.io/badge/MySQL-8.0-4479A1?style=flat-square&logo=mysql&logoColor=white)
+![ChromaDB](https://img.shields.io/badge/ChromaDB-Vector_Search-FF6B6B?style=flat-square)
+![Tauri](https://img.shields.io/badge/Tauri-2.0-24C8DB?style=flat-square&logo=tauri&logoColor=white)
+![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=black)
+![TypeScript](https://img.shields.io/badge/TypeScript-Desktop-3178C6?style=flat-square&logo=typescript&logoColor=white)
+![AWS](https://img.shields.io/badge/AWS-Deployed-232F3E?style=flat-square&logo=amazonwebservices&logoColor=white)
+
 ![PaiM 데스크톱 화면 구성](desktop/assets/readme/v1.0.6-screen-overview.png)
 
 ## PaiM이 하는 일
@@ -19,6 +30,13 @@ PaiM은 회의록, 문서, 음성 기록과 GitHub 활동을 하나의 **프로�
 - **문서·음성 입력** — 텍스트, Markdown, PDF, DOCX와 회의 녹음을 프로젝트 메모리로 변환합니다.
 - **팀 워크스페이스** — 로그인, 프로젝트 멤버와 역할, 공유 프로젝트를 지원합니다.
 - **데스크톱 경험** — React와 Tauri 기반의 macOS·Windows 앱을 제공합니다.
+
+## 프로젝트 목표
+
+- 비정형 회의 기록을 결정·액션·이슈·리스크로 구조화할 수 있는가?
+- 회의에서 정한 할 일을 GitHub의 실제 코드 변경과 연결할 수 있는가?
+- 담당자·상태·마감처럼 정확해야 하는 질문에 LLM의 추측 없이 답할 수 있는가?
+- 자동화의 편의성과 사람의 최종 결정권을 함께 지킬 수 있는가?
 
 ## 작동 방식
 
@@ -147,6 +165,16 @@ flowchart TB
 | Operations | Docker Compose · Caddy · AWS · GitHub Actions |
 | Security | JWT 인증 · 프로젝트 역할 기반 권한 · Rate Limit · Storage Quota |
 
+### 검증 결과
+
+| 검증 항목 | 결과 |
+| --- | --- |
+| 헤더 없는 서술형 회의록 액션 추출 | 9/9건 추출, 담당자 100% 일치 |
+| README 설치 문구의 액션 오추출 | 소스별 지침 적용 전 4건 → 적용 후 0건 |
+| PR과 진행 중 액션 완료 매칭 | 6/6건 high confidence 제안 |
+| 구조화 상태 질문 | Agentic 도구가 SQL 상태 근거를 선택해 답변 |
+| 승인 전후 상태 반영 | 진행 중 → 사용자 승인 후 PR 근거와 함께 완료 |
+
 ## 주요 화면
 
 ### 프로젝트 채팅
@@ -205,10 +233,60 @@ npm run app:build --prefix desktop
 
 ## Team
 
-| 이름 | 역할 | 주요 기여 |
+<table>
+  <tr>
+    <td align="center" width="180">
+      <a href="https://github.com/hellohaeyeon">
+        <img src="https://github.com/hellohaeyeon.png" width="100" height="100" alt="서해연"/><br/>
+        <b>서해연</b>
+      </a><br/>
+      <sub>Team Lead · PM</sub><br/>
+      <sub>프로젝트 기반 구축<br/>SQL · FastAPI</sub>
+    </td>
+    <td align="center" width="180">
+      <a href="https://github.com/j3s30p">
+        <img src="https://github.com/j3s30p.png" width="100" height="100" alt="박제섭"/><br/>
+        <b>박제섭</b>
+      </a><br/>
+      <sub>Developer</sub><br/>
+      <sub>Desktop · Agentic AI<br/>GitHub · Release · AWS</sub>
+    </td>
+    <td align="center" width="180">
+      <a href="https://github.com/star9906">
+        <img src="https://github.com/star9906.png" width="100" height="100" alt="김동휘"/><br/>
+        <b>김동휘</b>
+      </a><br/>
+      <sub>Developer</sub><br/>
+      <sub>대화 · 암호화<br/>업로드 정합성 · LangGraph</sub>
+    </td>
+    <td align="center" width="180">
+      <a href="https://github.com/attatae01-svg">
+        <img src="https://github.com/attatae01-svg.png" width="100" height="100" alt="이동욱"/><br/>
+        <b>이동욱</b>
+      </a><br/>
+      <sub>Developer</sub><br/>
+      <sub>LangChain · LangGraph<br/>RAG 성능 개선</sub>
+    </td>
+    <td align="center" width="180">
+      <a href="https://github.com/robinlee3803-ai">
+        <img src="https://github.com/robinlee3803-ai.png" width="100" height="100" alt="이승민"/><br/>
+        <b>이승민</b>
+      </a><br/>
+      <sub>Developer</sub><br/>
+      <sub>RAG 검증 데이터<br/>합성 평가 데이터</sub>
+    </td>
+  </tr>
+</table>
+
+### 박제섭 — PR 기반 주요 기여
+
+| 담당 영역 | 구현 내용 | 관련 PR |
 | --- | --- | --- |
-| [서해연](https://github.com/hellohaeyeon) | Team Lead · PM | 프로젝트 기반 구축, SQL, FastAPI |
-| [박제섭](https://github.com/j3s30p) | Developer | 데스크톱 앱, LangGraph·API 고도화, 릴리즈 |
-| [김동휘](https://github.com/star9906) | Developer | 대화·암호화, 업로드 정합성, LangGraph |
-| [이동욱](https://github.com/attatae01-svg) | Developer | LangChain·LangGraph, RAG 개선 |
-| [이승민](https://github.com/robinlee3803-ai) | Developer | RAG 검증 데이터, 합성 평가 데이터 |
+| 데스크톱 기반과 제품 UI | Tauri 워크스페이스 구축, React 앱 셸, 프로젝트·채팅·메모리 패널, macOS 네이티브 메뉴와 고배율 접근성 | [3차 #1](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/1), [#11](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/11), [#55](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/55), [4차 #19](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/pull/19) |
+| 백엔드·데스크톱 통합 | FastAPI v1 클라이언트, 문서 업로드, Q&A, 세션, GitHub sync를 데스크톱 앱에 연결 | [3차 #20](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/20) |
+| 살아있는 프로젝트 메모리 | 메모리 CRUD·정렬·완료 처리, Reconciler, 델타 브리핑, 완료 제안 UI | [3차 #23](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/23), [#32](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/32), [#37](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/37) |
+| Agentic Q&A·RAG 평가 | LangGraph 도구 라우팅, SQL·하이브리드 검색·프로젝트 조망 도구, Action Plan 및 RAG 평가 체계 | [3차 #54](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/54) |
+| GitHub 연동 | GitHub App 인증·저장소 연결, 활동 동기화, 원격 최신성 확인과 오류 복구 | [3차 #6](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/6), [#8](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/8), [4차 #31](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/pull/31) |
+| 문서·음성 처리 | 문단 경계 청킹, PDF·DOCX 드롭 업로드, 런타임 파일 형식 동기화, 회의 음성 업로드·상태 복구 | [3차 #43](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/43), [4차 #3](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/pull/3), [#6](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/pull/6), [#27](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/pull/27), [#30](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/pull/30) |
+| 인증·권한·상태 안전성 | JWT 세션 복원, Owner/Member/Viewer 권한, local-only 채팅, 취소·재시도와 늦은 응답의 상태 오염 방지 | [3차 #55](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/55), [4차 #20](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/pull/20), [#29](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/pull/29) |
+| 릴리즈·운영 | macOS·Windows 자동 릴리즈, 버전 관리, 배포 서버 중심 UX 정리 | [3차 #3](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/3), [4차 #33](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/pull/33), [#34](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/pull/34) |
