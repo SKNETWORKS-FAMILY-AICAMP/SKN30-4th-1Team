@@ -1,0 +1,560 @@
+{
+  "schema_version": 1,
+  "dataset_id": "paim-agentic-v2-small-20260730",
+  "splits": {
+    "dev": 16,
+    "final": 8
+  },
+  "questions": [
+    {
+      "id": "M-SEM-01",
+      "corpus": "modu",
+      "split": "dev",
+      "family": "semantic",
+      "user_input": "소셜 로그인을 출시 후가 아니라 MVP에 넣기로 바꾼 이유는 무엇이야?",
+      "history": [],
+      "attachments": [],
+      "source_scope": [
+        "backend/test/golden/Test_modu/2026-03-09_기술스택확정_로그인방식결정.md",
+        "backend/test/golden/Test_modu/2026-03-23_로그인방식재논의_모임기능착수.md"
+      ],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": false,
+      "must_abstain": false,
+      "required_evidence_kinds": ["project"],
+      "ragas_metrics": ["context_precision", "context_recall", "faithfulness", "answer_correctness", "response_relevancy"]
+    },
+    {
+      "id": "M-SEM-02",
+      "corpus": "modu",
+      "split": "final",
+      "family": "semantic",
+      "user_input": "애플 로그인을 추가한 직접적인 이유와 예상 추가 공수는 얼마였어?",
+      "history": [],
+      "attachments": [],
+      "source_scope": [
+        "backend/test/golden/Test_modu/2026-03-30_소셜로그인점검_일정리스크평가.md"
+      ],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": false,
+      "must_abstain": false,
+      "required_evidence_kinds": ["project"],
+      "ragas_metrics": ["context_precision", "context_recall", "faithfulness", "answer_correctness", "response_relevancy"]
+    },
+    {
+      "id": "M-SEM-03",
+      "corpus": "modu",
+      "split": "dev",
+      "family": "semantic",
+      "user_input": "베타 테스트의 가입 완료율과 7일 리텐션은 얼마였고, 가장 많이 나온 개선 요구는 무엇이었어?",
+      "history": [],
+      "attachments": [],
+      "source_scope": [
+        "backend/test/golden/Test_modu/2026-05-11_베타결과리뷰_출시반영사항.md"
+      ],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": false,
+      "must_abstain": false,
+      "required_evidence_kinds": ["project"],
+      "ragas_metrics": ["context_precision", "context_recall", "faithfulness", "answer_correctness", "response_relevancy"]
+    },
+    {
+      "id": "M-SEM-04",
+      "corpus": "modu",
+      "split": "dev",
+      "family": "semantic",
+      "user_input": "모임 알림 지연의 원인은 무엇이었고 개선 후 얼마나 줄었어?",
+      "history": [],
+      "attachments": [],
+      "source_scope": [
+        "backend/test/golden/Test_modu/2026-05-11_베타결과리뷰_출시반영사항.md",
+        "backend/test/golden/Test_modu/2026-05-15_출시최종점검_1.1로드맵확정.md"
+      ],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": false,
+      "must_abstain": false,
+      "required_evidence_kinds": ["project"],
+      "ragas_metrics": ["context_precision", "context_recall", "faithfulness", "answer_correctness", "response_relevancy"]
+    },
+    {
+      "id": "M-STR-01",
+      "corpus": "modu",
+      "split": "dev",
+      "family": "structured_count",
+      "user_input": "현재 기록된 critical 버그는 몇 건이야?",
+      "history": [],
+      "attachments": [],
+      "source_scope": [
+        "backend/test/golden/Test_modu/2026-04-20_출시전최종개발점검.md"
+      ],
+      "required_capabilities": ["structured_state"],
+      "allowed_capabilities": ["structured_state"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {
+        "operation": "count",
+        "category": "issue"
+      },
+      "expected_history_mode": null,
+      "must_abstain": false,
+      "required_evidence_kinds": ["project"],
+      "ragas_metrics": []
+    },
+    {
+      "id": "M-STR-02",
+      "corpus": "modu",
+      "split": "final",
+      "family": "structured_list",
+      "user_input": "이수진이 담당하는 액션 아이템 목록을 알려줘.",
+      "history": [],
+      "attachments": [],
+      "source_scope": [
+        "backend/test/golden/Test_modu/2026-03-02_킥오프_앱방향정의.md",
+        "backend/test/golden/Test_modu/2026-03-09_기술스택확정_로그인방식결정.md",
+        "backend/test/golden/Test_modu/2026-03-16_회원시스템점검_관심사확정.md",
+        "backend/test/golden/Test_modu/2026-03-23_로그인방식재논의_모임기능착수.md",
+        "backend/test/golden/Test_modu/2026-03-30_소셜로그인점검_일정리스크평가.md",
+        "backend/test/golden/Test_modu/2026-04-06_출시일조정_개발중간점검.md",
+        "backend/test/golden/Test_modu/2026-04-13_모임핵심기능점검_베타준비.md",
+        "backend/test/golden/Test_modu/2026-04-20_출시전최종개발점검.md",
+        "backend/test/golden/Test_modu/2026-05-11_베타결과리뷰_출시반영사항.md",
+        "backend/test/golden/Test_modu/2026-05-15_출시최종점검_1.1로드맵확정.md"
+      ],
+      "required_capabilities": ["structured_state"],
+      "allowed_capabilities": ["structured_state"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {
+        "operation": "list",
+        "category": "action",
+        "owner": "이수진"
+      },
+      "expected_history_mode": null,
+      "must_abstain": false,
+      "required_evidence_kinds": ["project"],
+      "ragas_metrics": []
+    },
+    {
+      "id": "M-STR-03",
+      "corpus": "modu",
+      "split": "dev",
+      "family": "structured_list",
+      "user_input": "완료 여부를 아직 확인할 수 없는 액션 목록을 보여줘.",
+      "history": [],
+      "attachments": [],
+      "source_scope": [
+        "backend/test/golden/Test_modu/2026-05-15_출시최종점검_1.1로드맵확정.md"
+      ],
+      "required_capabilities": ["structured_state"],
+      "allowed_capabilities": ["structured_state"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {
+        "operation": "list",
+        "category": "action",
+        "completion_status": "unknown"
+      },
+      "expected_history_mode": null,
+      "must_abstain": false,
+      "required_evidence_kinds": ["project"],
+      "ragas_metrics": []
+    },
+    {
+      "id": "M-HIS-01",
+      "corpus": "modu",
+      "split": "dev",
+      "family": "history",
+      "user_input": "그 뒤에는 어떻게 바뀌었고 왜 바뀌었어?",
+      "history": [
+        {"role": "user", "content": "초기 출시 목표일은 언제였어?"},
+        {"role": "assistant", "content": "초기 목표일은 5월 11일이었습니다."}
+      ],
+      "attachments": [],
+      "source_scope": [
+        "backend/test/golden/Test_modu/2026-03-02_킥오프_앱방향정의.md",
+        "backend/test/golden/Test_modu/2026-04-06_출시일조정_개발중간점검.md"
+      ],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": true,
+      "must_abstain": false,
+      "required_evidence_kinds": ["project"],
+      "ragas_metrics": ["context_precision", "context_recall", "faithfulness", "answer_correctness", "response_relevancy"]
+    },
+    {
+      "id": "M-HIS-02",
+      "corpus": "modu",
+      "split": "final",
+      "family": "history",
+      "user_input": "나중에 이 계획이 바뀌었어?",
+      "history": [
+        {"role": "user", "content": "채팅은 MVP에서 어떻게 하기로 했어?"},
+        {"role": "assistant", "content": "비실시간 게시판형 댓글로 구현하기로 했습니다."}
+      ],
+      "attachments": [],
+      "source_scope": [
+        "backend/test/golden/Test_modu/2026-03-09_기술스택확정_로그인방식결정.md",
+        "backend/test/golden/Test_modu/2026-05-11_베타결과리뷰_출시반영사항.md",
+        "backend/test/golden/Test_modu/2026-05-15_출시최종점검_1.1로드맵확정.md"
+      ],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": true,
+      "must_abstain": false,
+      "required_evidence_kinds": ["project"],
+      "ragas_metrics": ["context_precision", "context_recall", "faithfulness", "answer_correctness", "response_relevancy"]
+    },
+    {
+      "id": "M-OV-01",
+      "corpus": "modu",
+      "split": "dev",
+      "family": "overview",
+      "user_input": "현재 출시 준비 상태와 출시 후 가장 가까운 계획을 간단히 브리핑해줘.",
+      "history": [],
+      "attachments": [],
+      "source_scope": [
+        "backend/test/golden/Test_modu/2026-05-11_베타결과리뷰_출시반영사항.md",
+        "backend/test/golden/Test_modu/2026-05-15_출시최종점검_1.1로드맵확정.md"
+      ],
+      "required_capabilities": ["overview"],
+      "allowed_capabilities": ["overview", "hybrid_search"],
+      "max_tool_rounds": 2,
+      "expected_arguments": {},
+      "expected_history_mode": null,
+      "must_abstain": false,
+      "required_evidence_kinds": ["project"],
+      "ragas_metrics": ["faithfulness", "answer_correctness", "response_relevancy"]
+    },
+    {
+      "id": "M-ATT-01",
+      "corpus": "modu",
+      "split": "final",
+      "family": "attachment_only",
+      "user_input": "첨부 메모에 적힌 릴리즈 후보명과 승인자는 누구야?",
+      "history": [],
+      "attachments": [
+        {
+          "filename": "release-note.txt",
+          "content_text": "릴리즈 후보명: Bluefin\n승인자: 김태호\n이 메모는 현재 요청에서만 사용한다."
+        }
+      ],
+      "source_scope": [],
+      "required_capabilities": [],
+      "allowed_capabilities": [],
+      "max_tool_rounds": 0,
+      "expected_arguments": {},
+      "expected_history_mode": null,
+      "must_abstain": false,
+      "required_evidence_kinds": ["attachment"],
+      "ragas_metrics": ["faithfulness", "answer_correctness", "response_relevancy"]
+    },
+    {
+      "id": "M-ABS-01",
+      "corpus": "modu",
+      "split": "dev",
+      "family": "abstention",
+      "user_input": "iOS 앱이 실제로 승인된 날짜와 출시된 시각을 알려줘.",
+      "history": [],
+      "attachments": [],
+      "source_scope": [
+        "backend/test/golden/Test_modu/2026-05-15_출시최종점검_1.1로드맵확정.md"
+      ],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": false,
+      "must_abstain": true,
+      "required_evidence_kinds": ["project"],
+      "ragas_metrics": []
+    },
+    {
+      "id": "C-SEM-01",
+      "corpus": "csbot",
+      "split": "dev",
+      "family": "semantic",
+      "user_input": "CS-Bot 오답이 많아진 원인을 진단 결과 기준으로 세 가지로 정리해줘.",
+      "history": [],
+      "attachments": [],
+      "source_scope": [
+        "backend/test/golden/Test_CS-Bot/2026-06-09_진단결과_원인분석.md"
+      ],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": false,
+      "must_abstain": false,
+      "required_evidence_kinds": ["project"],
+      "ragas_metrics": ["context_precision", "context_recall", "faithfulness", "answer_correctness", "response_relevancy"]
+    },
+    {
+      "id": "C-SEM-02",
+      "corpus": "csbot",
+      "split": "final",
+      "family": "semantic",
+      "user_input": "파인튜닝을 이번 1차 유지보수에서 제외한 이유는 무엇이야?",
+      "history": [],
+      "attachments": [],
+      "source_scope": [
+        "backend/test/golden/Test_CS-Bot/2026-06-16_개선방안_확정.md"
+      ],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": false,
+      "must_abstain": false,
+      "required_evidence_kinds": ["project"],
+      "ragas_metrics": ["context_precision", "context_recall", "faithfulness", "answer_correctness", "response_relevancy"]
+    },
+    {
+      "id": "C-SEM-03",
+      "corpus": "csbot",
+      "split": "dev",
+      "family": "semantic",
+      "user_input": "re-ranking 도입을 결정할 때 확인한 정확도 효과와 지연시간 비용은 무엇이었어?",
+      "history": [],
+      "attachments": [],
+      "source_scope": [
+        "backend/test/golden/Test_CS-Bot/2026-06-16_개선방안_확정.md",
+        "backend/test/golden/Test_CS-Bot/2026-06-23_QA결과검토_2차방향.md"
+      ],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": false,
+      "must_abstain": false,
+      "required_evidence_kinds": ["project"],
+      "ragas_metrics": ["context_precision", "context_recall", "faithfulness", "answer_correctness", "response_relevancy"]
+    },
+    {
+      "id": "C-SEM-04",
+      "corpus": "csbot",
+      "split": "dev",
+      "family": "semantic",
+      "user_input": "최종 QA에서 전체 정답률은 처음보다 얼마나 개선됐고, 영역별 최종 결과는 어땠어?",
+      "history": [],
+      "attachments": [],
+      "source_scope": [
+        "backend/test/golden/Test_CS-Bot/2026-06-27_최종QA_배포일정.md"
+      ],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": false,
+      "must_abstain": false,
+      "required_evidence_kinds": ["project"],
+      "ragas_metrics": ["context_precision", "context_recall", "faithfulness", "answer_correctness", "response_relevancy"]
+    },
+    {
+      "id": "C-STR-01",
+      "corpus": "csbot",
+      "split": "dev",
+      "family": "structured_count",
+      "user_input": "최민준이 담당하는 액션 아이템은 몇 건이야?",
+      "history": [],
+      "attachments": [],
+      "source_scope": [
+        "backend/test/golden/Test_CS-Bot/2026-06-02_유지보수요청_초기대응.md",
+        "backend/test/golden/Test_CS-Bot/2026-06-09_진단결과_원인분석.md",
+        "backend/test/golden/Test_CS-Bot/2026-06-16_개선방안_확정.md",
+        "backend/test/golden/Test_CS-Bot/2026-06-23_QA결과검토_2차방향.md",
+        "backend/test/golden/Test_CS-Bot/2026-06-27_최종QA_배포일정.md"
+      ],
+      "required_capabilities": ["structured_state"],
+      "allowed_capabilities": ["structured_state"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {
+        "operation": "count",
+        "category": "action",
+        "owner": "최민준"
+      },
+      "expected_history_mode": null,
+      "must_abstain": false,
+      "required_evidence_kinds": ["project"],
+      "ragas_metrics": []
+    },
+    {
+      "id": "C-STR-02",
+      "corpus": "csbot",
+      "split": "final",
+      "family": "structured_list",
+      "user_input": "박서연이 담당하는 액션 아이템 목록을 알려줘.",
+      "history": [],
+      "attachments": [],
+      "source_scope": [
+        "backend/test/golden/Test_CS-Bot/2026-06-02_유지보수요청_초기대응.md",
+        "backend/test/golden/Test_CS-Bot/2026-06-09_진단결과_원인분석.md",
+        "backend/test/golden/Test_CS-Bot/2026-06-16_개선방안_확정.md",
+        "backend/test/golden/Test_CS-Bot/2026-06-23_QA결과검토_2차방향.md",
+        "backend/test/golden/Test_CS-Bot/2026-06-27_최종QA_배포일정.md"
+      ],
+      "required_capabilities": ["structured_state"],
+      "allowed_capabilities": ["structured_state"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {
+        "operation": "list",
+        "category": "action",
+        "owner": "박서연"
+      },
+      "expected_history_mode": null,
+      "must_abstain": false,
+      "required_evidence_kinds": ["project"],
+      "ragas_metrics": []
+    },
+    {
+      "id": "C-STR-03",
+      "corpus": "csbot",
+      "split": "dev",
+      "family": "structured_list",
+      "user_input": "완료 여부가 아직 확인되지 않은 액션 목록을 보여줘.",
+      "history": [],
+      "attachments": [],
+      "source_scope": [
+        "backend/test/golden/Test_CS-Bot/2026-06-27_최종QA_배포일정.md"
+      ],
+      "required_capabilities": ["structured_state"],
+      "allowed_capabilities": ["structured_state"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {
+        "operation": "list",
+        "category": "action",
+        "completion_status": "unknown"
+      },
+      "expected_history_mode": null,
+      "must_abstain": false,
+      "required_evidence_kinds": ["project"],
+      "ragas_metrics": []
+    },
+    {
+      "id": "C-HIS-01",
+      "corpus": "csbot",
+      "split": "dev",
+      "family": "history",
+      "user_input": "최종 결과에서는 어떻게 달라졌어?",
+      "history": [
+        {"role": "user", "content": "1차 개선 후 전체 정답률은 얼마였어?"},
+        {"role": "assistant", "content": "1차 개선 후 전체 정답률은 80%였습니다."}
+      ],
+      "attachments": [],
+      "source_scope": [
+        "backend/test/golden/Test_CS-Bot/2026-06-23_QA결과검토_2차방향.md",
+        "backend/test/golden/Test_CS-Bot/2026-06-27_최종QA_배포일정.md"
+      ],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": true,
+      "must_abstain": false,
+      "required_evidence_kinds": ["project"],
+      "ragas_metrics": ["context_precision", "context_recall", "faithfulness", "answer_correctness", "response_relevancy"]
+    },
+    {
+      "id": "C-HIS-02",
+      "corpus": "csbot",
+      "split": "final",
+      "family": "history",
+      "user_input": "그 뒤 실제 도입 여부는 어떻게 결정됐어?",
+      "history": [
+        {"role": "user", "content": "re-ranking은 처음에 바로 도입하기로 했어?"},
+        {"role": "assistant", "content": "처음에는 QA 검증 결과를 보고 결정하기로 했습니다."}
+      ],
+      "attachments": [],
+      "source_scope": [
+        "backend/test/golden/Test_CS-Bot/2026-06-16_개선방안_확정.md",
+        "backend/test/golden/Test_CS-Bot/2026-06-23_QA결과검토_2차방향.md"
+      ],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": true,
+      "must_abstain": false,
+      "required_evidence_kinds": ["project"],
+      "ragas_metrics": ["context_precision", "context_recall", "faithfulness", "answer_correctness", "response_relevancy"]
+    },
+    {
+      "id": "C-OV-01",
+      "corpus": "csbot",
+      "split": "dev",
+      "family": "overview",
+      "user_input": "현재 1차 개선 상태와 배포 후 계획, 남은 쟁점을 간단히 브리핑해줘.",
+      "history": [],
+      "attachments": [],
+      "source_scope": [
+        "backend/test/golden/Test_CS-Bot/2026-06-23_QA결과검토_2차방향.md",
+        "backend/test/golden/Test_CS-Bot/2026-06-27_최종QA_배포일정.md"
+      ],
+      "required_capabilities": ["overview"],
+      "allowed_capabilities": ["overview", "hybrid_search"],
+      "max_tool_rounds": 2,
+      "expected_arguments": {},
+      "expected_history_mode": null,
+      "must_abstain": false,
+      "required_evidence_kinds": ["project"],
+      "ragas_metrics": ["faithfulness", "answer_correctness", "response_relevancy"]
+    },
+    {
+      "id": "C-ATT-01",
+      "corpus": "csbot",
+      "split": "dev",
+      "family": "attachment_and_search",
+      "user_input": "첨부에 적힌 고객사 마감과 프로젝트가 확정한 배포 시각을 비교하고, 하루 먼저 배포하는 이유를 설명해줘.",
+      "history": [],
+      "attachments": [
+        {
+          "filename": "customer-deadline.txt",
+          "content_text": "고객사 요청: 2026년 7월 1일 이전까지 1차 개선 배포를 완료해 주세요."
+        }
+      ],
+      "source_scope": [
+        "backend/test/golden/Test_CS-Bot/2026-06-27_최종QA_배포일정.md"
+      ],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": false,
+      "must_abstain": false,
+      "required_evidence_kinds": ["attachment", "project"],
+      "ragas_metrics": ["context_precision", "context_recall", "faithfulness", "answer_correctness", "response_relevancy"]
+    },
+    {
+      "id": "C-ABS-01",
+      "corpus": "csbot",
+      "split": "final",
+      "family": "abstention",
+      "user_input": "고객사 계약 연장이 확정된 날짜와 계약 금액을 알려줘.",
+      "history": [],
+      "attachments": [],
+      "source_scope": [
+        "backend/test/golden/Test_CS-Bot/2026-06-27_최종QA_배포일정.md"
+      ],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": false,
+      "must_abstain": true,
+      "required_evidence_kinds": ["project"],
+      "ragas_metrics": []
+    }
+  ]
+}
