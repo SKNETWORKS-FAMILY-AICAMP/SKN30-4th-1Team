@@ -241,7 +241,7 @@ npm run app:build --prefix desktop
         <b>서해연</b>
       </a><br/>
       <sub>Team Lead · PM</sub><br/>
-      <sub>프로젝트 기반 구축<br/>SQL · FastAPI</sub>
+      <sub>FastAPI · 인증 · Supersede<br/>평가 파이프라인 · 배포 하드닝</sub>
     </td>
     <td align="center" width="180">
       <a href="https://github.com/j3s30p">
@@ -249,7 +249,7 @@ npm run app:build --prefix desktop
         <b>박제섭</b>
       </a><br/>
       <sub>Developer</sub><br/>
-      <sub>Desktop · Agentic AI<br/>GitHub · Release · AWS</sub>
+      <sub>Tauri Desktop · Agentic Q&A<br/>GitHub 연동 · 릴리즈</sub>
     </td>
     <td align="center" width="180">
       <a href="https://github.com/star9906">
@@ -257,7 +257,7 @@ npm run app:build --prefix desktop
         <b>김동휘</b>
       </a><br/>
       <sub>Developer</sub><br/>
-      <sub>대화 · 암호화<br/>업로드 정합성 · LangGraph</sub>
+      <sub>세션 보안 · 대화 암호화<br/>업로드 정합성 · 멀티포맷</sub>
     </td>
     <td align="center" width="180">
       <a href="https://github.com/attatae01-svg">
@@ -265,7 +265,7 @@ npm run app:build --prefix desktop
         <b>이동욱</b>
       </a><br/>
       <sub>Developer</sub><br/>
-      <sub>LangChain · LangGraph<br/>RAG 성능 개선</sub>
+      <sub>LangGraph · Hybrid Reranker<br/>RAGAS 평가 · 검색 품질 개선</sub>
     </td>
     <td align="center" width="180">
       <a href="https://github.com/robinlee3803-ai">
@@ -273,20 +273,7 @@ npm run app:build --prefix desktop
         <b>이승민</b>
       </a><br/>
       <sub>Developer</sub><br/>
-      <sub>RAG 검증 데이터<br/>합성 평가 데이터</sub>
+      <sub>RAG 검증 데이터 수집<br/>합성 평가 데이터 구성</sub>
     </td>
   </tr>
 </table>
-
-### 박제섭 — PR 기반 주요 기여
-
-| 담당 영역 | 구현 내용 | 관련 PR |
-| --- | --- | --- |
-| 데스크톱 기반과 제품 UI | Tauri 워크스페이스 구축, React 앱 셸, 프로젝트·채팅·메모리 패널, macOS 네이티브 메뉴와 고배율 접근성 | [3차 #1](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/1), [#11](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/11), [#55](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/55), [4차 #19](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/pull/19) |
-| 백엔드·데스크톱 통합 | FastAPI v1 클라이언트, 문서 업로드, Q&A, 세션, GitHub sync를 데스크톱 앱에 연결 | [3차 #20](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/20) |
-| 살아있는 프로젝트 메모리 | 메모리 CRUD·정렬·완료 처리, Reconciler, 델타 브리핑, 완료 제안 UI | [3차 #23](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/23), [#32](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/32), [#37](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/37) |
-| Agentic Q&A·RAG 평가 | LangGraph 도구 라우팅, SQL·하이브리드 검색·프로젝트 조망 도구, Action Plan 및 RAG 평가 체계 | [3차 #54](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/54) |
-| GitHub 연동 | GitHub App 인증·저장소 연결, 활동 동기화, 원격 최신성 확인과 오류 복구 | [3차 #6](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/6), [#8](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/8), [4차 #31](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/pull/31) |
-| 문서·음성 처리 | 문단 경계 청킹, PDF·DOCX 드롭 업로드, 런타임 파일 형식 동기화, 회의 음성 업로드·상태 복구 | [3차 #43](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/43), [4차 #3](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/pull/3), [#6](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/pull/6), [#27](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/pull/27), [#30](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/pull/30) |
-| 인증·권한·상태 안전성 | JWT 세션 복원, Owner/Member/Viewer 권한, local-only 채팅, 취소·재시도와 늦은 응답의 상태 오염 방지 | [3차 #55](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/55), [4차 #20](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/pull/20), [#29](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/pull/29) |
-| 릴리즈·운영 | macOS·Windows 자동 릴리즈, 버전 관리, 배포 서버 중심 UX 정리 | [3차 #3](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/pull/3), [4차 #33](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/pull/33), [#34](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/pull/34) |
