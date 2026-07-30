@@ -8,11 +8,14 @@ orchestrator LLM is the single component responsible for the final response.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Annotated, Literal, Optional
 
 from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 
+from ..project_memory import get_project_memory
 from . import history_context, mysql_search, qa_engine
 from .index_scope import load_project_index_scope
 from .sql_project_state import fetch_project_overview_context
@@ -29,6 +32,27 @@ CompletionStatus = Literal["open", "completed", "unknown"]
 MEMORY_TOOL_MAX_ROWS = 10
 _ALL_SCOPE_WORDS = frozenset({"전체", "모든", "프로젝트", "기록", "항목", "메모리"})
 _ATTACHMENT_EVIDENCE_MARKERS = ("[첨부 자료]", "[임시 첨부 근거]")
+_EVALUATION_CONTEXTS: ContextVar[Optional[list[str]]] = ContextVar(
+    "qa_evaluation_contexts", default=None
+)
+
+
+@contextmanager
+def capture_retrieved_contexts_for_evaluation():
+    """현재 평가 요청에서 Tool이 사용한 전체 근거만 격리해 수집한다."""
+    contexts: list[str] = []
+    token = _EVALUATION_CONTEXTS.set(contexts)
+    try:
+        yield contexts
+    finally:
+        _EVALUATION_CONTEXTS.reset(token)
+
+
+def _capture_evaluation_contexts(contexts: list[str]) -> None:
+    """평가 수집기가 활성화된 요청에만 전체 근거를 전달한다."""
+    target = _EVALUATION_CONTEXTS.get()
+    if target is not None:
+        target.extend(context for context in contexts if context)
 
 
 def _count_text_filter(category: MemoryCategory, text_query: str) -> Optional[str]:
@@ -157,14 +181,20 @@ def search_project_evidence(
         history_topic_tokens=history_tokens,
         query_variants=retrieval_variants[:3],
     )
-    # _build_context captures one repository-generation scope for all MySQL
-    # and Chroma evidence. The unversioned project summary is intentionally not
-    # mixed into this targeted tool result; overview requests have a dedicated
-    # tool and summary lifecycle.
-    content = context or "프로젝트 기록에서 관련 근거를 찾지 못했습니다."
+    project_memory = get_project_memory(project_id)
+    parts = []
+    if project_memory:
+        parts.append(f"[프로젝트 메모리]\n{project_memory}")
+    if context:
+        parts.append(context)
+    content = "\n\n".join(parts) or "프로젝트 기록에서 관련 근거를 찾지 못했습니다."
+    _capture_evaluation_contexts(
+        ([f"[프로젝트 메모리]\n{project_memory}"] if project_memory else [])
+        + list(debug.get("retrieved_contexts") or [])
+    )
     return content, {
         "tool": "search_project_evidence",
-        "status": "ok" if context else "empty",
+        "status": "ok" if parts else "empty",
         "sources": sources,
         "debug": _compact_retrieval_debug(debug),
     }
@@ -327,9 +357,11 @@ def get_project_overview(
         source = row.get("source")
         if source and source not in sources:
             sources.append(source)
-    return "[프로젝트 조망]\n" + json.dumps(
+    content = "[프로젝트 조망]\n" + json.dumps(
         context, ensure_ascii=False, default=str
-    ), {
+    )
+    _capture_evaluation_contexts([content])
+    return content, {
         "tool": "get_project_overview",
         "status": "ok" if context.get("overview_summary") or rows else "empty",
         "sources": sources,
