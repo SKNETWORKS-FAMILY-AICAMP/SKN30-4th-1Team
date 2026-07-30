@@ -1,5 +1,8 @@
 import base64
 import io
+from pathlib import Path
+import subprocess
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -8,9 +11,12 @@ from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from backend.document_content import (
+    ALLOWED_SUFFIXES,
     INVALID_DOCUMENT_CODE,
     DocumentContentError,
     extract_document_text,
+    supported_extensions,
+    validate_document_bytes,
 )
 from backend.main import app
 
@@ -281,11 +287,17 @@ def _multipage_pdf(pages: list[list[str]]) -> bytes:
 
 
 def test_registry_matches_converter_registry():
-    """두 레지스트리는 별도 객체다. 드리프트하면 업로드·질의 지원 포맷이 어긋난다."""
+    """문서 API 허용 집합과 capabilities는 converter registry에서 파생된다."""
     from backend.document_content import DOCUMENT_PARSERS
     from backend.pipeline.converters import supported_suffixes
 
-    assert set(DOCUMENT_PARSERS) == set(supported_suffixes())
+    converter_suffixes = set(supported_suffixes())
+    assert converter_suffixes == {".txt", ".md", ".markdown", ".docx", ".pdf"}
+    assert set(DOCUMENT_PARSERS) == converter_suffixes
+    assert ALLOWED_SUFFIXES == converter_suffixes
+    assert set(supported_extensions()) == {
+        suffix.removeprefix(".") for suffix in converter_suffixes
+    }
 
 
 def test_docx_extraction_delegates_to_converter():
@@ -358,10 +370,87 @@ def test_oversized_docx_keeps_actionable_message():
 
 
 def test_text_formats_keep_original_contract():
-    """MD/TXT는 위임 대상이 아니다. CRLF·BOM·CP949·인코딩 계약이 그대로여야 한다."""
+    """텍스트 형식은 엄격한 UTF-8/CP949 계약을 그대로 유지한다."""
     assert extract_document_text("crlf.md", b"line1\r\nline2") == "line1\r\nline2"
+    assert extract_document_text("notes.markdown", b"markdown") == "markdown"
     assert extract_document_text("bom.txt", b"\xef\xbb\xbfhello") == "hello"
     assert extract_document_text("cp949.txt", "한글".encode("cp949")) == "한글"
     with pytest.raises(DocumentContentError) as exc_info:
         extract_document_text("bad.txt", b"\x81")
     assert exc_info.value.code == INVALID_DOCUMENT_CODE
+
+
+@pytest.mark.parametrize(
+    ("filename", "data", "format_name"),
+    [
+        ("fake.pdf", b"not-a-pdf", "PDF"),
+        ("fake.docx", b"not-a-docx", "DOCX"),
+    ],
+)
+def test_binary_formats_keep_magic_guards(filename, data, format_name):
+    with pytest.raises(DocumentContentError) as exc_info:
+        validate_document_bytes(filename, data)
+
+    assert exc_info.value.code == INVALID_DOCUMENT_CODE
+    assert f"{format_name} 확장자와 실제 파일 형식이 일치하지 않습니다." == (
+        exc_info.value.message
+    )
+
+
+def test_new_binary_converter_registry_entry_opens_document_surfaces():
+    """새 바이너리 형식은 converter 등록 한 번으로 검증·파서·capabilities에 열린다."""
+    script = r"""
+import backend.pipeline.converters as converters
+from backend.pipeline.converters import Block, ConvertedDocument
+
+suffix = ".synthetic"
+payload = b"\x00\xffsynthetic-binary\x80"
+
+def convert_synthetic(filename: str, data: bytes) -> ConvertedDocument:
+    assert data == payload
+    return ConvertedDocument(
+        source=filename,
+        format="synthetic",
+        blocks=[
+            Block(
+                order=0,
+                kind="paragraph",
+                text="synthetic binary body",
+            )
+        ],
+    )
+
+# production 시작과 같은 순서로 converter를 등록한 뒤 document surface를 처음 import한다.
+converters._REGISTRY[suffix] = convert_synthetic
+
+from backend import document_content
+from backend.api.capabilities import get_capabilities
+
+assert suffix in document_content.DOCUMENT_PARSERS
+assert suffix in document_content.ALLOWED_SUFFIXES
+assert "synthetic" in document_content.supported_extensions()
+
+# NUL과 비 UTF-8 바이트가 있어도 텍스트 디코더가 선점하지 않는다.
+document_content.validate_document_bytes("sample.synthetic", payload)
+assert (
+    document_content.extract_document_text("sample.synthetic", payload)
+    == "synthetic binary body"
+)
+
+capabilities = get_capabilities()
+assert "synthetic" in capabilities["project_documents"]["extensions"]
+assert "synthetic" in capabilities["query_attachments"]["extensions"]
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, (
+        f"synthetic converter subprocess failed\n"
+        f"stdout:\n{completed.stdout}\n"
+        f"stderr:\n{completed.stderr}"
+    )
