@@ -17,7 +17,6 @@ from langgraph.prebuilt import InjectedState
 
 from . import history_context, mysql_search, qa_engine
 from .index_scope import load_project_index_scope
-from .question_scope import QuestionScope
 from .sql_project_state import fetch_project_overview_context
 
 # Keep the private alias for test and tool-local compatibility. The old router
@@ -29,21 +28,12 @@ MemoryCategory = Literal["decision", "action", "issue", "risk", "all"]
 MemoryOperation = Literal["list", "count", "overview"]
 CompletionStatus = Literal["open", "completed", "unknown"]
 MEMORY_TOOL_MAX_ROWS = 10
-_ATTACHMENT_EVIDENCE_MARKERS = ("[첨부 자료]", "[임시 첨부 근거]")
-_SERVER_FALLBACK_MARKER = "paim_server_fallback"
 
 
 def _with_latency(started: float, artifact: dict) -> dict:
     """Tool 실행 시간을 공통 trace 필드로 추가한다."""
     artifact["latency_ms"] = round((time.perf_counter() - started) * 1000, 3)
     return artifact
-
-
-def _question_scope(value: Optional[dict]) -> QuestionScope:
-    """Validate a non-empty server-created scope injected into a Tool call."""
-    if not isinstance(value, dict) or not value:
-        raise ValueError("a non-empty server question scope is required")
-    return QuestionScope.model_validate(value)
 
 
 def _strict_text(value, field: str, *, optional: bool = False) -> Optional[str]:
@@ -61,37 +51,6 @@ def _strict_project_id(value) -> int:
     if type(value) is not int or value <= 0:
         raise ValueError("project_id must be a positive integer")
     return value
-
-
-def _is_server_owned_fallback(messages: list, current_question: str) -> bool:
-    """Accept the one raw-search call created by the graph, never a model call."""
-    if not messages:
-        return False
-    last = messages[-1]
-    if getattr(last, "type", None) != "ai":
-        return False
-    marker = getattr(last, "additional_kwargs", None) or {}
-    calls = list(getattr(last, "tool_calls", None) or [])
-    if marker.get(_SERVER_FALLBACK_MARKER) is not True or len(calls) != 1:
-        return False
-    call = calls[0]
-    call_id = call.get("id")
-    args = call.get("args")
-    if (
-        call.get("name") != "search_hybrid_vector_rag"
-        or not isinstance(call_id, str)
-        or not call_id.startswith("server_fallback_")
-        or not isinstance(args, dict)
-        or set(args) != {"query"}
-    ):
-        return False
-    fallback_query = args.get("query")
-    if not isinstance(fallback_query, str):
-        return False
-    return (
-        unicodedata.normalize("NFKC", fallback_query).strip()
-        == current_question
-    )
 
 
 def _row_source_labels(row: dict) -> list[str]:
@@ -173,17 +132,27 @@ def search_project_evidence(
         ),
     ],
     project_id: Annotated[int, InjectedState("project_id")],
-    messages: Annotated[list, InjectedState("messages")],
     current_question: Annotated[str, InjectedState("current_question")],
-    question_scope: Annotated[
-        Optional[dict],
-        InjectedState("question_scope"),
-    ] = None,
     alternate_queries: Annotated[
         Optional[list[str]],
         (
             "기본 검색어와 같은 의미의 표기 변형을 최대 3개 전달합니다. "
             "대상·역할·시점·수치 단위를 바꾸지 않습니다."
+        ),
+    ] = None,
+    include_history: Annotated[
+        bool,
+        (
+            "번복·대체된 과거 기록까지 검색할 때만 true입니다. 현재 상태만 필요하면 "
+            "false로 두세요."
+        ),
+    ] = False,
+    history_topic: Annotated[
+        Optional[str],
+        (
+            "include_history가 true일 때 이력을 한 주제로 좁히는 문구입니다. "
+            "생략하면 프로젝트 이력 전체를 검색합니다. 질문이 이전 대화의 주제를 "
+            "이어받는 경우 그 주제를 여기에 직접 적습니다."
         ),
     ] = None,
 ) -> tuple[str, dict]:
@@ -196,19 +165,23 @@ def search_project_evidence(
     started = time.perf_counter()
     try:
         project_id = _strict_project_id(project_id)
-        _strict_text(query, "query")
+        normalized_query = _strict_text(query, "query")
         runtime_question = _strict_text(current_question, "current_question")
-        if not isinstance(messages, list):
-            raise ValueError("messages must be a list")
+        normalized_alternates: list[str] = []
         if alternate_queries is not None:
             if not isinstance(alternate_queries, list):
                 raise ValueError("alternate_queries must be a list")
             if len(alternate_queries) > 3:
                 raise ValueError("alternate_queries accepts at most 3 values")
             for alternate in alternate_queries:
-                _strict_text(alternate, "alternate_queries item")
-        scope = _question_scope(question_scope)
-        server_fallback = _is_server_owned_fallback(messages, runtime_question)
+                normalized_alternates.append(
+                    _strict_text(alternate, "alternate_queries item")
+                )
+        if type(include_history) is not bool:
+            raise ValueError("include_history must be a boolean")
+        history_topic = _strict_text(history_topic, "history_topic", optional=True)
+        if history_topic is not None and not include_history:
+            raise ValueError("history_topic requires include_history")
     except (TypeError, ValueError) as exc:
         content = f"요청 범위를 검증할 수 없어 검색을 거부했습니다: {exc}"
         return content, _with_latency(started, {
@@ -219,72 +192,21 @@ def search_project_evidence(
             "debug": {},
         })
 
-    unsupported_constraints = any((
-        scope.operation is not None,
-        scope.category is not None,
-        bool(scope.categories),
-        scope.owner is not None,
-        bool(scope.owners),
-        bool(scope.excluded_owners),
-        scope.completion_status is not None,
-        bool(scope.completion_statuses),
-        scope.due_within_days is not None,
-        scope.overdue,
-    ))
-    if unsupported_constraints and not server_fallback:
-        content = (
-            "하이브리드 검색으로 정확히 집행할 수 없는 구조화 범위가 포함되어 "
-            "검색을 거부했습니다."
-        )
-        return content, _with_latency(started, {
-            "tool": "search_hybrid_vector_rag",
-            "status": "invalid_query",
-            "sources": [],
-            "model_contexts": [],
-            "debug": {},
-        })
-
     # ``messages`` is the same bounded sequence shown to the orchestrator.  Its
-    # last human turn is the current question, so only earlier human turns are
-    # eligible as the topic of a conversational history follow-up.  Attachment
-    # blocks are evidence, not conversation turns.
-    user_turns = []
-    for message in messages:
-        if getattr(message, "type", None) != "human":
-            continue
-        content = getattr(message, "content", "")
-        if not isinstance(content, str):
-            invalid = (
-                "요청 범위를 검증할 수 없어 검색을 거부했습니다: "
-                "human message content must be a string"
-            )
-            return invalid, _with_latency(started, {
-                "tool": "search_hybrid_vector_rag",
-                "status": "invalid_query",
-                "sources": [],
-                "model_contexts": [],
-                "debug": {},
-            })
-        normalized = unicodedata.normalize("NFKC", content).strip()
-        if normalized:
-            user_turns.append(normalized)
-    if user_turns:
-        user_turns.pop()
-    conversation_history = [
-        {"role": "user", "content": content}
-        for content in user_turns
-        if not content.startswith(_ATTACHMENT_EVIDENCE_MARKERS)
-    ]
-    runtime_history_mode = scope.include_history
+    # The orchestrator sees the conversation and writes the inherited topic into
+    # ``history_topic`` itself, so a topic is what narrows the history rather
+    # than a server-derived previous turn.
     try:
         history_mode, history_scope, history_tokens, effective_question = (
             history_context.resolve_history_context(
                 runtime_question,
-                conversation_history,
-                history_mode=runtime_history_mode,
-                inherit_previous_topic=scope.inherit_previous_topic,
-                history_scope=scope.history_scope,
-                history_topic=scope.history_topic,
+                history_mode=include_history,
+                history_scope=(
+                    ("topical" if history_topic else "global")
+                    if include_history
+                    else None
+                ),
+                history_topic=history_topic,
             )
         )
     except (TypeError, ValueError) as exc:
@@ -296,10 +218,14 @@ def search_project_evidence(
             "model_contexts": [],
             "debug": {},
         })
-    # Model-authored query variants are advisory and cannot prove that they
-    # preserve the immutable request scope. Search only the authoritative user
-    # question (plus the server-approved inherited user topic).
-    retrieval_variants = [effective_question]
+    # The user question stays first: ``_authoritative_query_tokens`` trusts only
+    # that entry to admit evidence, so model-authored variants can rerank what
+    # was already admitted but cannot pull in an unrelated row or chunk.
+    retrieval_variants = [
+        effective_question,
+        normalized_query,
+        *normalized_alternates,
+    ]
 
     context, sources, debug = qa_engine._build_context(
         project_id,
@@ -319,7 +245,6 @@ def search_project_evidence(
         "status": "ok" if context else "empty",
         "sources": sources,
         "model_contexts": [content] if context else [],
-        "server_fallback": server_fallback,
         "debug": _compact_retrieval_debug(debug),
     })
 
@@ -342,14 +267,17 @@ def query_structured_memory(
             "risk: 미래의 위협·불확실성, all: 여러 분류를 함께 묻거나 분류 조건이 없을 때만 사용."
         ),
     ],
-    question_scope: Annotated[
-        Optional[dict],
-        InjectedState("question_scope"),
-    ] = None,
     owner: Annotated[
         Optional[str],
         "질문에 조건으로 이미 주어진 담당자만 넣습니다. 사용자가 묻는 미지의 담당자를 추측하지 않습니다.",
     ] = None,
+    include_history: Annotated[
+        bool,
+        (
+            "번복·대체된 과거 행까지 포함할 때만 true입니다. 현재 상태만 필요하면 "
+            "false로 두세요. overview에는 사용할 수 없습니다."
+        ),
+    ] = False,
     completion_status: Annotated[
         Optional[CompletionStatus],
         (
@@ -416,79 +344,16 @@ def query_structured_memory(
         if type(limit) is not int or limit <= 0:
             raise ValueError("limit must be a positive integer")
         limit = min(limit, MEMORY_TOOL_MAX_ROWS)
-        scope = _question_scope(question_scope)
+        if type(include_history) is not bool:
+            raise ValueError("include_history must be a boolean")
     except (TypeError, ValueError) as exc:
         invalid_reason = f"요청 범위를 검증할 수 없습니다: {exc}"
-        scope = None
 
-    include_superseded = False
-    if invalid_reason is None:
-        scoped_categories = (
-            [scope.category]
-            if scope.category is not None
-            else list(scope.categories)
+    include_superseded = bool(include_history)
+    if invalid_reason is None and include_history and operation == "overview":
+        invalid_reason = (
+            "프로젝트 이력 전체의 조망은 현재 구조화 조회가 지원하지 않습니다."
         )
-        scoped_owners = (
-            [scope.owner] if scope.owner is not None else list(scope.owners)
-        )
-        scoped_statuses = (
-            [scope.completion_status]
-            if scope.completion_status is not None
-            else list(scope.completion_statuses)
-        )
-        if any(
-            len(values) > 1
-            for values in (scoped_categories, scoped_owners, scoped_statuses)
-        ):
-            invalid_reason = (
-                "복수 분류·담당자·상태 조건은 단일값 구조화 조회로 "
-                "정확히 표현할 수 없습니다."
-            )
-        elif scope.include_history and scope.history_scope != "global":
-            invalid_reason = (
-                "주제별 이력 범위는 구조화 조회로 정확히 표현할 수 없습니다. "
-                "원문 근거 검색을 사용하세요."
-            )
-        elif scope.include_history and operation == "overview":
-            invalid_reason = (
-                "프로젝트 이력 전체의 조망은 현재 구조화 조회가 지원하지 않습니다."
-            )
-        elif scope.include_history and scope.inherit_previous_topic:
-            invalid_reason = (
-                "이전 대화 주제를 상속한 이력 범위는 구조화 조회로 "
-                "정확히 표현할 수 없습니다."
-            )
-        elif scope.subject is not None:
-            invalid_reason = (
-                "자연어 대상 조건은 구조화 조회로 정확히 표현할 수 없습니다. "
-                "원문 근거 검색을 사용하세요."
-            )
-        elif scope.operation is None:
-            invalid_reason = (
-                "질문 범위에 구조화 목록·개수·조망 요청이 명시되지 않았습니다. "
-                "원문 근거 검색을 사용하세요."
-            )
-        elif operation != scope.operation:
-            invalid_reason = "요청한 결과 형태와 operation이 일치하지 않습니다."
-        elif category != (scoped_categories[0] if scoped_categories else "all"):
-            invalid_reason = "요청한 분류 범위와 category가 일치하지 않습니다."
-        elif owner != (scoped_owners[0] if scoped_owners else None):
-            invalid_reason = "요청한 담당자 범위와 owner가 일치하지 않습니다."
-        elif scope.excluded_owners:
-            invalid_reason = (
-                "제외 담당자 조건은 구조화 조회가 지원하지 않습니다. "
-                "원문 근거 검색을 사용하세요."
-            )
-        elif completion_status != (
-            scoped_statuses[0] if scoped_statuses else None
-        ):
-            invalid_reason = "요청한 완료 상태와 completion_status가 일치하지 않습니다."
-        elif due_within_days != scope.due_within_days:
-            invalid_reason = "요청한 마감 범위와 due_within_days가 일치하지 않습니다."
-        elif overdue is not (True if scope.overdue else None):
-            invalid_reason = "요청한 기한 초과 범위와 overdue가 일치하지 않습니다."
-        else:
-            include_superseded = scope.include_history
 
     if invalid_reason is None and category != "action" and any(
         value is not None for value in (completion_status, due_within_days, overdue)

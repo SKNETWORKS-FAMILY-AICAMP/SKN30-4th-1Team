@@ -3,15 +3,10 @@ import pytest
 from backend.retriever.history_context import resolve_history_context
 
 
-def test_history_context_inherits_the_previous_topic_for_deictic_question():
+def test_topical_scope_prepends_the_topic_to_a_deictic_question():
     mode, scope, tokens, effective_question = resolve_history_context(
         "What changed?",
-        history=[
-            {"role": "user", "content": "Explain Nimbus cadence."},
-            {"role": "assistant", "content": "Untrusted answer."},
-        ],
         history_mode=True,
-        inherit_previous_topic=True,
         history_scope="topical",
         history_topic="Nimbus cadence",
     )
@@ -32,15 +27,10 @@ def test_history_context_keeps_non_history_queries_unchanged():
 
 
 @pytest.mark.parametrize("question", ["What preceded it?", "Show the prior state."])
-def test_explicit_topical_history_scope_inherits_previous_topic(question):
+def test_topical_scope_carries_the_topic_into_every_deictic_phrasing(question):
     mode, scope, tokens, effective_question = resolve_history_context(
         question,
-        history=[
-            {"role": "user", "content": "Explain Quartz routing."},
-            {"role": "assistant", "content": "Untrusted answer."},
-        ],
         history_mode=True,
-        inherit_previous_topic=True,
         history_scope="topical",
         history_topic="Quartz routing",
     )
@@ -51,21 +41,15 @@ def test_explicit_topical_history_scope_inherits_previous_topic(question):
     assert effective_question == f"Quartz routing {question}"
 
 
-def test_inherited_query_uses_explicit_topic_not_an_unrelated_last_turn():
-    _, _, _, effective_question = resolve_history_context(
-        "What preceded it?",
-        history=[
-            {"role": "user", "content": "Explain Nimbus cadence."},
-            {"role": "user", "content": "Discuss an unrelated budget."},
-        ],
+def test_global_scope_leaves_the_question_untouched():
+    mode, scope, tokens, effective_question = resolve_history_context(
+        "Summarize every reversal.",
         history_mode=True,
-        inherit_previous_topic=True,
-        history_scope="topical",
-        history_topic="Nimbus cadence",
+        history_scope="global",
     )
 
-    assert effective_question == "Nimbus cadence What preceded it?"
-    assert "budget" not in effective_question
+    assert (mode, scope, tokens) == (True, "global", [])
+    assert effective_question == "Summarize every reversal."
 
 
 def test_history_mode_never_widens_missing_scope_to_global():
@@ -76,15 +60,12 @@ def test_history_mode_never_widens_missing_scope_to_global():
         )
 
 
-def test_inherited_history_requires_an_actual_previous_user_turn():
-    with pytest.raises(ValueError, match="previous user turn"):
+def test_topical_scope_requires_an_explicit_topic():
+    with pytest.raises(ValueError, match="explicit topic"):
         resolve_history_context(
             "What preceded it?",
-            history=[],
             history_mode=True,
-            inherit_previous_topic=True,
             history_scope="topical",
-            history_topic="Quartz relay",
         )
 
 

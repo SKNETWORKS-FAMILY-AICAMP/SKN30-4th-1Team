@@ -74,7 +74,8 @@ def test_runtime_tools_expose_standard_trace_not_evaluation_state():
     assert "model_contexts" in source
 
 
-def test_request_scope_is_server_injected_not_model_controlled():
+def test_runtime_state_is_server_injected_not_model_controlled():
+    """The orchestrator picks the query; the server still owns request identity."""
     search_properties = (
         qa_tools.search_project_evidence.tool_call_schema.model_json_schema()[
             "properties"
@@ -86,7 +87,10 @@ def test_request_scope_is_server_injected_not_model_controlled():
         ]
     )
 
-    assert "question_scope" not in search_properties
-    assert "question_scope" not in structured_properties
-    assert "include_history" not in search_properties
+    for name in ("project_id", "current_question", "messages", "question_scope"):
+        assert name not in search_properties
+        assert name not in structured_properties
     assert "text_query" not in structured_properties
+    # Retrieval scope is now an explicit, model-authored argument.
+    assert "include_history" in search_properties
+    assert "include_history" in structured_properties

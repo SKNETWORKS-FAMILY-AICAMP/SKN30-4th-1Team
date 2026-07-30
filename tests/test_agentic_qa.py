@@ -30,52 +30,8 @@ class _ToolCallingFake:
         return next(self.responses)
 
 
-def _scope_for_structured(args: dict) -> dict:
-    """Build the server-owned scope matching one synthetic Tool call."""
-    scope = {
-        "operation": args["operation"],
-        "include_history": False,
-    }
-    category = args.get("category")
-    if category and category != "all":
-        scope["category"] = category
-    for name in ("owner", "completion_status", "due_within_days"):
-        if args.get(name) is not None:
-            scope[name] = args[name]
-    if args.get("overdue") is True:
-        scope["overdue"] = True
-    return scope
-
-
-def _call_structured(**kwargs):
-    kwargs.setdefault("question_scope", _scope_for_structured(kwargs))
-    return query_structured_memory.func(**kwargs)
-
-
-def _run_agentic_qa(*args, **kwargs):
-    """Inject a realistic immutable scope into fake-model graph tests."""
-    if "question_scope" not in kwargs:
-        model = kwargs.get("model")
-        calls = [
-            call
-            for response in getattr(model, "script", [])
-            for call in (getattr(response, "tool_calls", None) or [])
-        ]
-        structured = [
-            call.get("args") or {}
-            for call in calls
-            if call.get("name") == "query_sql_state"
-        ]
-        has_search = any(
-            call.get("name") == "search_hybrid_vector_rag"
-            for call in calls
-        )
-        kwargs["question_scope"] = (
-            _scope_for_structured(structured[0])
-            if structured and not has_search
-            else {"include_history": False}
-        )
-    return run_agentic_qa(*args, **kwargs)
+_call_structured = query_structured_memory.func
+_run_agentic_qa = run_agentic_qa
 
 
 @pytest.fixture(autouse=True)
@@ -224,7 +180,7 @@ def test_korean_tool_descriptions_keep_openai_tool_schema_contract():
     memory_schema = query_structured_memory.tool_call_schema.model_json_schema()
 
     assert set(search_schema["properties"]) == {
-        "query", "alternate_queries",
+        "query", "alternate_queries", "include_history", "history_topic",
     }
     assert "messages" not in search_schema["properties"]
     assert "current_question" not in search_schema["properties"]
@@ -282,24 +238,6 @@ def test_memory_tool_rejects_completely_empty_selector(monkeypatch):
     assert "전체 기록 조회를 거부" in content
 
 
-def test_memory_tool_rejects_guessed_owner():
-    """사용자 질문에 없는 담당자를 모델이 추측해 필터로 넣을 수 없다."""
-    _, artifact = _call_structured(
-        operation="list",
-        project_id=1,
-        category="action",
-        question_scope={
-            "operation": "list",
-            "category": "action",
-        },
-        owner="박현우",
-    )
-
-    assert artifact["status"] == "invalid_query"
-    assert artifact["requested_filters"]["owner"] == "박현우"
-    assert artifact["applied_filters"] == {}
-
-
 def test_memory_tool_rejects_action_status_for_issue():
     """action 전용 상태 필터를 issue 범위에 적용하지 않는다."""
     _, artifact = _call_structured(
@@ -322,7 +260,7 @@ def test_memory_tool_rejects_false_overdue_filter():
         overdue=False,
     )
 
-    assert "일치하지 않습니다" in content
+    assert "true만 사용할 수 있습니다" in content
     assert artifact["status"] == "invalid_query"
     assert artifact["requested_filters"]["overdue"] is False
     assert artifact["applied_filters"] == {}
@@ -451,9 +389,7 @@ def test_evidence_tool_returns_only_generation_scoped_context(monkeypatch):
     content, artifact = qa_tools.search_project_evidence.func(
         query="최신 변경은?",
         project_id=1,
-        messages=[],
         current_question="최신 변경은?",
-        question_scope={"include_history": False},
     )
 
     assert content == "[원문 맥락]\n새 generation 근거"
@@ -462,7 +398,7 @@ def test_evidence_tool_returns_only_generation_scoped_context(monkeypatch):
 
 
 def test_evidence_tool_keeps_original_question_before_model_queries(monkeypatch):
-    """모델 검색어와 변형이 있어도 검색 엔진의 기준 질문은 사용자 원문이어야 한다."""
+    """모델 검색어와 변형은 원문 뒤에 붙고, 기준 질문은 사용자 원문으로 유지된다."""
     original_question = "로그 수집 단계에서 응답 코드와 처리 시간을 함께 확인해줘."
     build_context = MagicMock(return_value=(
         "[원문 맥락]\n근거",
@@ -479,14 +415,18 @@ def test_evidence_tool_keeps_original_question_before_model_queries(monkeypatch)
             "실패 요청 유형",
         ],
         project_id=1,
-        messages=[],
         current_question=original_question,
-        question_scope={"include_history": False},
     )
 
     args, kwargs = build_context.call_args
     assert args == (1, original_question)
-    assert kwargs["query_variants"] == [original_question]
+    assert kwargs["query_variants"][0] == original_question
+    assert kwargs["query_variants"][1:] == [
+        "로그 수집 결과",
+        "응답 코드 분포",
+        "처리 시간 분포",
+        "실패 요청 유형",
+    ]
 
 
 def test_agent_calls_evidence_tool_then_synthesizes_one_answer(monkeypatch):
@@ -540,8 +480,10 @@ def test_mixed_batch_invalid_query_fails_closed(monkeypatch):
             {
                 "name": "query_sql_state",
                 "args": {
+                    # No filter at all: the structured tool refuses to dump the
+                    # whole project, so this half of the batch is invalid_query.
                     "operation": "list",
-                    "category": "action",
+                    "category": "all",
                     "limit": 3,
                 },
                 "id": "call_memory",
@@ -683,14 +625,7 @@ def test_unrelated_tool_success_cannot_recover_a_project_tool_error(monkeypatch)
     )
 
     with pytest.raises(RuntimeError, match="no valid evidence"):
-        _run_agentic_qa(
-            1,
-            "현재 상태는?",
-            question_scope={
-                "include_history": False,
-            },
-            model=fake,
-        )
+        _run_agentic_qa(1, "현재 상태는?", model=fake)
 
 
 def test_zero_hit_search_is_a_valid_evidence_result(monkeypatch):
@@ -800,7 +735,7 @@ def test_failed_attachment_is_not_accepted_as_zero_tool_evidence():
 
 
 def test_later_invalid_sql_query_is_not_masked_by_prior_search(monkeypatch):
-    """앞선 검색 성공이 immutable scope와 불일치한 SQL 호출을 가리지 않는다."""
+    """앞선 검색 성공이 뒤따른 무효 SQL 호출을 가리지 않는다."""
     fake = _ToolCallingFake([
         AIMessage(content="", tool_calls=[{
             "name": "search_hybrid_vector_rag",
@@ -811,8 +746,9 @@ def test_later_invalid_sql_query_is_not_masked_by_prior_search(monkeypatch):
         AIMessage(content="", tool_calls=[{
             "name": "query_sql_state",
             "args": {
+                # 상태 필터는 action 범위 전용이므로 이 호출은 invalid_query다.
                 "operation": "count",
-                "category": "action",
+                "category": "issue",
                 "completion_status": "open",
             },
             "id": "call_sql",
@@ -993,10 +929,10 @@ def test_duplicate_canonicalization_applies_validated_tool_defaults(monkeypatch)
     assert result["debug"]["tool_results"][-1]["status"] == "duplicate_call"
 
 
-def test_zero_structured_result_uses_server_owned_raw_fallback(
+def test_orchestrator_can_follow_a_zero_count_with_its_own_raw_search(
     monkeypatch,
 ):
-    """서버가 만든 fallback만 구조화 scope의 원문 확인을 수행한다."""
+    """0건 SQL 뒤 원문 확인은 서버가 대신하지 않고 오케스트레이터가 직접 호출한다."""
     fake = _ToolCallingFake([
         AIMessage(content="", tool_calls=[{
             "name": "query_sql_state",
@@ -1006,6 +942,12 @@ def test_zero_structured_result_uses_server_owned_raw_fallback(
                 "completion_status": "open",
             },
             "id": "call_zero_count",
+            "type": "tool_call",
+        }]),
+        AIMessage(content="", tool_calls=[{
+            "name": "search_hybrid_vector_rag",
+            "args": {"query": "미완료 액션"},
+            "id": "call_raw_followup",
             "type": "tool_call",
         }]),
         AIMessage(content="원문에서 미완료 액션을 확인했습니다."),
@@ -1022,7 +964,7 @@ def test_zero_structured_result_uses_server_owned_raw_fallback(
 
     build_context.assert_called_once()
     assert result["answer"] == "원문에서 미완료 액션을 확인했습니다."
-    assert result["debug"]["server_fallbacks"] == 1
+    assert result["debug"]["tool_rounds"] == 2
     assert result["debug"]["evidence"]["project"]["source_ids"] == ["action.md"]
     assert result["debug"]["evidence"]["project"]["model_context_count"] == 1
 
@@ -1056,14 +998,13 @@ def test_empty_project_result_cannot_authorize_positive_claim(monkeypatch):
         "error_results": 0,
         "invalid_results": 0,
         "contextless_ok_results": 0,
-        "structured_fallback_results": 0,
         "raw_search_completed": True,
         "source_ids": [],
         "model_context_count": 0,
     }
 
 
-def test_empty_project_result_uses_server_fallback_when_model_answer_is_blank(
+def test_empty_project_result_answer_is_guaranteed_when_model_output_is_blank(
     monkeypatch,
 ):
     """empty의 최종 문구는 모델 출력이 아니라 서버에서 보장한다."""
@@ -1149,8 +1090,8 @@ def test_attachment_evidence_does_not_mask_project_tool_error(monkeypatch):
         )
 
 
-def test_structured_zero_at_round_cap_fails_without_raw_fallback(monkeypatch):
-    """라운드 상한이 원문 fallback을 막으면 0건을 최종 근거로 쓰지 않는다."""
+def test_structured_zero_count_cannot_be_answered_as_a_finding(monkeypatch):
+    """0건 SQL만 확보한 채 끝내면 서버가 근거 없음 문구로 교체한다."""
     fake = _ToolCallingFake([
         AIMessage(content="", tool_calls=[{
             "name": "query_sql_state",
@@ -1159,7 +1100,7 @@ def test_structured_zero_at_round_cap_fails_without_raw_fallback(monkeypatch):
                 "category": "action",
                 "completion_status": "open",
             },
-            "id": "call_zero_at_cap",
+            "id": "call_zero_only",
             "type": "tool_call",
         }]),
         AIMessage(content="미완료 액션은 0건입니다."),
@@ -1168,62 +1109,11 @@ def test_structured_zero_at_round_cap_fails_without_raw_fallback(monkeypatch):
     build_context = MagicMock()
     monkeypatch.setattr(qa_tools.qa_engine, "_build_context", build_context)
 
-    with pytest.raises(RuntimeError, match="no valid evidence"):
-        _run_agentic_qa(
-            1,
-            "미완료 액션은 몇 개야?",
-            model=fake,
-            max_tool_rounds=1,
-        )
+    result = _run_agentic_qa(1, "미완료 액션은 몇 개야?", model=fake)
 
     build_context.assert_not_called()
-
-
-def test_prior_raw_search_does_not_satisfy_later_structured_zero_fallback(
-    monkeypatch,
-):
-    """0건 이전의 다른 원문 조회로 필수 fallback을 충족한 척하지 않는다."""
-    fake = _ToolCallingFake([
-        AIMessage(content="", tool_calls=[{
-            "name": "search_hybrid_vector_rag",
-            "args": {"query": "배포 일정"},
-            "id": "call_prior_search",
-            "type": "tool_call",
-        }]),
-        AIMessage(content="", tool_calls=[{
-            "name": "query_sql_state",
-            "args": {
-                "operation": "count",
-                "category": "action",
-                "completion_status": "open",
-            },
-            "id": "call_later_zero",
-            "type": "tool_call",
-        }]),
-        AIMessage(content="미완료 액션은 0건입니다."),
-    ])
-    monkeypatch.setattr(qa_tools.mysql_search, "search", lambda *args, **kwargs: [])
-    build_context = MagicMock(return_value=(
-        "배포 일정 근거",
-        ["schedule.md"],
-        {},
-    ))
-    monkeypatch.setattr(qa_tools.qa_engine, "_build_context", build_context)
-
-    with pytest.raises(RuntimeError, match="no valid evidence"):
-        _run_agentic_qa(
-            1,
-            "배포 일정과 미완료 액션 수를 알려줘",
-            question_scope={
-                "operation": "count",
-                "category": "action",
-                "completion_status": "open",
-            },
-            model=fake,
-            max_tool_rounds=2,
-        )
-
-    build_context.assert_not_called()
+    assert result["answer"] == "프로젝트 기록에서 확인되지 않습니다."
+    assert result["debug"]["evidence"]["project"]["zero_count_results"] == 1
 
 
 def test_later_project_error_is_not_masked_by_attachment_or_earlier_success(

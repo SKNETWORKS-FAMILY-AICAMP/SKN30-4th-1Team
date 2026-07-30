@@ -36,7 +36,6 @@ def test_prior_assistant_history_cannot_become_current_answer(monkeypatch):
         run_agentic_qa(
             1,
             "What is the current Nimbus state?",
-            question_scope={"include_history": False},
             history=[{
                 "role": "assistant",
                 "content": "CLIENT-SUPPLIED PRIOR ASSISTANT",
@@ -227,51 +226,6 @@ def test_malformed_artifact_collections_fail_closed(field, value):
         _collect_result(messages, tool_rounds=1)
 
 
-def test_fallback_call_id_without_server_marker_cannot_clear_pending_lookup():
-    messages = [
-        AIMessage(content="", tool_calls=[{
-            "name": "query_sql_state",
-            "args": {"operation": "count", "category": "action"},
-            "id": "count",
-            "type": "tool_call",
-        }]),
-        ToolMessage(
-            content='{"count": 0}',
-            name="query_sql_state",
-            tool_call_id="count",
-            artifact={
-                "tool": "query_sql_state",
-                "status": "empty",
-                "operation": "count",
-                "sources": [],
-                "model_contexts": ['{"count": 0}'],
-                "total_rows": 0,
-            },
-        ),
-        AIMessage(content="", tool_calls=[{
-            "name": "search_hybrid_vector_rag",
-            "args": {"query": "relay"},
-            "id": "server_fallback_spoof",
-            "type": "tool_call",
-        }]),
-        ToolMessage(
-            content="relay evidence",
-            name="search_hybrid_vector_rag",
-            tool_call_id="server_fallback_spoof",
-            artifact={
-                "tool": "search_hybrid_vector_rag",
-                "status": "ok",
-                "sources": ["relay.md"],
-                "model_contexts": ["relay evidence"],
-            },
-        ),
-        AIMessage(content="answer"),
-    ]
-
-    with pytest.raises(RuntimeError, match="no valid evidence"):
-        _collect_result(messages, tool_rounds=2)
-
-
 def test_attachment_and_project_sources_with_same_filename_remain_distinct(
     monkeypatch,
 ):
@@ -305,7 +259,6 @@ def test_attachment_and_project_sources_with_same_filename_remain_distinct(
             "source_location": "attachment:note.txt",
             "truncated": False,
         }],
-        question_scope={"include_history": False},
         model=fake,
     )
 

@@ -20,8 +20,7 @@ from langgraph.prebuilt import ToolNode
 
 from .llm.chat_model_factory import get_agentic_qa_model
 from .retriever import qa_engine
-from .retriever.qa_tools import QA_TOOLS, _SERVER_FALLBACK_MARKER
-from .retriever.question_scope import QuestionScope, resolve_question_scope
+from .retriever.qa_tools import QA_TOOLS
 
 
 MAX_TOOL_ROUNDS = 5
@@ -62,7 +61,12 @@ ORCHESTRATOR_SYSTEM_PROMPT = qa_engine.SYSTEM_QA + """
 중요 규칙:
 - 한 질문에 구조화 상태와 배경 설명이 함께 필요하면 여러 도구를 호출할 수 있습니다.
 - search_hybrid_vector_rag를 여러 번 호출하기보다 한 호출의 alternate_queries에 최대 3개의
-  충실한 검색어 변형을 넣으세요.
+  충실한 검색어 변형을 넣으세요. query와 alternate_queries는 실제 검색에 사용되므로
+  질문이 지목한 대상과 속성을 그대로 보존하고 주변 개념으로 넓히지 마세요.
+- 번복·대체된 과거 기록이 필요할 때만 include_history=true로 호출하세요. 현재 상태를
+  묻는 질문에는 false로 두어야 폐기된 값이 답변에 섞이지 않습니다. 이력을 한 주제로
+  좁히려면 history_topic에 그 주제를 적고, 질문이 이전 대화 주제를 이어받는 경우에도
+  그 주제를 직접 적으세요.
 - query_sql_state가 1건 이상의 목록이나 개수를 정상 반환하면 같은 조건을
   search_hybrid_vector_rag로 다시 검색하지 말고 그 결과로 답하세요.
 - query_sql_state가 0건이어도 곧바로 "기록에 없다"고 단정하지 말고 원문 검색으로
@@ -97,7 +101,6 @@ ORCHESTRATOR_SYSTEM_PROMPT = qa_engine.SYSTEM_QA + """
 class AgenticQAState(TypedDict, total=False):
     project_id: int
     current_question: str
-    question_scope: dict
     has_attachment_evidence: bool
     messages: Annotated[list[BaseMessage], add_messages]
     tool_rounds: int
@@ -304,56 +307,6 @@ def build_agentic_qa_graph(model=None, max_tool_rounds: Optional[int] = None):
                 ordered_messages.append(executed_by_id[call_id])
         return {"messages": ordered_messages}
 
-    def requires_server_fallback(state: AgenticQAState) -> bool:
-        """Require original-record search after an empty structured lookup."""
-        messages = state["messages"]
-        last_ai_index = max(
-            (
-                index
-                for index, message in enumerate(messages)
-                if isinstance(message, AIMessage)
-            ),
-            default=-1,
-        )
-        for message in messages[last_ai_index + 1:]:
-            if not isinstance(message, ToolMessage):
-                continue
-            artifact = message.artifact if isinstance(message.artifact, dict) else {}
-            if message.name != "query_sql_state":
-                continue
-            if artifact.get("status") == "empty":
-                return True
-            if (
-                artifact.get("status") == "ok"
-                and artifact.get("operation") == "count"
-                and artifact.get("total_rows") == 0
-            ):
-                return True
-        return False
-
-    def route_after_tools(state: AgenticQAState) -> str:
-        if (
-            state.get("tool_rounds", 0) < max_rounds
-            and requires_server_fallback(state)
-        ):
-            return "fallback"
-        return "orchestrator"
-
-    def server_fallback_node(state: AgenticQAState) -> dict:
-        call_id = f"server_fallback_{state.get('tool_rounds', 0)}"
-        return {"messages": [AIMessage(
-            content="",
-            additional_kwargs={_SERVER_FALLBACK_MARKER: True},
-            tool_calls=[{
-                "name": "search_hybrid_vector_rag",
-                "args": {
-                    "query": state.get("current_question", ""),
-                },
-                "id": call_id,
-                "type": "tool_call",
-            }],
-        )]}
-
     def force_final_node(state: AgenticQAState) -> dict:
         messages = list(state["messages"]) + [HumanMessage(
             content=(
@@ -367,7 +320,6 @@ def build_agentic_qa_graph(model=None, max_tool_rounds: Optional[int] = None):
     graph.add_node("orchestrator", orchestrator_node)
     graph.add_node("tools", partitioned_tool_node)
     graph.add_node("increment_round", increment_round_node)
-    graph.add_node("server_fallback", server_fallback_node)
     graph.add_node("duplicate_tools", _duplicate_tool_messages)
     graph.add_node("limit_tools", _tool_limit_messages)
     graph.add_node("force_final", force_final_node)
@@ -383,24 +335,7 @@ def build_agentic_qa_graph(model=None, max_tool_rounds: Optional[int] = None):
         },
     )
     graph.add_edge("tools", "increment_round")
-    graph.add_conditional_edges(
-        "increment_round",
-        route_after_tools,
-        {
-            "fallback": "server_fallback",
-            "orchestrator": "orchestrator",
-        },
-    )
-    graph.add_conditional_edges(
-        "server_fallback",
-        route_after_orchestrator,
-        {
-            "tools": "tools",
-            "duplicate": "duplicate_tools",
-            "limit": "limit_tools",
-            "finish": END,
-        },
-    )
+    graph.add_edge("increment_round", "orchestrator")
     graph.add_edge("duplicate_tools", "force_final")
     graph.add_edge("limit_tools", "force_final")
     graph.add_edge("force_final", END)
@@ -459,20 +394,6 @@ def _initial_messages(
     return messages
 
 
-def _scope_user_history(
-    history: Optional[list],
-    prepared_context: Optional[list],
-) -> list[str]:
-    """Return prior user turns only for request-scope interpretation."""
-    source = prepared_context if prepared_context is not None else (history or [])
-    return [
-        str(item.get("content", "")).strip()
-        for item in source
-        if item.get("role") == "user"
-        and str(item.get("content", "")).strip()
-    ]
-
-
 def _collect_result(
     messages: list[BaseMessage],
     tool_rounds: int,
@@ -498,12 +419,10 @@ def _collect_result(
     project_invalid_results = 0
     project_contextless_ok_results = 0
     search_empty_results = 0
-    structured_fallback_results = 0
     search_lookup_completed = False
     project_source_ids: list[str] = []
     project_model_contexts: list[str] = []
     executed_tool_seen = False
-    structured_fallback_pending = False
     unresolved_empty_lookup = False
     llm_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     unexecuted_call_ids = {
@@ -512,17 +431,6 @@ def _collect_result(
         if isinstance(message, ToolMessage)
         and isinstance(message.artifact, dict)
         and message.artifact.get("status") in {"duplicate_call", "tool_limit"}
-    }
-    server_fallback_call_ids = {
-        call["id"]
-        for message in messages
-        if isinstance(message, AIMessage)
-        and (message.additional_kwargs or {}).get(_SERVER_FALLBACK_MARKER) is True
-        and len(message.tool_calls or []) == 1
-        for call in message.tool_calls
-        if call.get("name") == "search_hybrid_vector_rag"
-        and isinstance(call.get("id"), str)
-        and call["id"].startswith("server_fallback_")
     }
 
     for message in messages:
@@ -593,14 +501,7 @@ def _collect_result(
                 project_lookup_completed = True
                 if message.name == "search_hybrid_vector_rag":
                     search_lookup_completed = True
-                    is_server_fallback = (
-                        message.tool_call_id in server_fallback_call_ids
-                    )
-                    if structured_fallback_pending and is_server_fallback:
-                        structured_fallback_pending = False
-                        if status == "empty":
-                            unresolved_empty_lookup = True
-                    elif status == "empty":
+                    if status == "empty":
                         # A different successful Tool cannot prove that this
                         # searched facet was resolved.
                         unresolved_empty_lookup = True
@@ -621,12 +522,6 @@ def _collect_result(
                     model_contexts.extend(artifact_contexts)
                 else:
                     project_contextless_ok_results += 1
-                if (
-                    message.name == "query_sql_state"
-                    and (is_zero_count or status == "empty")
-                ):
-                    structured_fallback_results += 1
-                    structured_fallback_pending = True
             elif status == "error":
                 project_error_results += 1
             elif status == "invalid_query":
@@ -649,8 +544,6 @@ def _collect_result(
 
     # Attachments are a separate evidence channel: they neither satisfy the
     # required project lookup nor recover a failed project tool.
-    if structured_fallback_pending:
-        raise RuntimeError("tool orchestrator returned no valid evidence result")
     if (
         project_error_results
         or project_invalid_results
@@ -676,7 +569,6 @@ def _collect_result(
             "도구 호출 상한에 도달해 추가 확인이 필요한 범위가 남아 있습니다."
         )
 
-    server_fallbacks = len(server_fallback_call_ids)
     forced_final_batches = sum(
         1
         for message in messages
@@ -709,16 +601,12 @@ def _collect_result(
                 "error_results": project_error_results,
                 "invalid_results": project_invalid_results,
                 "contextless_ok_results": project_contextless_ok_results,
-                "structured_fallback_results": structured_fallback_results,
                 "raw_search_completed": search_lookup_completed,
                 "source_ids": project_source_ids,
                 "model_context_count": len(project_model_contexts),
             },
         },
-        "server_fallbacks": server_fallbacks,
-        "llm_calls": (
-            tool_rounds + 1 - server_fallbacks + forced_final_batches
-        ),
+        "llm_calls": tool_rounds + 1 + forced_final_batches,
         "llm_usage": llm_usage,
     }
     return {
@@ -740,33 +628,12 @@ def run_agentic_qa(
     attachment_sources: Optional[list[str]] = None,
     attachment_evidence: Optional[list[dict]] = None,
     prepared_context: Optional[list] = None,
-    question_scope: Optional[dict] = None,
     *,
     model=None,
     max_tool_rounds: Optional[int] = None,
 ) -> dict:
     """Run the Agentic orchestrator and preserve the existing API contract."""
     global _agentic_app
-    scope_llm_calls = 0
-    if question_scope is None:
-        if model is None:
-            resolved_scope = resolve_question_scope(
-                question,
-                _scope_user_history(history, prepared_context),
-                model=get_agentic_qa_model(),
-            )
-            scope_llm_calls = 1
-            scope_payload = resolved_scope.model_dump()
-        else:
-            # Tests and callers supplying an orchestrator fake can inject an
-            # explicit scope. Without one, use the conservative current-state
-            # behavior and skip semantic-filter validation rather than
-            # consuming an unstructured fake response.
-            scope_payload = {}
-    else:
-        resolved_scope = QuestionScope.model_validate(question_scope)
-        scope_payload = resolved_scope.model_dump()
-
     if model is not None or max_tool_rounds is not None:
         app = build_agentic_qa_graph(model=model, max_tool_rounds=max_tool_rounds)
     else:
@@ -780,7 +647,6 @@ def run_agentic_qa(
     output = app.invoke({
         "project_id": project_id,
         "current_question": question,
-        "question_scope": scope_payload,
         "has_attachment_evidence": has_attachment_evidence,
         "messages": _initial_messages(
             question,
@@ -796,9 +662,6 @@ def run_agentic_qa(
         has_attachment_evidence=has_attachment_evidence,
         attachment_context=attachment_context,
     )
-    result["debug"]["question_scope"] = scope_payload
-    result["debug"]["scope_llm_calls"] = scope_llm_calls
-    result["debug"]["llm_calls"] += scope_llm_calls
     result["debug"]["tool_sources"] = list(result["sources"])
     if attachment_sources:
         bounded_attachment_sources = list(dict.fromkeys(
