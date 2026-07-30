@@ -20,6 +20,53 @@ PaiM은 회의록, 문서, 음성 기록과 GitHub 활동을 하나의 **프로�
 
 ![PaiM 데스크톱 화면 구성](desktop/assets/readme/v1.0.6-screen-overview.png)
 
+## Team
+
+<table>
+  <tr>
+    <td align="center" width="180">
+      <a href="https://github.com/hellohaeyeon">
+        <img src="https://github.com/hellohaeyeon.png" width="100" height="100" alt="서해연"/><br/>
+        <b>서해연</b>
+      </a><br/>
+      <sub>Team Lead · PM</sub><br/>
+      <sub>FastAPI · 인증 · Supersede<br/>평가 파이프라인 · 배포 하드닝</sub>
+    </td>
+    <td align="center" width="180">
+      <a href="https://github.com/j3s30p">
+        <img src="https://github.com/j3s30p.png" width="100" height="100" alt="박제섭"/><br/>
+        <b>박제섭</b>
+      </a><br/>
+      <sub>Developer</sub><br/>
+      <sub>Tauri Desktop · Agentic Q&A<br/>GitHub 연동 · 릴리즈</sub>
+    </td>
+    <td align="center" width="180">
+      <a href="https://github.com/star9906">
+        <img src="https://github.com/star9906.png" width="100" height="100" alt="김동휘"/><br/>
+        <b>김동휘</b>
+      </a><br/>
+      <sub>Developer</sub><br/>
+      <sub>세션 보안 · 대화 암호화<br/>업로드 정합성 · 멀티포맷</sub>
+    </td>
+    <td align="center" width="180">
+      <a href="https://github.com/attatae01-svg">
+        <img src="https://github.com/attatae01-svg.png" width="100" height="100" alt="이동욱"/><br/>
+        <b>이동욱</b>
+      </a><br/>
+      <sub>Developer</sub><br/>
+      <sub>LangGraph · Hybrid Reranker<br/>RAGAS 평가 · 검색 품질 개선</sub>
+    </td>
+    <td align="center" width="180">
+      <a href="https://github.com/robinlee3803-ai">
+        <img src="https://github.com/robinlee3803-ai.png" width="100" height="100" alt="이승민"/><br/>
+        <b>이승민</b>
+      </a><br/>
+      <sub>Team Support</sub><br/>
+      <sub>팀 운영 지원<br/>식사 및 현장 지원</sub>
+    </td>
+  </tr>
+</table>
+
 ## PaiM이 하는 일
 
 - **프로젝트 메모리** — 문서에서 결정, 액션, 이슈, 리스크를 구조화해 관리합니다.
@@ -74,6 +121,25 @@ flowchart LR
     SUGGEST --> REVIEW
     REVIEW -->|승인| MEMORY
     REVIEW -->|거절| REJECT["변경 없음"]
+
+    classDef source fill:#EAF2FF,stroke:#4F7CAC,color:#172A3A,stroke-width:2px
+    classDef process fill:#F2ECFF,stroke:#7C3AED,color:#3B1768,stroke-width:2px
+    classDef core fill:#6D28D9,stroke:#4C1D95,color:#FFFFFF,stroke-width:3px
+    classDef outcome fill:#E7F8F2,stroke:#159A80,color:#075E54,stroke-width:2px
+    classDef review fill:#FFF4D6,stroke:#D97706,color:#78350F,stroke-width:2px
+    classDef reject fill:#FDECEC,stroke:#DC2626,color:#7F1D1D,stroke-width:2px
+
+    class DOC,GH,PR source
+    class EXTRACT,SYNC,MATCH process
+    class MEMORY core
+    class INSIGHT,SUGGEST outcome
+    class REVIEW review
+    class REJECT reject
+
+    style Sources fill:#F8FAFC,stroke:#CBD5E1,stroke-width:1px
+    style Processing fill:#FAF8FF,stroke:#D8B4FE,stroke-width:1px
+    style Reconcile fill:#FFFBEB,stroke:#FCD34D,stroke-width:1px
+    linkStyle default stroke:#94A3B8,stroke-width:2px
 ```
 
 PaiM은 프로젝트 상태를 임의로 확정하지 않습니다. 새 정보는 메모리에 축적하되, 액션 완료처럼 기존 상태를 바꾸는 일은 근거를 제시한 뒤 사람의 승인을 받습니다.
@@ -140,6 +206,30 @@ flowchart TB
     MYSQL --> MATCH
     APPROVAL -->|승인| MYSQL
     APPROVAL -->|거절| KEEP["기존 상태 유지"]
+
+    classDef input fill:#EAF2FF,stroke:#4F7CAC,color:#172A3A,stroke-width:2px
+    classDef transform fill:#F2ECFF,stroke:#7C3AED,color:#3B1768,stroke-width:2px
+    classDef datastore fill:#172A3A,stroke:#0F172A,color:#FFFFFF,stroke-width:3px
+    classDef agent fill:#6D28D9,stroke:#4C1D95,color:#FFFFFF,stroke-width:3px
+    classDef tool fill:#EDE9FE,stroke:#8B5CF6,color:#3B1768,stroke-width:2px
+    classDef success fill:#E7F8F2,stroke:#159A80,color:#075E54,stroke-width:2px
+    classDef approval fill:#FFF4D6,stroke:#D97706,color:#78350F,stroke-width:2px
+    classDef reject fill:#FDECEC,stroke:#DC2626,color:#7F1D1D,stroke-width:2px
+
+    class INPUT,REPO,QUESTION,MERGED input
+    class CONVERT,EXTRACT,INDEX,MATCH transform
+    class MYSQL,CHROMA datastore
+    class AGENT agent
+    class SQL_TOOL,SEARCH_TOOL,OVERVIEW_TOOL tool
+    class ANSWER,INBOX success
+    class APPROVAL approval
+    class KEEP reject
+
+    style Ingestion fill:#F8FAFC,stroke:#CBD5E1,stroke-width:1px
+    style GitHub fill:#F8FAFC,stroke:#CBD5E1,stroke-width:1px
+    style QA fill:#FAF8FF,stroke:#C4B5FD,stroke-width:2px
+    style Reconciler fill:#FFFBEB,stroke:#FCD34D,stroke-width:1px
+    linkStyle default stroke:#94A3B8,stroke-width:2px
 ```
 
 ### 핵심 기술 선택
@@ -230,50 +320,3 @@ npm run app:build --prefix desktop
 - [API 명세](docs/API_명세서.md)
 - [배포 운영 가이드](deploy/README.md)
 - [Agentic Q&A 검증](docs/AGENTIC_QA_MVP_VALIDATION.md)
-
-## Team
-
-<table>
-  <tr>
-    <td align="center" width="180">
-      <a href="https://github.com/hellohaeyeon">
-        <img src="https://github.com/hellohaeyeon.png" width="100" height="100" alt="서해연"/><br/>
-        <b>서해연</b>
-      </a><br/>
-      <sub>Team Lead · PM</sub><br/>
-      <sub>FastAPI · 인증 · Supersede<br/>평가 파이프라인 · 배포 하드닝</sub>
-    </td>
-    <td align="center" width="180">
-      <a href="https://github.com/j3s30p">
-        <img src="https://github.com/j3s30p.png" width="100" height="100" alt="박제섭"/><br/>
-        <b>박제섭</b>
-      </a><br/>
-      <sub>Developer</sub><br/>
-      <sub>Tauri Desktop · Agentic Q&A<br/>GitHub 연동 · 릴리즈</sub>
-    </td>
-    <td align="center" width="180">
-      <a href="https://github.com/star9906">
-        <img src="https://github.com/star9906.png" width="100" height="100" alt="김동휘"/><br/>
-        <b>김동휘</b>
-      </a><br/>
-      <sub>Developer</sub><br/>
-      <sub>세션 보안 · 대화 암호화<br/>업로드 정합성 · 멀티포맷</sub>
-    </td>
-    <td align="center" width="180">
-      <a href="https://github.com/attatae01-svg">
-        <img src="https://github.com/attatae01-svg.png" width="100" height="100" alt="이동욱"/><br/>
-        <b>이동욱</b>
-      </a><br/>
-      <sub>Developer</sub><br/>
-      <sub>LangGraph · Hybrid Reranker<br/>RAGAS 평가 · 검색 품질 개선</sub>
-    </td>
-    <td align="center" width="180">
-      <a href="https://github.com/robinlee3803-ai">
-        <img src="https://github.com/robinlee3803-ai.png" width="100" height="100" alt="이승민"/><br/>
-        <b>이승민</b>
-      </a><br/>
-      <sub>Team Support</sub><br/>
-      <sub>팀 운영 지원<br/>식사 및 현장 지원</sub>
-    </td>
-  </tr>
-</table>
