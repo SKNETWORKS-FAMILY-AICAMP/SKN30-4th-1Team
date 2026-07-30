@@ -110,28 +110,29 @@ flowchart TB
     EXTRACT --> MEMORY
     SYNC --> MEMORY
 
-    subgraph Services["4 · 프로젝트 지식 활용"]
+    subgraph QAFlow["4-A · 사용자가 질문하거나 브리핑을 요청할 때"]
         direction LR
-        QNA["근거 기반 Q&A"]
-        BRIEF["델타 브리핑"]
-        MATCH["진행 중 액션과 대조"]
+        REQUEST["질문 · 브리핑 요청"]
+        QNA["근거 검색 · 상태 조회"]
+        RESPONSE["근거 기반 답변<br/>델타 브리핑"]
     end
 
+    REQUEST --> QNA --> RESPONSE
     MEMORY --> QNA
-    MEMORY --> BRIEF
-    MEMORY --> MATCH
-    GH -->|"머지된 PR"| MATCH
 
-    subgraph Decision["5 · Human-in-the-loop"]
+    subgraph ReconcileFlow["4-B · GitHub PR이 머지됐을 때"]
         direction LR
+        MERGED["PR 머지 이벤트"]
+        MATCH["진행 중 액션과 대조"]
         SUGGEST["완료 제안"]
         REVIEW{"사용자 검토"}
         APPLY["프로젝트 상태 반영"]
         REJECT["기존 상태 유지"]
     end
 
-    MATCH --> SUGGEST
-    SUGGEST --> REVIEW
+    GH --> MERGED
+    MEMORY --> MATCH
+    MERGED --> MATCH --> SUGGEST --> REVIEW
     REVIEW -->|승인| APPLY
     REVIEW -->|거절| REJECT
 
@@ -142,22 +143,22 @@ flowchart TB
     classDef review fill:#FFF4D6,stroke:#D97706,color:#78350F,stroke-width:2px
     classDef reject fill:#FDECEC,stroke:#DC2626,color:#7F1D1D,stroke-width:2px
 
-    class DOC,GH source
+    class DOC,GH,REQUEST,MERGED source
     class EXTRACT,SYNC,MATCH process
     class MEMORY core
-    class QNA,BRIEF,SUGGEST,APPLY outcome
+    class QNA,RESPONSE,SUGGEST,APPLY outcome
     class REVIEW review
     class REJECT reject
 
     style Sources fill:#F8FAFC,stroke:#CBD5E1,stroke-width:1px
     style Processing fill:#FAF8FF,stroke:#D8B4FE,stroke-width:1px
     style Knowledge fill:#F5F3FF,stroke:#8B5CF6,stroke-width:2px
-    style Services fill:#F0FDFA,stroke:#5EEAD4,stroke-width:1px
-    style Decision fill:#FFFBEB,stroke:#FCD34D,stroke-width:1px
+    style QAFlow fill:#F0FDFA,stroke:#5EEAD4,stroke-width:2px
+    style ReconcileFlow fill:#FFFBEB,stroke:#FCD34D,stroke-width:2px
     linkStyle default stroke:#94A3B8,stroke-width:2px
 ```
 
-PaiM은 프로젝트 상태를 임의로 확정하지 않습니다. 새 정보는 메모리에 축적하되, 액션 완료처럼 기존 상태를 바꾸는 일은 근거를 제시한 뒤 사람의 승인을 받습니다.
+두 기능은 동시에 실행되지 않습니다. Q&A는 사용자의 요청으로, 완료 감지는 GitHub의 PR 머지 이벤트로 각각 독립 실행되며 프로젝트 메모리만 공유합니다. PaiM은 액션 완료처럼 기존 상태를 바꾸는 일은 근거를 제시한 뒤 사람의 승인을 받습니다.
 
 ## AI 아키텍처
 
@@ -190,48 +191,40 @@ flowchart TB
     EXTRACT --> MYSQL & CHROMA
     INDEX --> MYSQL & CHROMA
 
-    subgraph Request["4 · Runtime Request"]
-        direction LR
+    subgraph QAFlow["4-A · Agentic Q&A — 사용자 요청 시 실행"]
+        direction TB
         QUESTION["사용자 질문<br/>+ 임시 첨부"]
-        MERGED["머지된 PR"]
-    end
-
-    subgraph Orchestration["5 · AI Orchestration"]
-        direction LR
         AGENT["LangGraph<br/>Agentic 오케스트레이터"]
-        RECONCILER["Reconciler LLM<br/>진행 중 액션과 대조"]
-    end
-
-    QUESTION --> AGENT
-    MERGED --> RECONCILER
-
-    subgraph Tools["6 · Evidence Tools"]
-        direction LR
         SQL_TOOL["Structured Memory<br/>정확한 목록 · 상태 · 개수"]
         SEARCH_TOOL["Hybrid Evidence Search<br/>BM25 + Vector RRF"]
         OVERVIEW_TOOL["Project Overview<br/>요약 · Action Plan"]
+        ANSWER["근거와 출처가 있는 답변"]
+
+        QUESTION --> AGENT
+        AGENT --> SQL_TOOL & SEARCH_TOOL & OVERVIEW_TOOL
+        SQL_TOOL --> ANSWER
+        SEARCH_TOOL --> ANSWER
+        OVERVIEW_TOOL --> ANSWER
     end
 
-    AGENT --> SQL_TOOL & SEARCH_TOOL & OVERVIEW_TOOL
     MYSQL --> SQL_TOOL & SEARCH_TOOL & OVERVIEW_TOOL
     CHROMA --> SEARCH_TOOL
-    MYSQL --> RECONCILER
 
-    subgraph Results["7 · Result & Control"]
-        direction LR
-        ANSWER["근거와 출처가 있는 답변"]
+    subgraph ReconcileFlow["4-B · Action Reconciliation — PR 머지 시 실행"]
+        direction TB
+        MERGED["머지된 PR"]
+        RECONCILER["Reconciler LLM<br/>진행 중 액션과 대조"]
         INBOX["완료 제안 Inbox<br/>PR 링크 · 판단 근거"]
         APPROVAL{"사용자 승인"}
         APPLY["프로젝트 상태 반영"]
         KEEP["기존 상태 유지"]
+
+        MERGED --> RECONCILER --> INBOX --> APPROVAL
+        APPROVAL -->|승인| APPLY
+        APPROVAL -->|거절| KEEP
     end
 
-    SQL_TOOL --> ANSWER
-    SEARCH_TOOL --> ANSWER
-    OVERVIEW_TOOL --> ANSWER
-    RECONCILER --> INBOX --> APPROVAL
-    APPROVAL -->|승인| APPLY
-    APPROVAL -->|거절| KEEP
+    MYSQL --> RECONCILER
 
     classDef input fill:#EAF2FF,stroke:#4F7CAC,color:#172A3A,stroke-width:2px
     classDef transform fill:#F2ECFF,stroke:#7C3AED,color:#3B1768,stroke-width:2px
@@ -254,10 +247,8 @@ flowchart TB
     style Inputs fill:#F8FAFC,stroke:#CBD5E1,stroke-width:1px
     style Ingestion fill:#F8FAFC,stroke:#CBD5E1,stroke-width:1px
     style Storage fill:#F5F3FF,stroke:#8B5CF6,stroke-width:2px
-    style Request fill:#EFF6FF,stroke:#93C5FD,stroke-width:1px
-    style Orchestration fill:#FAF8FF,stroke:#C4B5FD,stroke-width:2px
-    style Tools fill:#F5F3FF,stroke:#C4B5FD,stroke-width:1px
-    style Results fill:#FFFBEB,stroke:#FCD34D,stroke-width:1px
+    style QAFlow fill:#F0FDFA,stroke:#5EEAD4,stroke-width:2px
+    style ReconcileFlow fill:#FFFBEB,stroke:#FCD34D,stroke-width:2px
     linkStyle default stroke:#94A3B8,stroke-width:2px
 ```
 
