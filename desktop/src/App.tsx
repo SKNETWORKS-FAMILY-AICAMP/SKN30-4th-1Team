@@ -26,7 +26,6 @@ import {
   Settings as SettingsIcon,
   Square,
   UserRound,
-  Users,
   X,
   Zap,
 } from "lucide-react";
@@ -81,7 +80,7 @@ import {
   type PaimUser,
 } from "./auth";
 import { I18nProvider, translate, useI18n } from "./i18n";
-import { formatRelativeAge } from "./format";
+import { formatRelativeAge, parsePaimTimestamp } from "./format";
 import {
   canRole,
   fetchProjectMembers,
@@ -89,6 +88,7 @@ import {
   type ProjectMember,
   type ProjectRole,
 } from "./members";
+import { fillMissingProjectRoles } from "./projectRoleCompatibility";
 import {
   createGithubDeviceCode,
   createGithubAppSession,
@@ -146,6 +146,15 @@ import {
   type ThemeSetting,
 } from "./settings";
 import { WorkspacePageLayout } from "./WorkspacePageLayout";
+import { ProjectPortfolioPage } from "./ProjectPortfolioPage";
+import { ProfileAvatar } from "./ProfileAvatar";
+import { normalizeApiProjectSetup } from "./projectSetup";
+import { isProjectSetupComplete } from "./types";
+import { useProjectWorkspaceDomain } from "./useProjectWorkspaceDomain";
+import {
+  type MainView,
+  useWorkspaceRoute,
+} from "./workspaceRoute";
 import type {
   Attachment,
   ChatSession,
@@ -168,6 +177,16 @@ import type {
 
 const LazyGithubPanel = lazy(() =>
   import("./GithubPanel").then((module) => ({ default: module.GithubPanel })),
+);
+const LazyProjectDetailPage = lazy(() =>
+  import("./ProjectDetailPage").then((module) => ({
+    default: module.ProjectDetailPage,
+  })),
+);
+const LazyProjectManagementPage = lazy(() =>
+  import("./ProjectManagementPage").then((module) => ({
+    default: module.ProjectManagementPage,
+  })),
 );
 const LazyAuthScreen = lazy(() =>
   import("./AuthScreen").then((module) => ({ default: module.AuthScreen })),
@@ -233,6 +252,7 @@ function createEmptyProjectMemoryCounts(): ProjectMemoryCounts {
 }
 
 const EMPTY_PROJECT_MEMORY_COUNTS = createEmptyProjectMemoryCounts();
+const EMPTY_PROJECT_MEMORY_ITEMS: ProjectMemoryItem[] = [];
 const EMPTY_PROJECT_ATTACHMENTS: Attachment[] = [];
 
 function createLatestProjectOperationRegistry(): LatestProjectOperationRegistry {
@@ -325,6 +345,12 @@ function getProjectMemorySlotState(canOpenProjectMemory: boolean, count: number)
 type ApiProjectCreateResponse = {
   id: number;
   name: string;
+  description?: string | null;
+  current_user_role?: ProjectRole | null;
+  setup_status?: "draft" | "ready";
+  setup_mode?: "analyzed" | "chat_only" | "existing" | null;
+  setup_completed_at?: string | null;
+  setup_completed_by?: number | null;
 };
 
 type ApiProjectResponse = ApiProjectCreateResponse & {
@@ -382,25 +408,21 @@ type ApiQueryResponse = {
   debug?: unknown;
 };
 
-type ApiChatSessionResponse = {
-  id: string;
+type ProjectQueryOptions = {
+  attachments?: ApiQueryAttachment[];
+  history?: ApiQueryHistoryMessage[];
+  intent?: "delta_briefing";
+  setupMode?: "analyzed";
+  signal?: AbortSignal;
+  since?: string;
+};
+
+type ApiProjectSetupResponse = {
   project_id: number;
-  title: string;
-  created_at?: string;
-  updated_at?: string;
-};
-
-type ApiChatMessageResponse = {
-  id: number;
-  role: string;
-  text: string;
-  token_count?: number;
-  created_at?: string;
-};
-
-type ApiChatSessionWithMessages = {
-  session: ApiChatSessionResponse;
-  messages: Message[];
+  setup_status: "ready";
+  setup_mode: "analyzed" | "chat_only" | "existing";
+  setup_completed_at: string;
+  setup_completed_by?: number | null;
 };
 
 type ApiRepositoryStatus = "connected" | "syncing" | "indexed" | "failed";
@@ -455,11 +477,6 @@ type ApiProjectDeltaResponse = {
   overdue: ApiProjectDeltaAction[];
 };
 
-type ApiDeltaBriefingResponse = {
-  answer: string;
-  sources: string[];
-};
-
 type ProjectDeltaBannerState = {
   projectId: string;
   since: string;
@@ -467,7 +484,15 @@ type ProjectDeltaBannerState = {
 };
 
 type ServerStatus = "online" | "offline";
-type MainView = "workspace" | "settings" | "profile" | "members";
+type SubmitQuestionOptions = {
+  intent?: "delta_briefing";
+  forceNewSession?: boolean;
+  onSuccess?: () => void;
+  preserveCurrentDraft?: boolean;
+  question?: string;
+  sessionTitle?: string;
+  since?: string;
+};
 type ServerTestState = {
   message: string;
   status: "idle" | "testing" | "ok" | "error";
@@ -475,26 +500,26 @@ type ServerTestState = {
 
 type ActionMenuOrigin = "bottom-left" | "bottom-right" | "top-left" | "top-right";
 
-type ActionMenuState =
-  | {
-      type: "project";
-      projectId: string;
-      top: number;
-      left: number;
-      origin: ActionMenuOrigin;
-    }
-  | {
-      type: "session";
-      projectId: string;
-      sessionId: string;
-      top: number;
-      left: number;
-      origin: ActionMenuOrigin;
-    };
+type ActionMenuState = {
+  type: "session";
+  projectId: string;
+  sessionId: string;
+  top: number;
+  left: number;
+  origin: ActionMenuOrigin;
+};
 
-type RenameDraft =
-  | { type: "project"; projectId: string; value: string }
-  | { type: "session"; projectId: string; sessionId: string; value: string };
+type RenameDraft = {
+  type: "session";
+  projectId: string;
+  sessionId: string;
+  value: string;
+};
+
+type SessionDraft = {
+  attachments: Attachment[];
+  prompt: string;
+};
 
 const SERVER_SYNC_TIMEOUT_MS = 3000;
 const DOCUMENT_STATUS_POLL_INTERVAL_MS = 3000;
@@ -504,20 +529,14 @@ const GITHUB_REPOSITORY_SYNC_TIMEOUT_MS = 600000;
 const QUERY_HISTORY_LIMIT = 20;
 const QUERY_TIMEOUT_MS = 60000;
 const ACTION_MENU_WIDTH = 132;
-const ACTION_MENU_PROJECT_HEIGHT = 108;
 const ACTION_MENU_SESSION_HEIGHT = 76;
 const ACTION_MENU_GAP = 12;
 const DESTRUCTIVE_CONFIRMATION_TIMEOUT_MS = 6000;
 const PROJECT_STORAGE_KEY = "paim.projects.v8";
+const SESSION_DRAFT_STORAGE_SUFFIX = ".drafts";
 const PROJECT_ROLE_RETRY_DELAYS_MS = [400, 1200] as const;
 const PROJECT_BRIEFING_QUESTION =
   "이 프로젝트의 목적, 현재 상태(완료된 것과 진행 중인 것), 그리고 다음에 해야 할 액션을 프로젝트 기록을 근거로 간결하게 브리핑해줘. 담당자와 마감일이 있는 액션은 함께 표기해줘.";
-const PROJECT_ANALYSIS_PENDING_STEPS = [
-  "프로젝트 설명을 읽는 중",
-  "연결된 자료를 훑는 중",
-  "핵심 결정과 액션을 정리하는 중",
-  "브리핑을 작성하는 중",
-];
 const LEGACY_PROJECT_STORAGE_KEYS = [
   "paim.projects.v7",
   "paim.projects.v6",
@@ -649,91 +668,50 @@ function createId(prefix: string) {
   return `${prefix}-${crypto.randomUUID()}`;
 }
 
-function createProject(name: string, sessions: ChatSession[], files: Attachment[] = []): ProjectWorkspace {
+function createProject(name: string): ProjectWorkspace {
   return {
     id: createId("project"),
+    currentUserRole: "owner",
     name,
-    files,
-    createdAt: Date.now(),
-    sessions,
-  };
-}
-
-function createProjectFromApi(serverProject: ApiProjectResponse): ProjectWorkspace {
-  const createdAt = Date.parse(serverProject.created_at ?? "");
-
-  return {
-    id: createId("project"),
-    apiProjectId: serverProject.id,
-    name: serverProject.name,
     files: [],
-    createdAt: Number.isFinite(createdAt) ? createdAt : Date.now(),
+    createdAt: Date.now(),
     sessions: [],
   };
 }
 
-function createEmptySession(): ChatSession {
+function createProjectFromApi(serverProject: ApiProjectResponse): ProjectWorkspace {
+  const createdAt = parsePaimTimestamp(serverProject.created_at);
+  const setup = normalizeApiProjectSetup(serverProject);
+
+  return {
+    id: createId("project"),
+    apiProjectId: serverProject.id,
+    currentUserRole: serverProject.current_user_role,
+    name: serverProject.name,
+    description: serverProject.description ?? undefined,
+    files: [],
+    createdAt: Number.isFinite(createdAt) ? createdAt : Date.now(),
+    ...setup,
+    sessions: [],
+  };
+}
+
+function createEmptySession(title: string): ChatSession {
   return {
     id: createId("session"),
-    title: "New Chat",
+    createdExplicitly: true,
+    title,
     createdAt: Date.now(),
     messages: [],
   };
 }
 
-// 서버 세션 row를 로컬 ChatSession 형태로 변환한다.
-function createSessionFromApi(apiSession: ApiChatSessionResponse, messages: Message[]): ChatSession {
-  const createdAt = Date.parse(apiSession.created_at ?? "");
-
-  return {
-    id: createId("session"),
-    serverSessionId: apiSession.id,
-    title: apiSession.title || "New Chat",
-    createdAt: Number.isFinite(createdAt) ? createdAt : Date.now(),
-    messages,
-  };
-}
-
-// 서버 메시지의 text 필드를 기존 content 필드로 매핑한다.
-function createMessageFromApi(apiMessage: ApiChatMessageResponse): Message | null {
-  if (apiMessage.role !== "assistant" && apiMessage.role !== "user") {
-    return null;
-  }
-
-  return {
-    id: `server-message-${apiMessage.id}`,
-    role: apiMessage.role,
-    content: apiMessage.text,
-  };
-}
-
-// 서버 세션 목록은 정렬 기준으로 삼고, 로컬 전용 세션은 아직 서버에 없으므로 뒤에 보존한다.
-function mergeServerChatSessions(
-  localSessions: ChatSession[],
-  serverSessions: ApiChatSessionWithMessages[],
-) {
-  const localSessionsByServerId = new Map(
-    localSessions
-      .filter((session) => session.serverSessionId)
-      .map((session) => [session.serverSessionId as string, session]),
+function isEmptyDefaultSession(session: ChatSession) {
+  return (
+    !session.createdExplicitly &&
+    session.title === "New Chat" &&
+    session.messages.length === 0
   );
-  const syncedSessions = serverSessions.map(({ session, messages }) => {
-    const localSession = localSessionsByServerId.get(session.id);
-
-    if (!localSession) {
-      return createSessionFromApi(session, messages);
-    }
-
-    return {
-      ...localSession,
-      serverSessionId: session.id,
-      title: session.title || localSession.title,
-      messages: messages.length > 0 ? messages : localSession.messages,
-    };
-  });
-  const localOnlySessions = localSessions.filter((session) => !session.serverSessionId);
-
-  return [...syncedSessions, ...localOnlySessions];
 }
 
 // 이전 버전이 자동으로 넣던 첫 assistant 인사는 새 empty state와 중복되므로 로딩 때만 걷어낸다.
@@ -827,12 +805,30 @@ function getAccountInitials(user: PaimUser | null) {
   return Array.from(words[0] ?? "P").slice(0, 2).join("").toLocaleUpperCase();
 }
 
+function AccountAvatar({
+  className,
+  user,
+}: {
+  className: string;
+  user: PaimUser | null;
+}) {
+  return (
+    <ProfileAvatar
+      ariaHidden
+      className={`account-avatar ${className}`}
+      fallback={getAccountInitials(user)}
+      imageUrl={user?.profile_image_url}
+      label={getAccountDisplayName(user)}
+    />
+  );
+}
+
 function formatAccountCreatedAt(value: string | null | undefined, language: LanguageSetting) {
   if (!value) {
     return language === "ko" ? "확인할 수 없음" : "Unavailable";
   }
 
-  const date = new Date(value);
+  const date = new Date(parsePaimTimestamp(value));
   if (Number.isNaN(date.getTime())) {
     return language === "ko" ? "확인할 수 없음" : "Unavailable";
   }
@@ -851,13 +847,34 @@ function createProjectState(
 ): ProjectState {
   const validProjects = projects
     .map((project) => {
-      const sessions = (project.sessions ?? []).map((session) => ({
-        ...session,
-        messages: removeLegacyWelcomeMessages(session.messages),
-      }));
+      const sessions = (project.sessions ?? [])
+        .map((session) => {
+          // Older clients stored the server row id beside otherwise local chat data.
+          // Preserve the chat while dropping that obsolete linkage.
+          const localSession = { ...session } as ChatSession & {
+            serverSessionId?: unknown;
+          };
+          delete localSession.serverSessionId;
+          return {
+            ...localSession,
+            messages: removeLegacyWelcomeMessages(localSession.messages),
+          };
+        })
+        .filter((session) => !isEmptyDefaultSession(session));
+      const hasLegacyConversation = sessions.some((session) =>
+        session.messages.some(
+          (message) => message.role === "user" || message.role === "assistant",
+        ),
+      );
 
       return {
         ...project,
+        setupCompletedAt:
+          project.setupCompletedAt ??
+          (hasLegacyConversation ? project.createdAt || Date.now() : undefined),
+        setupMode:
+          project.setupMode ??
+          (hasLegacyConversation ? "existing" : undefined),
         sessions,
       };
     });
@@ -873,11 +890,9 @@ function createProjectState(
   const selectedProject =
     validProjects.find((project) => project.id === selectedProjectId) ?? validProjects[0];
   const selectedSession =
-    selectedSessionId === null
+    selectedSessionId === null || !isProjectSetupComplete(selectedProject)
       ? null
-      : selectedProject.sessions.find((session) => session.id === selectedSessionId) ??
-        selectedProject.sessions[0] ??
-        null;
+      : selectedProject.sessions.find((session) => session.id === selectedSessionId) ?? null;
 
   return {
     projects: validProjects,
@@ -908,12 +923,22 @@ function mergeServerProjects(
     }
 
     usedLocalProjectIds.add(localProject.id);
+    const setup = normalizeApiProjectSetup(serverProject, localProject);
 
     return {
       ...localProject,
       apiProjectId: serverProject.id,
+      currentUserRole:
+        serverProject.current_user_role === undefined
+          ? localProject.currentUserRole
+          : serverProject.current_user_role,
+      description:
+        serverProject.description === undefined
+          ? localProject.description
+          : serverProject.description ?? undefined,
       name: serverProject.name,
       serverMissing: undefined,
+      ...setup,
     };
   });
 
@@ -1079,15 +1104,6 @@ function getZoomShortcutDirection(event: globalThis.KeyboardEvent, isWindows: bo
   return null;
 }
 
-function getProjectAnalysisPendingStep(elapsedSeconds: number) {
-  return PROJECT_ANALYSIS_PENDING_STEPS[
-    Math.min(
-      PROJECT_ANALYSIS_PENDING_STEPS.length - 1,
-      Math.floor(elapsedSeconds / 4),
-    )
-  ];
-}
-
 function getFileName(path: string) {
   const normalizedPath = path.replace(/[\\/]+$/, "");
   return normalizedPath.split(/[\\/]/).pop() || normalizedPath || path;
@@ -1179,7 +1195,7 @@ function getProjectSetupSourceStatusLabel(attachment: Attachment) {
 }
 
 function createServerDocumentAttachment(document: ApiDocumentListItem): Attachment {
-  const uploadedAt = Date.parse(document.uploaded_at ?? "");
+  const uploadedAt = parsePaimTimestamp(document.uploaded_at);
 
   return {
     id: `project-document-${document.id}`,
@@ -1451,6 +1467,44 @@ function createStoredAttachments(attachments: Attachment[] = []): Attachment[] {
 	    uploadedAt: attachment.uploadedAt,
 	  }));
 	}
+
+function loadSessionDrafts(storageKey: string) {
+  const drafts = new Map<string, SessionDraft>();
+  try {
+    const saved = JSON.parse(
+      window.localStorage.getItem(storageKey) || "{}",
+    ) as Record<string, Partial<SessionDraft>>;
+    Object.entries(saved).forEach(([key, draft]) => {
+      const prompt = typeof draft.prompt === "string" ? draft.prompt : "";
+      const attachments = Array.isArray(draft.attachments)
+        ? createStoredAttachments(draft.attachments)
+        : [];
+      if (prompt.trim() || attachments.length > 0) {
+        drafts.set(key, { attachments, prompt });
+      }
+    });
+  } catch {
+    return drafts;
+  }
+  return drafts;
+}
+
+function saveSessionDrafts(storageKey: string, drafts: Map<string, SessionDraft>) {
+  const saved = Object.fromEntries(
+    Array.from(drafts.entries()).map(([key, draft]) => [
+      key,
+      {
+        attachments: createStoredAttachments(draft.attachments),
+        prompt: draft.prompt,
+      },
+    ]),
+  );
+  try {
+    window.localStorage.setItem(storageKey, JSON.stringify(saved));
+  } catch {
+    // Project messages remain intact even when draft storage is full.
+  }
+}
 
 function createStoredSessions(sessions: ChatSession[]) {
   return sessions.map((session) => ({
@@ -1799,7 +1853,8 @@ type WorkspaceAppProps = {
   onLogout: () => void;
 };
 
-// 레퍼런스 앱의 단순한 채팅 경험을 유지하면서 세션 상태를 관리한다.
+// 프로젝트 Home을 최상위 진입점으로 두고, 상세 화면에서 시작한 대화를
+// 프로젝트 하위 세션으로 관리한다.
 function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: WorkspaceAppProps) {
   const isWindows = useMemo(isWindowsHost, []);
   const isMac = useMemo(isMacHost, []);
@@ -1808,19 +1863,40 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     () => getProjectStorageKey(authUser, canLogout, initialProjectApiRootUrl),
     [authUser, canLogout, initialProjectApiRootUrl],
   );
+  const sessionDraftStorageKey = useMemo(
+    () => `${projectStorageKey}${SESSION_DRAFT_STORAGE_SUFFIX}`,
+    [projectStorageKey],
+  );
   const allowLegacyProjectCacheFallback =
     !canLogout &&
     normalizePaimServerUrl(initialProjectApiRootUrl) === DEFAULT_PAIM_API_ROOT_URL;
   const [initialProjectState] = useState(() =>
     loadProjectState(projectStorageKey, allowLegacyProjectCacheFallback),
   );
-  const [projects, setProjects] = useState<ProjectWorkspace[]>(initialProjectState.projects);
-  const [selectedProjectId, setSelectedProjectId] = useState(
-    initialProjectState.selectedProjectId,
+  const [initialSessionDrafts] = useState(() =>
+    loadSessionDrafts(sessionDraftStorageKey),
   );
-  const [selectedSessionId, setSelectedSessionId] = useState(
-    initialProjectState.selectedSessionId,
-  );
+  const {
+    canDeleteSelectedProject,
+    canMutateSelectedProject,
+    isSelectedProjectOwner,
+    projects,
+    projectsRef,
+    selectedProject,
+    selectedProjectId,
+    selectedProjectIdRef,
+    selectedProjectRole,
+    selectedSession,
+    selectedSessionId,
+    selectedSessionIdRef,
+    sessions,
+    setProjects,
+    setSelectedProjectId,
+    setSelectedSessionId,
+  } = useProjectWorkspaceDomain({
+    hasAuthenticatedUser: Boolean(authUser),
+    initialState: initialProjectState,
+  });
   const [zoomScale, setZoomScaleState] = useState(loadZoomScale);
   const [prompt, setPrompt] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -1878,13 +1954,23 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   const [projectMemoryItemsByProjectId, setProjectMemoryItemsByProjectId] = useState<
     Record<string, ProjectMemoryItem[]>
   >({});
-  const [projectRolesByApiId, setProjectRolesByApiId] = useState<
-    Record<number, ProjectRole | null>
-  >({});
   const [pendingSetupDeleteProjectFileId, setPendingSetupDeleteProjectFileId] = useState<string | null>(
     null,
   );
-  const [mainView, setMainView] = useState<MainView>("workspace");
+  // 앱 진입점은 프로젝트 포트폴리오다. 프로젝트 선택은 상세 화면으로,
+  // 새 프로젝트 생성은 설정 흐름으로 이동하고 채팅은 첫 전송 때만 만들어진다.
+  const {
+    mainView,
+    membersReturnView,
+    navigateTo,
+    openMembers,
+    openProjectDetail,
+    openProjectManagement,
+    projectDetailTab,
+    projectManagementSection,
+    setProjectDetailTab,
+    setProjectManagementSection,
+  } = useWorkspaceRoute();
   const [settings, setSettingsState] = useState(loadPaimSettings);
   const [serverUrlDraft, setServerUrlDraft] = useState(settings.serverUrl);
   const t = (key: string, vars?: Record<string, number | string>) =>
@@ -1958,13 +2044,13 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   const noticeStackRef = useRef<HTMLDivElement | null>(null);
   const mainViewHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const mainViewReturnFocusRef = useRef<HTMLElement | null>(null);
+  const mainViewReturnFocusSelectorRef = useRef<string | null>(null);
   const promptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const activeQueryControllerRef = useRef<AbortController | null>(null);
   const userCancelledQueryControllersRef = useRef(new WeakSet<AbortController>());
   const apiProjectEnsurePromisesRef = useRef(
     new Map<string, Promise<ProjectWorkspace>>(),
   );
-  const serverSessionEnsurePromisesRef = useRef(new Map<string, Promise<string>>());
   const isScrollingToChatBottomRef = useRef(false);
   const shouldStickToChatBottomRef = useRef(true);
   const actionMenuTriggerRef = useRef<HTMLElement | null>(null);
@@ -1980,14 +2066,12 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   const githubOperationRegistryRef = useRef(createLatestProjectOperationRegistry());
   const projectFileImportRegistryRef = useRef(createLatestProjectOperationRegistry());
   const ignoredProjectDeltaRef = useRef<Record<string, string>>({});
-  const projectsRef = useRef(initialProjectState.projects);
-  const selectedProjectIdRef = useRef(initialProjectState.selectedProjectId);
-  const selectedSessionIdRef = useRef(initialProjectState.selectedSessionId);
-  const sessionDraftsRef = useRef(
-    new Map<string, { attachments: Attachment[]; prompt: string }>(),
-  );
-  const projectHomeNameBeforeEditRef = useRef<string | null>(null);
+  const githubLoginSessionsRef = useRef(githubLoginSessions);
+  const sessionDraftsRef = useRef(initialSessionDrafts);
+  const projectSetupDescriptionBeforeEditRef = useRef<string | null>(null);
+  const projectSetupNameBeforeEditRef = useRef<string | null>(null);
   const zoomScaleRef = useRef(zoomScale);
+  const mainViewRef = useRef<MainView>(mainView);
   const projectDocumentExtensions = capabilities?.project_documents.extensions ?? [];
   const queryAttachmentExtensions = capabilities?.query_attachments.extensions ?? [];
   const supportedDocumentLabel = capabilities
@@ -2002,47 +2086,42 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       )} · 전체 최대 ${formatBytesAsMiB(capabilities.query_attachments.max_total_bytes)}`
     : "";
 
+  useLayoutEffect(() => {
+    const root = document.documentElement;
+    if (settings.theme === "system") {
+      delete root.dataset.theme;
+      root.style.colorScheme = "light dark";
+    } else {
+      root.dataset.theme = settings.theme;
+      root.style.colorScheme = settings.theme;
+    }
+  }, [settings.theme]);
+
   function retryCapabilities() {
     setCapabilitiesRevision((revision) => revision + 1);
   }
 
-  const selectedProject = useMemo(
-    () => projects.find((project) => project.id === selectedProjectId) ?? null,
-    [projects, selectedProjectId],
-  );
-  const selectedProjectRole =
-    typeof selectedProject?.apiProjectId === "number"
-      ? projectRolesByApiId[selectedProject.apiProjectId]
-      : undefined;
-  const canMutateSelectedProject = selectedProject
-    ? !authUser || typeof selectedProject.apiProjectId !== "number"
-      ? true
-      : canRole(selectedProjectRole, "member")
-    : false;
+  const isPrimaryProjectContext =
+    mainView === "chat" ||
+    mainView === "project-detail" ||
+    mainView === "project-management" ||
+    mainView === "project-setup";
   const canMutateSelectedProjectRef = useRef(canMutateSelectedProject);
   canMutateSelectedProjectRef.current = canMutateSelectedProject;
   const selectedProjectReadOnlyReason = !canMutateSelectedProject
     ? t("조회 권한으로 열려 있어 메시지와 파일을 보낼 수 없습니다.")
     : undefined;
-  const sessions = selectedProject?.sessions ?? [];
-  const selectedSession = useMemo(
-    () => sessions.find((session) => session.id === selectedSessionId) ?? null,
-    [selectedSessionId, sessions],
-  );
   const showProjectPanel =
-    mainView === "workspace" && Boolean(selectedProject) && Boolean(selectedSession);
+    Boolean(selectedProject) &&
+    ((mainView === "chat" && Boolean(selectedSession)) ||
+      mainView === "project-detail" ||
+      mainView === "project-management");
   const visibleProjectPanelMode = showProjectPanel ? projectPanelMode : "closed";
   const activeProjectPanelTab = useMemo(
     () => projectPanelTabs.find((tab) => tab.id === activeProjectPanelTabId) ?? null,
     [activeProjectPanelTabId, projectPanelTabs],
   );
   const projectPanelView: ProjectPanelView = activeProjectPanelTab?.view ?? "menu";
-  const isProjectBriefingPending =
-    selectedSession?.title === "Project Briefing" &&
-    selectedSession.messages.length === 0 &&
-    isSending &&
-    pendingProjectId === selectedProject?.id &&
-    pendingSessionId === selectedSession.id;
   const isCurrentSessionSending =
     isSending &&
     Boolean(selectedProjectId) &&
@@ -2057,7 +2136,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   const showBackgroundQueryNotice = Boolean(
     isSending && pendingQueryProject && pendingQuerySession && !isCurrentSessionSending,
   );
-  const projectAnalysisPendingStep = getProjectAnalysisPendingStep(thinkingElapsedSeconds);
   const activeProjectFileTab =
     activeProjectPanelTab?.view === "files" ? activeProjectPanelTab : null;
   const selectedProjectAttachments = selectedProject?.files ?? EMPTY_PROJECT_ATTACHMENTS;
@@ -2079,7 +2157,9 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   const selectedProjectMemoryCounts =
     selectedProject ? projectMemoryCountsByProjectId[selectedProject.id] : undefined;
   const selectedProjectMemoryItems =
-    selectedProject ? projectMemoryItemsByProjectId[selectedProject.id] ?? [] : [];
+    selectedProject
+      ? projectMemoryItemsByProjectId[selectedProject.id] ?? EMPTY_PROJECT_MEMORY_ITEMS
+      : EMPTY_PROJECT_MEMORY_ITEMS;
   const selectedProjectMemorySlotCounts =
     selectedProjectMemoryCounts ?? EMPTY_PROJECT_MEMORY_COUNTS;
   const selectedProjectSetupStatusCounts = useMemo(
@@ -2151,7 +2231,9 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         ? "authing"
         : "signedout";
   const selectedProjectDelta =
-    selectedProject && projectDeltaBanner?.projectId === selectedProject.id
+    isPrimaryProjectContext &&
+    selectedProject &&
+    projectDeltaBanner?.projectId === selectedProject.id
       ? projectDeltaBanner
       : null;
   const selectedProjectDescription = selectedProject?.description?.trim() ?? "";
@@ -2160,13 +2242,13 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     serverStatus === "online" &&
     typeof selectedProject?.apiProjectId === "number" &&
     !selectedProject.serverMissing;
-  const hasProjectHomeContext =
+  const hasProjectSetupContext =
     selectedProjectFileCount > 0 ||
     selectedProjectGithubPanelState === "connected" ||
     selectedProjectDescription.length > 0;
   const isProjectBriefingDisabled =
     !canMutateSelectedProject ||
-    !hasProjectHomeContext ||
+    !hasProjectSetupContext ||
     selectedProjectHasDocumentInProgress ||
     isSending;
   const shouldInertBackgroundForProjectPanel =
@@ -2297,6 +2379,45 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   }, [mainView]);
 
   useEffect(() => {
+    const selector = mainViewReturnFocusSelectorRef.current;
+    const selectorMatchesView =
+      (mainView === "project-detail" &&
+        selector?.startsWith(".project-detail")) ||
+      (mainView === "project-management" &&
+        selector?.startsWith(".project-management"));
+    if (!selector || !selectorMatchesView) {
+      return;
+    }
+
+    let isCancelled = false;
+    let timeoutId: number | null = null;
+    let attempts = 0;
+    const focusReturningControl = () => {
+      if (isCancelled) return;
+
+      const target = document.querySelector<HTMLElement>(selector);
+      if (target) {
+        target.focus({ preventScroll: true });
+        mainViewReturnFocusSelectorRef.current = null;
+        return;
+      }
+
+      attempts += 1;
+      if (attempts < 20) {
+        timeoutId = window.setTimeout(focusReturningControl, 50);
+      } else {
+        mainViewReturnFocusSelectorRef.current = null;
+      }
+    };
+
+    timeoutId = window.setTimeout(focusReturningControl, 0);
+    return () => {
+      isCancelled = true;
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+    };
+  }, [mainView, selectedProjectId]);
+
+  useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) {
       return;
     }
@@ -2314,7 +2435,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
           : accountMenuTriggerRef.current ?? promptTextareaRef.current;
       setIsAccountMenuOpen(false);
       setOpenActionMenu(null);
-      setMainView("settings");
+      navigateTo("settings");
     })
       .then((stopListening) => {
         if (isDisposed) {
@@ -2393,7 +2514,10 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   }, [isAccountMenuOpen, isSidebarResizing, shouldInertBackgroundForProjectPanel]);
 
   const visibleDemoStatus =
-    demoStatus?.projectId && demoStatus.projectId !== selectedProjectId ? null : demoStatus;
+    demoStatus?.projectId &&
+    (!isPrimaryProjectContext || demoStatus.projectId !== selectedProjectId)
+      ? null
+      : demoStatus;
   const rawMainDemoStatus = visibleDemoStatus?.scope === "github" ? null : visibleDemoStatus;
   const mainDemoStatus =
     serverStatus === "offline" &&
@@ -2405,7 +2529,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     Number(serverStatus === "offline") +
     Number(showBackgroundQueryNotice) +
     Number(selectedProjectDelta !== null) +
-    Number(Boolean(selectedProject?.serverMissing)) +
+    Number(Boolean(isPrimaryProjectContext && selectedProject?.serverMissing)) +
     Number(mainDemoStatus !== null);
   const showNoticeStack = noticeCount > 0;
 
@@ -2672,7 +2796,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   }
 
   function handleOpenReleasePage() {
-    void openUrl("https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/releases");
+    void openUrl("https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/releases");
   }
 
   function applyProjectState(nextState: ProjectState) {
@@ -2697,17 +2821,71 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         throw new Error("PaiM 서버 상태를 확인할 수 없습니다");
       }
 
-      return fetchPaimJson<ApiProjectResponse[]>("/projects", {
+      const serverProjects = await fetchPaimJson<ApiProjectResponse[]>("/projects", {
         signal: controller.signal,
       });
+      return fillMissingProjectRoles(
+        serverProjects,
+        authUser,
+        (projectId) =>
+          fetchProjectMembers(projectId, {
+            signal: controller.signal,
+          }),
+      );
     } finally {
       window.clearTimeout(timeoutId);
     }
   }
 
+  async function completeServerProjectSetup(
+    apiProjectId: number,
+    mode: "chat_only",
+  ) {
+    return fetchPaimJson<ApiProjectSetupResponse>(
+      `/projects/${apiProjectId}/setup/complete`,
+      {
+        method: "POST",
+        body: JSON.stringify({ mode }),
+      },
+    );
+  }
+
+  async function reconcileLocalProjectSetup(
+    serverProjects: ApiProjectResponse[],
+  ) {
+    return Promise.all(
+      serverProjects.map(async (serverProject) => {
+        const localProject = projectsRef.current.find(
+          (project) => project.apiProjectId === serverProject.id,
+        );
+        if (
+          serverProject.setup_status !== "draft" ||
+          !localProject?.setupCompletedAt ||
+          localProject.setupMode !== "chat_only"
+        ) {
+          return serverProject;
+        }
+
+        try {
+          const completed = await completeServerProjectSetup(
+            serverProject.id,
+            "chat_only",
+          );
+          return {
+            ...serverProject,
+            ...completed,
+          };
+        } catch {
+          // 서버 상태를 정본으로 유지한다. 실패한 로컬 완료 표시는 아래 병합에서 제거된다.
+          return serverProject;
+        }
+      }),
+    );
+  }
+
   async function syncProjectsWithServer(showResult = false) {
     try {
-      const serverProjects = await fetchServerProjects();
+      const serverProjects = await reconcileLocalProjectSetup(await fetchServerProjects());
       const nextState = createProjectState(
         mergeServerProjects(projectsRef.current, serverProjects),
         selectedProjectIdRef.current,
@@ -2756,7 +2934,9 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       return true;
     }
 
-    return canRole(projectRolesByApiId[project.apiProjectId], minimumRole);
+    const latestProject =
+      projectsRef.current.find((candidate) => candidate.id === project.id) ?? project;
+    return canRole(latestProject.currentUserRole, minimumRole);
   }
 
   function shouldSkipProjectPermission(
@@ -2847,31 +3027,20 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   const actionMenuProject = openActionMenu
     ? projects.find((project) => project.id === openActionMenu.projectId) ?? null
     : null;
-  const actionMenuSession =
-    openActionMenu?.type === "session"
-      ? actionMenuProject?.sessions.find((session) => session.id === openActionMenu.sessionId) ??
-        null
-      : null;
-  const actionMenuProjectRole =
-    typeof actionMenuProject?.apiProjectId === "number"
-      ? projectRolesByApiId[actionMenuProject.apiProjectId]
-      : undefined;
+  const actionMenuSession = openActionMenu
+    ? actionMenuProject?.sessions.find((session) => session.id === openActionMenu.sessionId) ??
+      null
+    : null;
   const canMutateActionMenuProject = actionMenuProject
     ? !authUser || typeof actionMenuProject.apiProjectId !== "number"
       ? true
-      : canRole(actionMenuProjectRole, "member")
-    : false;
-  const canDeleteActionMenuProject = actionMenuProject
-    ? !authUser || typeof actionMenuProject.apiProjectId !== "number"
-      ? true
-      : actionMenuProjectRole === "owner"
+      : projectHasRole(actionMenuProject, "member")
     : false;
   const isActionMenuProjectQueryPending =
     isSending && pendingProjectId === actionMenuProject?.id;
   const isActionMenuSessionQueryPending =
     isActionMenuProjectQueryPending && pendingSessionId === actionMenuSession?.id;
   const accountDisplayName = getAccountDisplayName(authUser);
-  const accountInitials = getAccountInitials(authUser);
   const accountEmail = authUser?.email?.trim() || t("오프라인 작업공간");
   const appShellStyle = {
     "--sidebar-width": `${
@@ -2990,7 +3159,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       .catch(() => setAppVersion(`개발 모드 ${packageJson.version}`));
 
     const controller = new AbortController();
-    void fetch("https://api.github.com/repos/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/releases/latest", {
+    void fetch("https://api.github.com/repos/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/releases/latest", {
       signal: controller.signal,
     })
       .then((response) => (response.ok ? response.json() : null))
@@ -3004,26 +3173,43 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     return () => controller.abort();
   }, []);
 
-  useEffect(() => {
-    projectsRef.current = projects;
-  }, [projects]);
+  useLayoutEffect(() => {
+    githubLoginSessionsRef.current = githubLoginSessions;
+  }, [githubLoginSessions]);
+
+  useLayoutEffect(() => {
+    mainViewRef.current = mainView;
+  }, [mainView]);
 
   useEffect(() => {
-    selectedProjectIdRef.current = selectedProjectId;
-  }, [selectedProjectId]);
+    if (
+      mainView !== "project-management" ||
+      !selectedProject ||
+      isSelectedProjectOwner
+    ) {
+      return;
+    }
 
-  useEffect(() => {
-    selectedSessionIdRef.current = selectedSessionId;
-  }, [selectedSessionId]);
+    closeProjectPanel();
+    openProjectDetail();
+  }, [isSelectedProjectOwner, mainView, selectedProject]);
 
   useEffect(() => {
     const apiProjectId = selectedProject?.apiProjectId;
-    if (!authUser || typeof apiProjectId !== "number" || serverStatus !== "online") {
+    if (
+      (!isPrimaryProjectContext && mainView !== "members") ||
+      !didSyncProjectsRef.current ||
+      !authUser ||
+      !selectedProject ||
+      typeof apiProjectId !== "number" ||
+      serverStatus !== "online"
+    ) {
       return;
     }
 
     const currentAuthUser = authUser;
     const selectedApiProjectId = apiProjectId;
+    const selectedLocalProjectId: string = selectedProject.id;
     let disposed = false;
     let retryTimeoutId: number | null = null;
 
@@ -3032,9 +3218,9 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         const members = await fetchProjectMembers(selectedApiProjectId);
         if (!disposed) {
           const role = getCurrentProjectMember(members, currentAuthUser)?.role ?? null;
-          setProjectRolesByApiId((current) => ({
-            ...current,
-            [selectedApiProjectId]: role,
+          updateProject(selectedLocalProjectId, (project) => ({
+            ...project,
+            currentUserRole: role,
           }));
         }
       } catch {
@@ -3051,10 +3237,9 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
           return;
         }
 
-        setProjectRolesByApiId((current) => ({
-          ...current,
-          [selectedApiProjectId]: null,
-        }));
+        // A transient members request must not erase the role already supplied by
+        // the canonical project response. Backend authorization remains the final
+        // authority for every mutation.
       }
     }
 
@@ -3066,7 +3251,15 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         window.clearTimeout(retryTimeoutId);
       }
     };
-  }, [authUser, selectedProject?.apiProjectId, serverStatus]);
+  }, [
+    authUser,
+    isPrimaryProjectContext,
+    mainView,
+    selectedProject?.apiProjectId,
+    selectedProject?.currentUserRole,
+    selectedProject?.id,
+    serverStatus,
+  ]);
 
   useEffect(() => {
     if (didSyncProjectsRef.current) {
@@ -3079,6 +3272,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
   useEffect(() => {
     if (
+      !isPrimaryProjectContext ||
       serverStatus !== "online" ||
       !selectedProject ||
       selectedProject.serverMissing ||
@@ -3092,11 +3286,13 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     selectedProject?.apiProjectId,
     selectedProject?.id,
     selectedProject?.serverMissing,
+    isPrimaryProjectContext,
     serverStatus,
   ]);
 
   useEffect(() => {
     if (
+      !isPrimaryProjectContext ||
       serverStatus !== "online" ||
       !selectedProject ||
       selectedProject.serverMissing ||
@@ -3108,6 +3304,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     void refreshProjectMemoryCounts(selectedProject.id, selectedProject.apiProjectId);
   }, [
     postSyncRefreshRevision,
+    isPrimaryProjectContext,
     selectedProject?.apiProjectId,
     selectedProject?.id,
     selectedProject?.serverMissing,
@@ -3119,6 +3316,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
   useEffect(() => {
     if (
+      !isPrimaryProjectContext ||
       serverStatus !== "online" ||
       !selectedProject ||
       selectedProject.serverMissing ||
@@ -3129,6 +3327,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
     void syncProjectRepositories(selectedProject.id, selectedProject.apiProjectId);
   }, [
+    isPrimaryProjectContext,
     selectedProject?.apiProjectId,
     selectedProject?.id,
     selectedProject?.serverMissing,
@@ -3137,24 +3336,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
   useEffect(() => {
     if (
-      serverStatus !== "online" ||
-      !selectedProject ||
-      selectedProject.serverMissing ||
-      typeof selectedProject.apiProjectId !== "number"
-    ) {
-      return;
-    }
-
-    void syncProjectChatSessions(selectedProject.id, selectedProject.apiProjectId);
-  }, [
-    selectedProject?.apiProjectId,
-    selectedProject?.id,
-    selectedProject?.serverMissing,
-    serverStatus,
-  ]);
-
-  useEffect(() => {
-    if (
+      !isPrimaryProjectContext ||
       !selectedProject ||
       selectedProject.serverMissing ||
       typeof selectedProject.apiProjectId !== "number"
@@ -3206,6 +3388,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       isDisposed = true;
     };
   }, [
+    isPrimaryProjectContext,
     selectedProject?.apiProjectId,
     selectedProject?.id,
     selectedProject?.lastSeenAt,
@@ -3471,7 +3654,9 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
             canMutateSelectedProjectRef.current &&
             selectedProjectIdRef.current &&
             (dropZone === "project-files" ||
-              (dropZone === "prompt" && selectedSessionIdRef.current))
+              (dropZone === "prompt" &&
+                (selectedSessionIdRef.current ||
+                  mainViewRef.current === "project-detail")))
               ? dropZone
               : null;
           setActiveDropZone(validDropZone);
@@ -3500,7 +3685,10 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
         if (dropZone === "project-files") {
           void addDroppedPathsToProjectRef.current?.(selectedProjectId, event.payload.paths);
-        } else if (dropZone === "prompt" && selectedSessionIdRef.current) {
+        } else if (
+          dropZone === "prompt" &&
+          (selectedSessionIdRef.current || mainViewRef.current === "project-detail")
+        ) {
           void appendAttachmentPathsRef.current?.(event.payload.paths);
         }
       })
@@ -3546,7 +3734,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   }, [isCurrentSessionSending, selectedSession?.messages.length]);
 
   useEffect(() => {
-    if (mainView === "workspace" && selectedSessionId && canMutateSelectedProject) {
+    if (mainView === "chat" && selectedSessionId && canMutateSelectedProject) {
       focusPrompt();
     }
     // Permission hydration must not steal focus after the user has moved elsewhere.
@@ -3555,7 +3743,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
   useEffect(() => {
     if (
-      mainView !== "workspace" ||
+      mainView !== "chat" ||
       !selectedSessionId ||
       !canMutateSelectedProject ||
       (document.activeElement && document.activeElement !== document.body)
@@ -4051,64 +4239,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     }
   }
 
-  // 서버 세션 목록과 각 세션의 복호화 메시지를 함께 가져온다.
-  async function fetchProjectChatSessions(apiProjectId: number) {
-    const sessions = await fetchPaimJson<ApiChatSessionResponse[]>(
-      `/projects/${apiProjectId}/sessions`,
-    );
-
-    return Promise.all(
-      sessions.map(async (session) => {
-        const messages = await fetchPaimJson<ApiChatMessageResponse[]>(
-          `/projects/${apiProjectId}/sessions/${encodeURIComponent(session.id)}/messages`,
-        );
-
-        return {
-          session,
-          messages: messages
-            .map(createMessageFromApi)
-            .filter((message): message is Message => message !== null),
-        };
-      }),
-    );
-  }
-
-  // 선택된 프로젝트의 서버 세션을 로컬 캐시에 병합한다.
-  async function syncProjectChatSessions(projectId: string, apiProjectId: number) {
-    if (serverStatus === "offline") {
-      return;
-    }
-
-    try {
-      const serverSessions = await fetchProjectChatSessions(apiProjectId);
-      const currentProject = projectsRef.current.find((project) => project.id === projectId);
-
-      if (!currentProject) {
-        return;
-      }
-
-      const nextSessions = mergeServerChatSessions(currentProject.sessions, serverSessions);
-
-      updateProject(projectId, (project) => ({
-        ...project,
-        sessions: nextSessions,
-      }));
-
-      if (
-        selectedProjectIdRef.current === projectId &&
-        !nextSessions.some((session) => session.id === selectedSessionIdRef.current)
-      ) {
-        setSelectedSessionId(nextSessions[0]?.id ?? null);
-      }
-    } catch (error) {
-      setDemoStatus({
-        ok: false,
-        message: getErrorMessage(error, "서버 채팅 세션을 불러올 수 없습니다"),
-        scope: "overview",
-      });
-    }
-  }
-
   async function startGithubRepositorySync(
     projectId: string,
     apiProjectId: number,
@@ -4165,14 +4295,23 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   async function fetchProjectQuery(
     apiProjectId: number,
     question: string,
-    history: ApiQueryHistoryMessage[],
-    queryAttachments: ApiQueryAttachment[] = [],
-    signal?: AbortSignal,
+    {
+      attachments: queryAttachments = [],
+      history = [],
+      intent,
+      setupMode,
+      signal,
+      since,
+    }: ProjectQueryOptions = {},
   ) {
-    const body =
-      queryAttachments.length > 0
-        ? { question, history, attachments: queryAttachments }
-        : { question, history };
+    const body = {
+      question,
+      history,
+      ...(queryAttachments.length > 0 ? { attachments: queryAttachments } : {}),
+      ...(setupMode ? { setup_mode: setupMode } : {}),
+      ...(intent ? { intent } : {}),
+      ...(since ? { since } : {}),
+    };
 
     return fetchPaimJson<ApiQueryResponse>(`/projects/${apiProjectId}/query`, {
       method: "POST",
@@ -4234,21 +4373,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         };
       });
     }
-  }
-
-  async function fetchProjectDeltaBriefing(
-    apiProjectId: number,
-    since: string,
-    signal?: AbortSignal,
-  ) {
-    return fetchPaimJson<ApiDeltaBriefingResponse>(
-      `/projects/${apiProjectId}/briefing/delta`,
-      {
-        method: "POST",
-        signal,
-        body: JSON.stringify({ since }),
-      },
-    );
   }
 
   function beginActiveQuery() {
@@ -4555,7 +4679,10 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     const creationPromise = (async () => {
       const createdProject = await fetchPaimJson<ApiProjectCreateResponse>("/projects", {
         method: "POST",
-        body: JSON.stringify({ name: latestProject.name || "New Project" }),
+        body: JSON.stringify({
+          description: latestProject.description?.trim() || null,
+          name: latestProject.name || "New Project",
+        }),
       });
       const currentProject = projectsRef.current.find(
         (candidate) => candidate.id === project.id,
@@ -4573,15 +4700,22 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       const nextProject = {
         ...currentProject,
         apiProjectId: createdProject.id,
+        currentUserRole: createdProject.current_user_role ?? "owner",
+        description:
+          createdProject.description === undefined
+            ? currentProject.description
+            : createdProject.description ?? undefined,
       };
 
       updateProject(project.id, (candidate) => ({
         ...candidate,
         apiProjectId: createdProject.id,
+        currentUserRole: createdProject.current_user_role ?? "owner",
+        description:
+          createdProject.description === undefined
+            ? candidate.description
+            : createdProject.description ?? undefined,
       }));
-      if (authUser) {
-        setProjectRolesByApiId((current) => ({ ...current, [createdProject.id]: "owner" }));
-      }
 
       return nextProject;
     })();
@@ -4610,109 +4744,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     }));
   }
 
-  // 서버에 비어 있는 채팅 세션 row를 만든다.
-  async function createServerChatSession(
-    apiProjectId: number,
-    title: string,
-  ) {
-    return fetchPaimJson<ApiChatSessionResponse>(`/projects/${apiProjectId}/sessions`, {
-      method: "POST",
-      body: JSON.stringify({ title: title || "New Chat" }),
-    });
-  }
-
-  // 로컬 세션은 첫 질문 전까지 서버 세션을 만들지 않는다.
-  async function ensureServerChatSession(
-    projectId: string,
-    session: ChatSession,
-    apiProjectId: number,
-    title: string,
-  ) {
-    const sessionKey = `${projectId}\u0000${session.id}`;
-    const latestSession = projectsRef.current
-      .find((project) => project.id === projectId)
-      ?.sessions.find((candidate) => candidate.id === session.id);
-    if (latestSession?.serverSessionId || session.serverSessionId) {
-      return latestSession?.serverSessionId ?? session.serverSessionId!;
-    }
-
-    const existingPromise = serverSessionEnsurePromisesRef.current.get(sessionKey);
-    if (existingPromise) {
-      return existingPromise;
-    }
-
-    const creationPromise = (async () => {
-      const createdSession = await createServerChatSession(apiProjectId, title);
-      const currentSession = projectsRef.current
-        .find((project) => project.id === projectId)
-        ?.sessions.find((candidate) => candidate.id === session.id);
-
-      if (!currentSession) {
-        try {
-          await fetchPaimJson<void>(
-            `/projects/${apiProjectId}/sessions/${encodeURIComponent(createdSession.id)}`,
-            { method: "DELETE" },
-          );
-        } catch {
-          // The session may already have been removed with its parent project.
-        }
-        throw new Error("로컬에서 제거된 채팅의 서버 생성을 취소했습니다");
-      }
-
-      updateSessionInProject(projectId, session.id, (candidate) => ({
-        ...candidate,
-        serverSessionId: createdSession.id,
-        title: createdSession.title || candidate.title,
-      }));
-
-      return createdSession.id;
-    })();
-
-    serverSessionEnsurePromisesRef.current.set(sessionKey, creationPromise);
-    try {
-      return await creationPromise;
-    } catch (error) {
-      if (serverSessionEnsurePromisesRef.current.get(sessionKey) === creationPromise) {
-        serverSessionEnsurePromisesRef.current.delete(sessionKey);
-      }
-      throw error;
-    }
-  }
-
-  // 서버에 이미 연결된 세션의 제목 변경만 동기화한다.
-  async function syncChatSessionTitle(projectId: string, sessionId: string, title: string) {
-    if (serverStatus === "offline") {
-      return;
-    }
-
-    const project = projectsRef.current.find((currentProject) => currentProject.id === projectId);
-    const session = project?.sessions.find((currentSession) => currentSession.id === sessionId);
-
-    if (!project || !session?.serverSessionId || typeof project.apiProjectId !== "number") {
-      return;
-    }
-
-    try {
-      await fetchPaimJson<ApiChatSessionResponse>(
-        `/projects/${project.apiProjectId}/sessions/${encodeURIComponent(session.serverSessionId)}`,
-        {
-          method: "PATCH",
-          body: JSON.stringify({ title }),
-        },
-      );
-    } catch (error) {
-      if (isPaimApiError(error) && error.status === 404) {
-        return;
-      }
-
-      setDemoStatus({
-        ok: false,
-        message: getErrorMessage(error, "채팅 세션 제목을 서버에 저장할 수 없습니다"),
-        scope: "overview",
-      });
-    }
-  }
-
   // 서버 프로젝트가 있으면 이름 변경을 저장하고, 실패 시 로컬 이름을 되돌린다.
   async function syncProjectName(projectId: string, title: string, previousTitle: string) {
     if (serverStatus === "offline") {
@@ -4721,7 +4752,12 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
     const project = projectsRef.current.find((currentProject) => currentProject.id === projectId);
 
-    if (!project || project.serverMissing || typeof project.apiProjectId !== "number") {
+    if (
+      !project ||
+      project.serverMissing ||
+      typeof project.apiProjectId !== "number" ||
+      shouldSkipProjectPermission(project, "overview", "owner")
+    ) {
       return;
     }
 
@@ -4745,42 +4781,65 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     }
   }
 
-  // 서버 세션이 있으면 삭제하고, 404는 이미 삭제된 상태로 본다.
-  async function deleteServerChatSession(project: ProjectWorkspace, session: ChatSession) {
-    if (!session.serverSessionId) {
-      return true;
-    }
-
+  async function syncProjectDescription(
+    projectId: string,
+    description: string,
+    previousDescription: string,
+  ) {
     if (serverStatus === "offline") {
-      setDemoStatus({
-        ok: false,
-        message: "서버에 연결되지 않아 로컬 채팅만 삭제했습니다",
-        scope: "overview",
-      });
-      return true;
+      return;
     }
 
-    if (typeof project.apiProjectId !== "number") {
-      return true;
+    const project = projectsRef.current.find((currentProject) => currentProject.id === projectId);
+    if (
+      !project ||
+      project.serverMissing ||
+      typeof project.apiProjectId !== "number" ||
+      shouldSkipProjectPermission(project, "overview", "owner")
+    ) {
+      return;
     }
 
+    const nextDescription = description.trim();
     try {
-      await fetchPaimJson<void>(
-        `/projects/${project.apiProjectId}/sessions/${encodeURIComponent(session.serverSessionId)}`,
-        { method: "DELETE" },
+      const updated = await fetchPaimJson<ApiProjectResponse>(
+        `/projects/${project.apiProjectId}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ description: nextDescription }),
+        },
       );
-      return true;
+      updateProject(projectId, (currentProject) => ({
+        ...currentProject,
+        description: updated.description?.trim() || undefined,
+      }));
     } catch (error) {
-      if (isPaimApiError(error) && error.status === 404) {
-        return true;
+      if (isPaimApiError(error) && error.status === 422) {
+        // PR18 이전 프로젝트 API는 description PATCH를 지원하지 않는다.
+        // 워크스페이스를 막지 않고 계정·서버 범위 로컬 상태로 보존한다.
+        setDemoStatus({
+          kind: "info",
+          ok: true,
+          message: "현재 서버에서는 프로젝트 설명을 이 기기에 저장합니다",
+          projectId,
+          scope: "overview",
+        });
+        return;
       }
-
+      updateProject(projectId, (currentProject) => ({
+        ...currentProject,
+        description:
+          currentProject.description?.trim() === nextDescription
+            ? previousDescription.trim() || undefined
+            : currentProject.description,
+        serverMissing:
+          isPaimApiError(error) && error.status === 404 ? true : currentProject.serverMissing,
+      }));
       setDemoStatus({
         ok: false,
-        message: getErrorMessage(error, "채팅 세션을 서버에서 삭제할 수 없습니다"),
+        message: getErrorMessage(error, "프로젝트 설명을 서버에 저장할 수 없습니다"),
         scope: "overview",
       });
-      return false;
     }
   }
 
@@ -4820,30 +4879,85 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     }
   }
 
-  function handleSelectProject(projectId: string) {
+  function handleOpenProjectPortfolio() {
+    rememberCurrentDraft();
+    selectedProjectIdRef.current = null;
+    selectedSessionIdRef.current = null;
+    setSelectedProjectId(null);
+    setSelectedSessionId(null);
+    navigateTo("projects");
+    setOpenActionMenu(null);
+    closeProjectPanel();
+    resetVisibleDraft();
+  }
+
+  function handleOpenProjectDetail(projectId: string) {
     const nextProject = projects.find((project) => project.id === projectId);
 
     if (!nextProject) {
       return;
     }
 
-    const nextSessionId = nextProject.sessions[0]?.id ?? null;
+    const nextView: MainView = isProjectSetupComplete(nextProject)
+      ? "project-detail"
+      : "project-setup";
     rememberCurrentDraft();
-    setMainView("workspace");
     setSelectedProjectId(nextProject.id);
-    setSelectedSessionId(nextSessionId);
-    showSessionDraft(nextProject.id, nextSessionId);
+    setSelectedSessionId(null);
+    if (nextView === "project-detail") {
+      openProjectDetail("overview");
+    } else {
+      navigateTo(nextView);
+    }
+    setOpenActionMenu(null);
+    if (nextView === "project-detail") {
+      showSessionDraft(nextProject.id, null);
+    } else {
+      resetVisibleDraft();
+    }
+  }
+
+  function handleOpenProjectManagement(projectId: string, trigger?: HTMLElement) {
+    const targetProject = projectsRef.current.find(
+      (project) => project.id === projectId,
+    );
+    if (
+      !targetProject ||
+      shouldSkipProjectPermission(targetProject, "overview", "owner")
+    ) {
+      return;
+    }
+
+    mainViewReturnFocusRef.current =
+      trigger ??
+      (document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null);
+    mainViewReturnFocusSelectorRef.current = ".project-detail-open-management";
+    rememberCurrentDraft();
+    setSelectedProjectId(projectId);
+    setSelectedSessionId(null);
+    openProjectManagement("general");
+    setOpenActionMenu(null);
+    closeProjectPanel();
+    showSessionDraft(projectId, null);
+  }
+
+  function returnToProjectDetailFromManagement() {
+    setSelectedSessionId(null);
+    openProjectDetail();
+    mainViewReturnFocusRef.current = null;
   }
 
   // 새 프로젝트는 먼저 홈에서 자료를 받기 위해 채팅 세션 없이 만든다.
-  function createProjectFromName(baseName: string, files: Attachment[] = []) {
-    const nextProject = createProject(createUniqueProjectName(projects, baseName), [], files);
+  function createProjectFromName(baseName: string) {
+    const nextProject = createProject(createUniqueProjectName(projects, baseName));
 
     rememberCurrentDraft();
     setProjects((currentProjects) => [nextProject, ...currentProjects]);
     setIsSidebarCollapsed(false);
     setIsSidebarResizing(false);
-    setMainView("workspace");
+    navigateTo("project-setup");
     setSelectedProjectId(nextProject.id);
     setSelectedSessionId(null);
     setProjectPanelTabs([]);
@@ -5041,27 +5155,56 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     setIsProjectFileTreeResizing(true);
   }
 
-  // 지정한 프로젝트 안에 새 채팅을 항상 추가하고 그 채팅을 선택한다.
-  function handleCreateChatInProject(projectId: string) {
-	  const targetProject = projects.find((project) => project.id === projectId);
+  async function handleCompleteSetupWithoutAnalysis(projectId: string) {
+    const targetProject = projectsRef.current.find((project) => project.id === projectId);
 
     if (!targetProject || shouldSkipProjectPermission(targetProject)) {
       return;
     }
 
-    const nextSession = createEmptySession();
+    let completedAt = Date.now();
+    let completedMode: ProjectWorkspace["setupMode"] = "chat_only";
+    if (serverStatus === "online") {
+      try {
+        const apiProject = await ensureApiProject(targetProject);
+        if (typeof apiProject.apiProjectId !== "number") {
+          throw new Error("서버 프로젝트를 준비할 수 없습니다");
+        }
+        const completed = await completeServerProjectSetup(
+          apiProject.apiProjectId,
+          "chat_only",
+        );
+        const parsedCompletedAt = parsePaimTimestamp(
+          completed.setup_completed_at,
+        );
+        completedAt = Number.isFinite(parsedCompletedAt) ? parsedCompletedAt : Date.now();
+        completedMode = completed.setup_mode;
+      } catch (error) {
+        if (!isPaimApiError(error) || error.status !== 404) {
+          setDemoStatus({
+            ok: false,
+            message: getErrorMessage(error, "프로젝트 설정을 완료할 수 없습니다"),
+            projectId,
+            scope: "overview",
+          });
+          return;
+        }
+        // 구 서버는 완료 API와 setup 필드가 없으므로 로컬 완료 상태를
+        // 레거시 existing 프로젝트로 유지한다.
+      }
+    }
 
     rememberCurrentDraft();
     updateProject(projectId, (project) => ({
       ...project,
-      sessions: [nextSession, ...project.sessions],
+      setupCompletedAt: completedAt,
+      setupMode: completedMode,
     }));
-    setMainView("workspace");
+    openProjectDetail("overview");
     setSelectedProjectId(projectId);
-    setSelectedSessionId(nextSession.id);
+    setSelectedSessionId(null);
     closeProjectPanel();
-	  resetVisibleDraft();
-	  focusPrompt();
+    resetVisibleDraft();
   }
 
 	  // 자료·GitHub 탭은 필요하면 여러 개 열 수 있지만, 메모리 편집 상태는 서버 항목과
@@ -5607,10 +5750,70 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     setProjectFilePreview(null);
   }
 
+  // 상세 페이지의 자료 행은 우측 자료 도구를 실제로 열고 선택한 항목까지 이어서 보여준다.
+  function openProjectFileFromDetail(source: Attachment) {
+    const baseTab = activeProjectFileTab ?? createProjectPanelTab("files");
+    const nextPreview: ProjectFilePreview | null =
+      source.kind === "file"
+        ? {
+            id: source.id,
+            name: source.name,
+            path: source.path,
+            content: "",
+            isLoading: !source.serverOnly,
+            error: source.serverOnly
+              ? t("서버 문서는 로컬 경로가 없어 미리볼 수 없습니다")
+              : undefined,
+          }
+        : null;
+    const preparedTab: ProjectPanelTab = {
+      ...baseTab,
+      fileQuery: "",
+      filePreview: nextPreview,
+      projectSourcesMode: "tree",
+      selectedProjectSourceId: source.id,
+      view: "files",
+    };
+
+    setProjectPanelTabs((currentTabs) =>
+      currentTabs.some((tab) => tab.id === preparedTab.id)
+        ? currentTabs.map((tab) =>
+            tab.id === preparedTab.id ? preparedTab : tab,
+          )
+        : [...currentTabs, preparedTab],
+    );
+    setActiveProjectPanelTabId(preparedTab.id);
+    openProjectPanel();
+
+    if (
+      source.kind !== "file" ||
+      source.serverOnly ||
+      !source.path
+    ) {
+      return;
+    }
+
+    void invoke<string>("read_text_file", { path: source.path })
+      .then((content) => {
+        setProjectFilePreviewForTab(preparedTab.id, {
+          ...nextPreview!,
+          content,
+          isLoading: false,
+        });
+      })
+      .catch((error) => {
+        setProjectFilePreviewForTab(preparedTab.id, {
+          ...nextPreview!,
+          isLoading: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }
+
   async function handleStartGithubLogin(projectId: string) {
     const targetProject = projects.find((project) => project.id === projectId);
 
-    if (!targetProject || shouldSkipProjectPermission(targetProject, "github")) {
+    if (!targetProject || shouldSkipProjectPermission(targetProject, "github", "owner")) {
       return;
     }
     const operation = beginGithubOperation(projectId, "auth-start");
@@ -5691,7 +5894,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   async function handleStartGithubPrivateLogin(projectId: string) {
     const targetProject = projects.find((project) => project.id === projectId);
 
-    if (!targetProject || shouldSkipProjectMutation(targetProject, "github")) {
+    if (!targetProject || shouldSkipProjectMutation(targetProject, "github", "owner")) {
       return;
     }
     const operation = beginGithubOperation(projectId, "auth-start");
@@ -5762,11 +5965,11 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     if (!session) {
       return;
     }
-    if (!targetProject || shouldSkipProjectPermission(targetProject, "github")) {
+    if (!targetProject || shouldSkipProjectPermission(targetProject, "github", "owner")) {
       return;
     }
 
-    if (session.state && shouldSkipProjectMutation(targetProject, "github")) {
+    if (session.state && shouldSkipProjectMutation(targetProject, "github", "owner")) {
       return;
     }
     const operation = beginGithubOperation(projectId, "auth-check");
@@ -5926,7 +6129,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   function handleResetGithubLogin(projectId: string) {
     const targetProject = projects.find((project) => project.id === projectId);
 
-    if (!targetProject || shouldSkipProjectPermission(targetProject, "github")) {
+    if (!targetProject || shouldSkipProjectPermission(targetProject, "github", "owner")) {
       return;
     }
 
@@ -5957,11 +6160,11 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     if (!session?.accessToken && !session?.state) {
       return;
     }
-    if (!targetProject || shouldSkipProjectPermission(targetProject, "github")) {
+    if (!targetProject || shouldSkipProjectPermission(targetProject, "github", "owner")) {
       return;
     }
 
-    if (session.state && shouldSkipProjectMutation(targetProject, "github")) {
+    if (session.state && shouldSkipProjectMutation(targetProject, "github", "owner")) {
       return;
     }
     const operation = beginGithubOperation(projectId, "repo-load");
@@ -6052,11 +6255,11 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     if (!trimmedRepositoryUrl) {
       return;
     }
-    if (!targetProject || shouldSkipProjectPermission(targetProject, "github")) {
+    if (!targetProject || shouldSkipProjectPermission(targetProject, "github", "owner")) {
       return;
     }
 
-    if (session?.state && shouldSkipProjectMutation(targetProject, "github")) {
+    if (session?.state && shouldSkipProjectMutation(targetProject, "github", "owner")) {
       return;
     }
     const operation = beginGithubOperation(
@@ -6137,7 +6340,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       return;
     }
 
-    if (shouldSkipProjectMutation(project, "github")) {
+    if (shouldSkipProjectMutation(project, "github", "owner")) {
       return;
     }
     const operation = beginGithubOperation(projectId, "sync");
@@ -6305,7 +6508,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     }
     const repositoryName =
       project.githubRepository.remoteRepo ?? project.githubRepository.name;
-    if (shouldSkipProjectPermission(project, "github")) {
+    if (shouldSkipProjectPermission(project, "github", "owner")) {
       return;
     }
 
@@ -6324,7 +6527,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     }
 
     if (typeof repoId === "number") {
-      if (shouldSkipProjectMutation(project, "github")) {
+      if (shouldSkipProjectMutation(project, "github", "owner")) {
         return;
       }
 
@@ -6380,37 +6583,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       message: t("{name} 저장소 연결을 해제했습니다", { name: repositoryName }),
       projectId,
       scope: "github",
-    });
-  }
-
-  function toggleProjectActionMenu(projectId: string, event: MouseEvent<HTMLButtonElement>) {
-    event.stopPropagation();
-    setIsAccountMenuOpen(false);
-    actionMenuTriggerRef.current = event.currentTarget;
-    const position = getActionMenuPosition(event.currentTarget, ACTION_MENU_PROJECT_HEIGHT);
-
-    setOpenActionMenu((current) =>
-      current?.type === "project" && current.projectId === projectId
-        ? null
-        : { type: "project", projectId, ...position },
-    );
-  }
-
-  function handleProjectContextMenu(projectId: string, event: MouseEvent<HTMLElement>) {
-    event.preventDefault();
-    event.stopPropagation();
-    setIsAccountMenuOpen(false);
-    actionMenuTriggerRef.current = event.currentTarget.matches("button")
-      ? event.currentTarget
-      : event.currentTarget.querySelector<HTMLElement>("button");
-    setOpenActionMenu({
-      type: "project",
-      projectId,
-      ...getActionMenuPositionAtPoint(
-        event.clientX,
-        event.clientY,
-        ACTION_MENU_PROJECT_HEIGHT,
-      ),
     });
   }
 
@@ -6497,7 +6669,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
   function openAccountView(view: Extract<MainView, "profile" | "settings">) {
     mainViewReturnFocusRef.current = accountMenuTriggerRef.current;
-    setMainView(view);
+    navigateTo(view);
     setIsAccountMenuOpen(false);
     setOpenActionMenu(null);
   }
@@ -6519,47 +6691,119 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     onLogout();
   }
 
-  // 행 안에서 바로 수정하도록 프로젝트명 입력을 연다.
-  function openProjectMembers(projectId: string) {
-    const targetProject = projects.find((project) => project.id === projectId);
-    if (!targetProject || !authUser || typeof targetProject.apiProjectId !== "number") {
-      return;
-    }
-
-    const targetSessionId = targetProject.sessions[0]?.id ?? null;
-    mainViewReturnFocusRef.current = actionMenuTriggerRef.current;
-    rememberCurrentDraft();
-    setSelectedProjectId(projectId);
-    setSelectedSessionId(targetSessionId);
-    setMainView("members");
-    setOpenActionMenu(null);
-    showSessionDraft(projectId, targetSessionId);
-  }
-
-  // 행 안에서 바로 수정하도록 프로젝트명 입력을 연다.
-  function beginRenameProject(projectId: string, trigger?: HTMLElement) {
-    const targetProject = projects.find((project) => project.id === projectId);
-
+  // 상세 화면에서 로컬 프로젝트의 서버 ID까지 준비한 뒤 멤버 관리로 이동한다.
+  async function openProjectMembers(projectId: string, trigger?: HTMLElement) {
+    const targetProject = projectsRef.current.find((project) => project.id === projectId);
     if (!targetProject) {
       return;
     }
 
-    if (trigger) {
-      actionMenuTriggerRef.current = trigger;
+    if (!authUser) {
+      setDemoStatus({
+        ok: false,
+        message: "팀원 관리는 로그인된 서버 프로젝트에서 사용할 수 있습니다",
+        projectId,
+        scope: "overview",
+      });
+      return;
     }
 
-    setRenameDraft({ type: "project", projectId, value: targetProject.name });
-    setPendingDeleteProjectId(null);
+    if (serverStatus !== "online") {
+      setDemoStatus({
+        ok: false,
+        message: "서버에 연결한 뒤 팀원을 관리할 수 있습니다",
+        projectId,
+        scope: "overview",
+      });
+      return;
+    }
+
+    try {
+      const apiProject = await ensureApiProject(targetProject);
+      if (typeof apiProject.apiProjectId !== "number") {
+        throw new Error("서버 프로젝트를 준비할 수 없습니다");
+      }
+    } catch (error) {
+      setDemoStatus({
+        ok: false,
+        message: getErrorMessage(error, "팀원 관리 화면을 열 수 없습니다"),
+        projectId,
+        scope: "overview",
+      });
+      return;
+    }
+
+    const nextMembersReturnView =
+      mainViewRef.current === "project-management"
+        ? "project-management"
+        : "project-detail";
+    mainViewReturnFocusRef.current =
+      trigger ??
+      (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    mainViewReturnFocusSelectorRef.current = trigger?.closest(
+      ".project-management-page",
+    )
+      ? ".project-management-tab[data-section='members']"
+      : ".project-detail-rail-manage-members";
+    rememberCurrentDraft();
+    setSelectedProjectId(projectId);
+    setSelectedSessionId(null);
+    openMembers(nextMembersReturnView);
     setOpenActionMenu(null);
+    showSessionDraft(projectId, null);
+  }
+
+  async function renameProjectFromDetail(projectId: string, rawName: string) {
+    const targetProject = projectsRef.current.find((project) => project.id === projectId);
+    const nextName = rawName.trim();
+
+    if (
+      !targetProject ||
+      !nextName ||
+      nextName === targetProject.name ||
+      shouldSkipProjectPermission(targetProject, "overview", "owner")
+    ) {
+      return;
+    }
+
+    const previousName = targetProject.name;
+    updateProject(projectId, (project) => ({ ...project, name: nextName }));
+    await syncProjectName(projectId, nextName, previousName);
+  }
+
+  async function updateProjectDescriptionFromDetail(
+    projectId: string,
+    rawDescription: string,
+  ) {
+    const targetProject = projectsRef.current.find((project) => project.id === projectId);
+    const nextDescription = rawDescription.trim();
+
+    if (
+      !targetProject ||
+      nextDescription === (targetProject.description ?? "").trim() ||
+      shouldSkipProjectPermission(targetProject, "overview", "owner")
+    ) {
+      return;
+    }
+
+    const previousDescription = targetProject.description ?? "";
+    updateProject(projectId, (project) => ({
+      ...project,
+      description: nextDescription || undefined,
+    }));
+    await syncProjectDescription(projectId, nextDescription, previousDescription);
   }
 
   // 행 안에서 바로 수정하도록 채팅명 입력을 연다.
   function beginRenameSession(projectId: string, sessionId: string, trigger?: HTMLElement) {
-    const targetSession = projects
-      .find((project) => project.id === projectId)
-      ?.sessions.find((session) => session.id === sessionId);
+    const targetProject = projectsRef.current.find((project) => project.id === projectId);
+    const targetSession = targetProject?.sessions.find((session) => session.id === sessionId);
 
-    if (!targetSession) {
+    if (
+      !targetProject ||
+      !targetSession ||
+      shouldSkipProjectPermission(targetProject)
+    ) {
       return;
     }
 
@@ -6586,30 +6830,25 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       return;
     }
 
+    const targetProject = projectsRef.current.find(
+      (project) => project.id === renameDraft.projectId,
+    );
     const nextValue = rawValue.trim();
 
-    if (!nextValue) {
+    if (
+      !targetProject ||
+      !nextValue ||
+      shouldSkipProjectPermission(targetProject)
+    ) {
       setRenameDraft(null);
       restoreRenameTriggerFocus(restoreFocus);
       return;
     }
 
-    if (renameDraft.type === "project") {
-      const targetProject = projects.find((project) => project.id === renameDraft.projectId);
-      const previousName = targetProject?.name ?? nextValue;
-
-      updateProject(renameDraft.projectId, (project) => ({
-        ...project,
-        name: nextValue,
-      }));
-      void syncProjectName(renameDraft.projectId, nextValue, previousName);
-    } else {
-      updateSessionInProject(renameDraft.projectId, renameDraft.sessionId, (session) => ({
-        ...session,
-        title: nextValue,
-      }));
-      void syncChatSessionTitle(renameDraft.projectId, renameDraft.sessionId, nextValue);
-    }
+    updateSessionInProject(renameDraft.projectId, renameDraft.sessionId, (session) => ({
+      ...session,
+      title: nextValue,
+    }));
 
     setRenameDraft(null);
     restoreRenameTriggerFocus(restoreFocus);
@@ -6634,36 +6873,43 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     }
   }
 
-  function returnToWorkspace() {
+  function returnToPrimaryView() {
     const returnView = mainView;
-    setMainView("workspace");
+    setSelectedSessionId(null);
+    navigateTo(
+      returnView === "members" && selectedProject
+        ? membersReturnView
+        : "projects",
+    );
     window.requestAnimationFrame(() => {
       const returnTarget = mainViewReturnFocusRef.current;
       if (returnTarget?.isConnected) {
         returnTarget.focus();
+      } else if (returnView === "members" && mainViewReturnFocusSelectorRef.current) {
+        // 상세 데이터가 다시 붙으면 위 effect가 원래 관리 버튼으로 포커스를 복원한다.
       } else if (
         (returnView === "profile" || returnView === "settings") &&
         accountMenuTriggerRef.current?.isConnected
       ) {
         accountMenuTriggerRef.current.focus();
       } else {
-        promptTextareaRef.current?.focus();
+        mainViewHeadingRef.current?.focus();
       }
       mainViewReturnFocusRef.current = null;
     });
   }
 
-  // 히스토리에서 채팅 세션을 제거하고 마지막 세션이면 빈 채팅으로 남긴다.
+  // 채팅 삭제 뒤에는 빈 채팅을 만들지 않고 프로젝트 상세로 돌아간다.
   async function handleDeleteSession(
     projectId: string,
     sessionId: string,
     event: MouseEvent<HTMLButtonElement>,
   ) {
-    const targetProject = projects.find((project) => project.id === projectId);
+    const targetProject = projectsRef.current.find((project) => project.id === projectId);
 
     event.stopPropagation();
 
-    if (!targetProject) {
+    if (!targetProject || shouldSkipProjectPermission(targetProject)) {
       return;
     }
 
@@ -6675,7 +6921,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       setDemoStatus({
         kind: "warning",
         ok: false,
-        message: "한 번 더 누르면 이 채팅과 대화 기록을 삭제합니다",
+        message: "한 번 더 누르면 이 기기에 저장된 채팅과 대화 기록을 삭제합니다",
         scope: "overview",
       });
       return;
@@ -6683,34 +6929,32 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
     const targetSession = targetProject.sessions.find((session) => session.id === sessionId);
 
-    if (!targetSession || !(await deleteServerChatSession(targetProject, targetSession))) {
+    if (!targetSession) {
       return;
     }
-
     const latestProject = projectsRef.current.find((project) => project.id === projectId);
     if (!latestProject) {
       return;
     }
 
     const remainingSessions = latestProject.sessions.filter((session) => session.id !== sessionId);
-    const nextSessions = remainingSessions.length > 0 ? remainingSessions : [createEmptySession()];
-    const shouldMoveSelection =
+    const wasSelected =
       selectedProjectIdRef.current === projectId &&
-      (sessionId === selectedSessionIdRef.current ||
-        !nextSessions.some((session) => session.id === selectedSessionIdRef.current));
+      sessionId === selectedSessionIdRef.current;
 
     updateProject(projectId, (project) => ({
       ...project,
-      sessions: nextSessions,
+      sessions: remainingSessions,
     }));
 
-    if (shouldMoveSelection) {
-      setSelectedSessionId(nextSessions[0]?.id ?? null);
+    if (wasSelected) {
+      setSelectedSessionId(null);
+      openProjectDetail("overview");
       if (pendingProjectId === projectId && pendingSessionId === sessionId) {
         cancelActiveQueryForProject(projectId);
       }
       forgetSessionDraft(projectId, sessionId);
-      showSessionDraft(projectId, nextSessions[0]?.id ?? null);
+      showSessionDraft(projectId, null);
     } else {
       forgetSessionDraft(projectId, sessionId);
     }
@@ -6747,28 +6991,18 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       return;
     }
 
-    const nextSession: ChatSession = {
-      ...createEmptySession(),
-      title: "Project Briefing",
-      messages: [],
-    };
     const requestStartedAt = Date.now();
     const { controller, timeoutId } = beginActiveQuery();
 
-    updateProject(project.id, (currentProject) => ({
-      ...currentProject,
-      sessions: [nextSession, ...currentProject.sessions],
-    }));
     setSelectedProjectId(project.id);
-    setSelectedSessionId(nextSession.id);
+    setSelectedSessionId(null);
     closeProjectPanel();
     setIsSending(true);
     setPendingProjectId(project.id);
-    setPendingSessionId(nextSession.id);
+    setPendingSessionId(null);
     setThinkingStartedAt(requestStartedAt);
     rememberCurrentDraft();
     resetVisibleDraft();
-    focusPrompt();
 
     try {
       // Project creation is a mutation: always receive and persist its server id,
@@ -6781,42 +7015,36 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         throw new DOMException("Query cancelled", "AbortError");
       }
 
-      const response = await fetchProjectQuery(
+      await fetchProjectQuery(
         apiProject.apiProjectId,
         PROJECT_BRIEFING_QUESTION,
-        [],
-        [],
-        controller.signal,
+        {
+          setupMode: "analyzed",
+          signal: controller.signal,
+        },
       );
-      const thinkingSeconds = Math.max(1, Math.ceil((Date.now() - requestStartedAt) / 1000));
 
-      updateSessionInProject(project.id, nextSession.id, (session) => ({
-        ...session,
-        messages: [
-          ...session.messages,
-          {
-            id: createId("assistant"),
-            role: "assistant",
-            content: response.answer,
-            sources: response.sources?.filter(Boolean),
-            thinkingSeconds,
-          },
-        ],
+      updateProject(project.id, (currentProject) => ({
+        ...currentProject,
+        setupCompletedAt: Date.now(),
+        setupMode: "analyzed",
       }));
+      setSelectedProjectId(project.id);
+      setSelectedSessionId(null);
+      openProjectDetail("overview");
+      resetVisibleDraft();
     } catch (error) {
       if (!isUserCancelledQuery(error, controller)) {
-        updateSessionInProject(project.id, nextSession.id, (session) => ({
-          ...session,
-          messages: [
-            ...session.messages,
-            {
-              id: createId("error"),
-              role: "error",
-              content: t(getQueryErrorMessage(error)),
-            },
-          ],
-        }));
+        setDemoStatus({
+          ok: false,
+          message: getQueryErrorMessage(error),
+          projectId: project.id,
+          scope: "overview",
+        });
       }
+      setSelectedSessionId(null);
+      navigateTo("project-setup");
+      resetVisibleDraft();
     } finally {
       if (finishActiveQuery(controller, timeoutId)) {
         setIsSending(false);
@@ -6837,7 +7065,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     setProjectDeltaBanner(null);
   }
 
-  async function handleRequestProjectDeltaBriefing() {
+  function handleRequestProjectDeltaBriefing() {
     if (
       !selectedProject ||
       !selectedProjectDelta ||
@@ -6853,72 +7081,25 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     }
 
     const targetProjectId = selectedProject.id;
-    let targetSessionId = selectedSession?.id ?? null;
+    const since = selectedProjectDelta.since;
+    const question =
+      settings.language === "ko"
+        ? `지난 확인 시점(${since}) 이후 프로젝트에서 달라진 점을 진행, 신규, 긴급 순서로 브리핑해줘.`
+        : `Brief me on what changed in this project since ${since}, ordered by progress, new items, and urgency.`;
 
-    if (!targetSessionId) {
-      const nextSession = createEmptySession();
-      targetSessionId = nextSession.id;
-      updateProject(targetProjectId, (project) => ({
-        ...project,
-        sessions: [nextSession, ...project.sessions],
-      }));
-      setSelectedSessionId(nextSession.id);
-    }
-
-    const requestStartedAt = Date.now();
-    const { controller, timeoutId } = beginActiveQuery();
-    setIsSending(true);
-    setPendingProjectId(targetProjectId);
-    setPendingSessionId(targetSessionId);
-    setThinkingStartedAt(requestStartedAt);
-    focusPrompt();
-
-    try {
-      const response = await fetchProjectDeltaBriefing(
-        selectedProject.apiProjectId,
-        selectedProjectDelta.since,
-        controller.signal,
-      );
-      const thinkingSeconds = Math.max(1, Math.ceil((Date.now() - requestStartedAt) / 1000));
-
-      updateSessionInProject(targetProjectId, targetSessionId, (session) => ({
-        ...session,
-        messages: [
-          ...session.messages,
-          {
-            id: createId("assistant"),
-            role: "assistant",
-            content: response.answer,
-            sources: response.sources?.filter(Boolean),
-            thinkingSeconds,
-          },
-        ],
-      }));
-      ignoredProjectDeltaRef.current[targetProjectId] = selectedProjectDelta.since;
-      markProjectSeen(targetProjectId);
-      setProjectDeltaBanner(null);
-    } catch (error) {
-      if (!isUserCancelledQuery(error, controller)) {
-        updateSessionInProject(targetProjectId, targetSessionId, (session) => ({
-          ...session,
-          messages: [
-            ...session.messages,
-            {
-              id: createId("error"),
-              role: "error",
-              content: t(getQueryErrorMessage(error)),
-            },
-          ],
-        }));
-      }
-    } finally {
-      if (finishActiveQuery(controller, timeoutId)) {
-        setIsSending(false);
-        setPendingProjectId(null);
-        setPendingSessionId(null);
-        setThinkingStartedAt(null);
-      }
-    }
+    void handleSubmit(undefined, {
+      forceNewSession: true,
+      intent: "delta_briefing",
+      preserveCurrentDraft: true,
+      question,
+      sessionTitle: settings.language === "ko" ? "변경사항 브리핑" : "Change briefing",
+      since,
+      onSuccess: () => {
+        ignoredProjectDeltaRef.current[targetProjectId] = since;
+        markProjectSeen(targetProjectId);
+        setProjectDeltaBanner(null);
+      },
+    });
   }
 
   // 프로젝트 삭제 후에는 남은 프로젝트로 선택을 옮기고, 마지막이면 빈 상태로 둔다.
@@ -6931,6 +7112,10 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       return;
     }
 
+    if (shouldSkipProjectPermission(targetProject, "overview", "owner")) {
+      return;
+    }
+
     if (pendingDeleteProjectId !== projectId) {
       setPendingDeleteProjectId(projectId);
       setDemoStatus({
@@ -6938,7 +7123,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         ok: false,
         message:
           typeof targetProject.apiProjectId === "number"
-            ? "한 번 더 누르면 서버의 문서·메모리·채팅까지 삭제됩니다"
+            ? "한 번 더 누르면 서버 프로젝트 자료와 이 기기의 채팅을 삭제합니다"
             : "한 번 더 누르면 로컬 프로젝트를 삭제합니다",
         scope: "overview",
       });
@@ -6978,7 +7163,9 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     setOpenActionMenu(null);
 
     if (wasSelected) {
-      showSessionDraft(nextState.selectedProjectId ?? "", nextState.selectedSessionId);
+      setSelectedSessionId(null);
+      navigateTo("projects");
+      showSessionDraft(nextState.selectedProjectId ?? "", null);
     }
   }
 
@@ -6989,8 +7176,8 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     });
   }
 
-  function getSessionDraftKey(projectId: string, sessionId: string) {
-    return `${projectId}\u0000${sessionId}`;
+  function getSessionDraftKey(projectId: string, sessionId: string | null) {
+    return `${projectId}\u0000${sessionId ?? "__project_detail__"}`;
   }
 
   function handlePromptChange(nextPrompt: string) {
@@ -6998,13 +7185,14 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
     const projectId = selectedProjectIdRef.current;
     const sessionId = selectedSessionIdRef.current;
-    if (!projectId || !sessionId) {
+    if (!projectId || (!sessionId && mainViewRef.current !== "project-detail")) {
       return;
     }
 
     const key = getSessionDraftKey(projectId, sessionId);
     if (!nextPrompt.trim() && attachments.length === 0) {
       sessionDraftsRef.current.delete(key);
+      saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
       return;
     }
 
@@ -7012,11 +7200,16 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       attachments: [...attachments],
       prompt: nextPrompt,
     });
+    saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
   }
 
-  // 세션을 떠나도 작성 중인 텍스트와 첨부가 남도록 메모리 안에 세션별로 보관한다.
+  // 상세 composer와 각 채팅을 떠나도 작성 중인 텍스트·첨부가 남도록
+  // 프로젝트/세션별 초안을 메모리에 보관한다.
   function rememberCurrentDraft() {
-    if (!selectedProjectId || !selectedSessionId) {
+    if (
+      !selectedProjectId ||
+      (!selectedSessionId && mainViewRef.current !== "project-detail")
+    ) {
       return;
     }
 
@@ -7025,14 +7218,16 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     const key = getSessionDraftKey(selectedProjectId, selectedSessionId);
     if (!currentPrompt.trim() && attachments.length === 0) {
       sessionDraftsRef.current.delete(key);
+      saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
       return;
     }
 
     sessionDraftsRef.current.set(key, { attachments: [...attachments], prompt: currentPrompt });
+    saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
   }
 
   function showSessionDraft(projectId: string, sessionId: string | null) {
-    const draft = sessionId
+    const draft = projectId
       ? sessionDraftsRef.current.get(getSessionDraftKey(projectId, sessionId))
       : undefined;
 
@@ -7040,17 +7235,23 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     setAttachments(draft ? [...draft.attachments] : []);
   }
 
-  function forgetSessionDraft(projectId: string, sessionId: string) {
+  function forgetSessionDraft(projectId: string, sessionId: string | null) {
     sessionDraftsRef.current.delete(getSessionDraftKey(projectId, sessionId));
+    saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
   }
 
   function forgetProjectDrafts(projectId: string) {
     const prefix = `${projectId}\u0000`;
+    let didChange = false;
     Array.from(sessionDraftsRef.current.keys()).forEach((key) => {
       if (key.startsWith(prefix)) {
         sessionDraftsRef.current.delete(key);
+        didChange = true;
       }
     });
+    if (didChange) {
+      saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
+    }
   }
 
   function resetVisibleDraft() {
@@ -7060,7 +7261,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
   function handleSelectSession(projectId: string, sessionId: string) {
     rememberCurrentDraft();
-    setMainView("workspace");
+    navigateTo("chat");
     setSelectedProjectId(projectId);
     setSelectedSessionId(sessionId);
     showSessionDraft(projectId, sessionId);
@@ -7083,7 +7284,10 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   }
 
   async function handlePickFiles() {
-    if (!selectedProject || !selectedSession) {
+    if (
+      !selectedProject ||
+      (!selectedSession && mainView !== "project-detail")
+    ) {
       return;
     }
     if (!capabilities) {
@@ -7112,7 +7316,11 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
   // 여러 파일 경로를 현재 초안 첨부 목록에 추가한다.
   async function appendAttachmentPaths(paths: string[]) {
-    if (!selectedProject || !selectedSession || paths.length === 0) {
+    if (
+      !selectedProject ||
+      (!selectedSession && mainView !== "project-detail") ||
+      paths.length === 0
+    ) {
       return;
     }
 
@@ -7233,11 +7441,16 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     );
   }
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const trimmedPrompt = prompt.trim();
+  async function handleSubmit(
+    event?: FormEvent<HTMLFormElement>,
+    options: SubmitQuestionOptions = {},
+  ) {
+    event?.preventDefault();
+    const hasQuestionOverride = typeof options.question === "string";
+    const trimmedPrompt = (options.question ?? prompt).trim();
+    const messageAttachments = hasQuestionOverride ? [] : attachments;
 
-    if (!selectedProject || !selectedSession || (!trimmedPrompt && attachments.length === 0) || isSending) {
+    if (!selectedProject || (!trimmedPrompt && messageAttachments.length === 0) || isSending) {
       return;
     }
 
@@ -7254,15 +7467,72 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       return;
     }
 
+    const sourceSessionId = selectedSession?.id ?? null;
+    if (options.preserveCurrentDraft) {
+      rememberCurrentDraft();
+    }
+
+    let targetSession = options.forceNewSession ? null : selectedSession;
+    if (!targetSession) {
+      if (
+        (!options.forceNewSession && mainView !== "project-detail") ||
+        !isProjectSetupComplete(selectedProject)
+      ) {
+        return;
+      }
+
+      const initialSessionTitle = (
+        options.sessionTitle ||
+        trimmedPrompt ||
+        messageAttachments[0]?.name ||
+        (settings.language === "ko" ? "새 채팅" : "New chat")
+      ).slice(0, 32);
+      targetSession = createEmptySession(initialSessionTitle);
+      const nextSession = targetSession;
+      flushSync(() => {
+        updateProject(selectedProject.id, (project) => ({
+          ...project,
+          sessions: [nextSession, ...project.sessions],
+        }));
+        navigateTo("chat");
+        setSelectedProjectId(selectedProject.id);
+        setSelectedSessionId(nextSession.id);
+      });
+    }
+
     const targetProjectId = selectedProject.id;
-    const targetSessionId = selectedSession.id;
-    const messageAttachments = attachments;
+    const targetSessionId = targetSession.id;
     const question = trimmedPrompt || "첨부 파일을 확인해줘";
     const nextSessionTitle =
-      selectedSession.title === "New Chat"
+      options.sessionTitle ||
+      (targetSession.title === "New Chat"
         ? (trimmedPrompt || messageAttachments[0]?.name || "File attachment").slice(0, 32)
-        : selectedSession.title;
-    const history = createQueryHistory(selectedSession.messages);
+        : targetSession.title);
+    const previousMessage =
+      targetSession.messages[targetSession.messages.length - 2];
+    const previousError =
+      targetSession.messages[targetSession.messages.length - 1];
+    const latestMessage =
+      targetSession.messages[targetSession.messages.length - 1];
+    const isRetryingPendingMessageAfterError =
+      previousMessage?.role === "user" &&
+      previousMessage.content === question &&
+      previousError?.role === "error";
+    const isRetryingPendingMessageAfterCancellation =
+      latestMessage?.role === "user" &&
+      latestMessage.content === question;
+    const queryMessageAttachments = isRetryingPendingMessageAfterError
+      ? previousMessage.attachments ?? []
+      : isRetryingPendingMessageAfterCancellation
+        ? latestMessage.attachments ?? []
+        : messageAttachments;
+    const history = createQueryHistory(
+      isRetryingPendingMessageAfterError
+        ? targetSession.messages.slice(0, -2)
+        : isRetryingPendingMessageAfterCancellation
+          ? targetSession.messages.slice(0, -1)
+        : targetSession.messages,
+    );
     const userMessage: Message = {
       id: createId("user"),
       role: "user",
@@ -7281,16 +7551,25 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     updateSessionInProject(targetProjectId, targetSessionId, (session) => ({
       ...session,
       title: nextSessionTitle,
-      messages: [...session.messages, userMessage],
+      messages: isRetryingPendingMessageAfterError
+        ? session.messages.slice(0, -1)
+        : isRetryingPendingMessageAfterCancellation
+          ? session.messages
+          : [...session.messages, userMessage],
     }));
     forgetSessionDraft(targetProjectId, targetSessionId);
+    if (!options.preserveCurrentDraft) {
+      forgetSessionDraft(targetProjectId, sourceSessionId);
+    }
     resetVisibleDraft();
 
     try {
       let queryAttachments: ApiQueryAttachment[] = [];
-      if (messageAttachments.length > 0) {
+      if (queryMessageAttachments.length > 0) {
         if (canUseTauriDialog()) {
-          queryAttachments = await Promise.all(messageAttachments.map(readQueryAttachment));
+          queryAttachments = await Promise.all(
+            queryMessageAttachments.map(readQueryAttachment),
+          );
           const totalBytes = queryAttachments.reduce(
             (total, attachment) => total + getBase64ByteLength(attachment.content_base64),
             0,
@@ -7317,9 +7596,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         }
       }
 
-      // Server ids created by a POST must be collected even when the user stops.
-      // Only the final query request is abortable; otherwise a commit-after-abort
-      // response could be lost and create duplicate projects or sessions later.
+      // 프로젝트 생성은 서버 mutation이지만 개인 채팅과 history는 로컬에만 둔다.
       const apiProject = await ensureApiProject(selectedProject);
 
       if (typeof apiProject.apiProjectId !== "number") {
@@ -7329,32 +7606,16 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         throw new DOMException("Query cancelled", "AbortError");
       }
 
-      const serverSessionId = await ensureServerChatSession(
-        targetProjectId,
-        selectedSession,
-        apiProject.apiProjectId,
-        nextSessionTitle,
-      );
-
-      if (selectedSession.serverSessionId && nextSessionTitle !== selectedSession.title) {
-        void syncChatSessionTitle(targetProjectId, targetSessionId, nextSessionTitle);
-      }
-
-      updateSessionInProject(targetProjectId, targetSessionId, (session) => ({
-        ...session,
-        serverSessionId,
-        title: nextSessionTitle,
-      }));
-      if (controller.signal.aborted) {
-        throw new DOMException("Query cancelled", "AbortError");
-      }
-
       const response = await fetchProjectQuery(
         apiProject.apiProjectId,
         question,
-        history,
-        queryAttachments,
-        controller.signal,
+        {
+          attachments: queryAttachments,
+          history,
+          intent: options.intent,
+          signal: controller.signal,
+          since: options.since,
+        },
       );
       const thinkingSeconds = Math.max(1, Math.ceil((Date.now() - requestStartedAt) / 1000));
 
@@ -7371,6 +7632,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
           },
         ],
       }));
+      options.onSuccess?.();
     } catch (error) {
       if (!isUserCancelledQuery(error, controller)) {
         updateSessionInProject(targetProjectId, targetSessionId, (session) => ({
@@ -7425,12 +7687,16 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     _members: ProjectMember[],
     currentRole: ProjectRole | null,
   ) {
+    const localProjectId = selectedProject?.id;
     const apiProjectId = selectedProject?.apiProjectId;
-    if (typeof apiProjectId !== "number") {
+    if (!localProjectId || typeof apiProjectId !== "number") {
       return;
     }
 
-    setProjectRolesByApiId((current) => ({ ...current, [apiProjectId]: currentRole }));
+    updateProject(localProjectId, (project) => ({
+      ...project,
+      currentUserRole: currentRole,
+    }));
   }
 
   function handleLeaveSelectedProject() {
@@ -7445,15 +7711,16 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     const nextState = createProjectState(remainingProjects, null, null);
     applyProjectState(nextState);
     forgetProjectDrafts(selectedProject.id);
-    setMainView("workspace");
+    navigateTo("projects");
     setOpenActionMenu(null);
-    showSessionDraft(nextState.selectedProjectId ?? "", nextState.selectedSessionId);
+    showSessionDraft(nextState.selectedProjectId ?? "", null);
     mainViewReturnFocusRef.current = null;
+    mainViewReturnFocusSelectorRef.current = null;
     window.requestAnimationFrame(() => {
       const focusTarget =
         promptTextareaRef.current ??
         mainViewHeadingRef.current ??
-        document.querySelector<HTMLElement>(".project-start-button, .project-create-trigger");
+        document.querySelector<HTMLElement>(".project-create-trigger, .portfolio-create-button");
       focusTarget?.focus({ preventScroll: true });
     });
   }
@@ -7471,7 +7738,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
               icon={<ArrowLeft size={15} />}
               isIconOnly
               label={t("멤버 관리에서 돌아가기")}
-              onClick={returnToWorkspace}
+              onClick={returnToPrimaryView}
               tooltip={t("돌아가기")}
               variant="ghost"
             />
@@ -7501,6 +7768,17 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     );
   }
 
+  function renderProjectPortfolio() {
+    return (
+      <ProjectPortfolioPage
+        language={settings.language}
+        localProjects={projects}
+        onCreateProject={() => createProjectFromName(createNextProjectName(projects))}
+        onOpenProject={handleOpenProjectDetail}
+      />
+    );
+  }
+
   function renderProfilePage() {
     return (
       <WorkspacePageLayout
@@ -7514,7 +7792,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
               icon={<ArrowLeft size={15} />}
               isIconOnly
               label={t("프로필에서 돌아가기")}
-              onClick={returnToWorkspace}
+              onClick={returnToPrimaryView}
               tooltip={t("돌아가기")}
               variant="ghost"
             />
@@ -7524,9 +7802,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
           </header>
 
           <section className="profile-identity-card" aria-label={t("계정 정보")}>
-            <span aria-hidden="true" className="account-avatar profile-avatar">
-              {accountInitials}
-            </span>
+            <AccountAvatar className="profile-avatar" user={authUser} />
             <div className="profile-identity-copy">
               <h2>{accountDisplayName}</h2>
               <p>{accountEmail}</p>
@@ -7585,7 +7861,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
               icon={<ArrowLeft size={15} />}
               isIconOnly
               label={t("설정에서 돌아가기")}
-              onClick={returnToWorkspace}
+              onClick={returnToPrimaryView}
               tooltip={t("돌아가기")}
               variant="ghost"
             />
@@ -7819,7 +8095,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     );
   }
 
-  function renderProjectHomeMemorySummary() {
+  function renderProjectSetupMemorySummary() {
     if (!selectedProject) {
       return null;
     }
@@ -7827,16 +8103,16 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     return (
       <>
         <div>
-          <p className="project-home-slots-title">{t("추출될 항목")}</p>
-          <p className="project-home-slots-hint">
+          <p className="project-setup-slots-title">{t("추출될 항목")}</p>
+          <p className="project-setup-slots-hint">
             {canOpenProjectMemory
               ? t("서버 프로젝트 메모리 개수를 표시합니다")
               : t("자료 업로드 후 서버 메모리 개수를 표시합니다")}
           </p>
         </div>
-        <div className="project-home-slot-list">
+        <div className="project-setup-slot-list">
           <div
-            className="project-home-slot"
+            className="project-setup-slot"
             data-kind="action"
             data-state={getProjectMemorySlotState(
               canOpenProjectMemory,
@@ -7850,7 +8126,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
             </strong>
           </div>
           <div
-            className="project-home-slot"
+            className="project-setup-slot"
             data-kind="decision"
             data-state={getProjectMemorySlotState(
               canOpenProjectMemory,
@@ -7864,7 +8140,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
             </strong>
           </div>
           <div
-            className="project-home-slot"
+            className="project-setup-slot"
             data-kind="issue"
             data-state={getProjectMemorySlotState(
               canOpenProjectMemory,
@@ -7878,7 +8154,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
             </strong>
           </div>
           <div
-            className="project-home-slot"
+            className="project-setup-slot"
             data-kind="risk"
             data-state={getProjectMemorySlotState(
               canOpenProjectMemory,
@@ -7892,7 +8168,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
             </strong>
           </div>
         </div>
-        <p className="project-home-slots-foot">
+        <p className="project-setup-slots-foot">
           {t("업로드와 분석 결과가 서버에 반영되면 자동으로 갱신됩니다.")}
         </p>
       </>
@@ -8004,7 +8280,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
           {isMac && sidebarToggleControl ? (
             <div className="app-chrome-sidebar-control">{sidebarToggleControl}</div>
           ) : null}
-          {mainView === "workspace" && selectedSession ? (
+          {mainView === "chat" && selectedSession ? (
             <div className="chat-context-bar" aria-label={t("현재 채팅 정보")}>
               <div className="chat-context-primary">
                 <h1
@@ -8039,6 +8315,15 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                   size="sm"
                   variant="ghost"
                 />
+                <Button
+                  aria-current={mainView === "projects" ? "page" : undefined}
+                  className="project-portfolio-trigger"
+                  icon={<FolderOpen size={15} />}
+                  label={t("전체 프로젝트")}
+                  onClick={handleOpenProjectPortfolio}
+                  size="sm"
+                  variant="ghost"
+                />
               </nav>
             ) : null}
             {hasProjects ? (
@@ -8046,7 +8331,13 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
               <h2>{t("프로젝트")}</h2>
               <div className="project-tree-list" role="list">
                 {projects.map((project) => {
-                  const isActiveProject = project.id === selectedProjectId;
+                  // Home에서는 전역 "전체 프로젝트"만 선택 상태로 둔다.
+                  // 프로젝트/채팅 선택 표시는 실제 프로젝트 맥락 화면에서만 노출한다.
+                  const isActiveProject =
+                    (isPrimaryProjectContext || mainView === "members") &&
+                    project.id === selectedProjectId;
+                  const isProjectReady = isProjectSetupComplete(project);
+                  const isOwnerProject = projectHasRole(project, "owner");
 
                   return (
                     <div
@@ -8056,90 +8347,33 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                       key={project.id}
                       role="listitem"
                     >
-                      <div
-                        className="project-row"
-                        onContextMenu={(event) => handleProjectContextMenu(project.id, event)}
-                      >
+                      <div className="project-row">
                         <div className="project-title">
-                          {renameDraft?.type === "project" &&
-                          renameDraft.projectId === project.id ? (
-                            <div className="project-item project-rename-editor">
-                              <FolderOpen aria-hidden="true" size={14} />
-                              <TextInput
-                                className="rename-input"
-                                hasAutoFocus
-                                isLabelHidden
-                                label={t("프로젝트 이름 변경")}
-                                onBlur={(event) =>
-                                  commitRenameDraft((event.target as HTMLInputElement).value)
-                                }
-                                onChange={updateRenameDraftValue}
-                                onClick={(event) => event.stopPropagation()}
-                                onFocus={(event) =>
-                                  (event.target as HTMLInputElement).select()
-                                }
-                                onKeyDown={handleRenameKeyDown}
-                                size="sm"
-                                value={renameDraft.value}
-                                width="100%"
-                              />
-                            </div>
-                          ) : (
-                            <Button
-                              aria-current={isActiveProject ? "page" : undefined}
-                              className="project-item"
-                              data-active={isActiveProject ? "true" : undefined}
-                              data-project-id={project.id}
-                              data-project-name={project.name}
-                              icon={<FolderOpen size={14} />}
-                              label={project.name}
-                              onClick={() => handleSelectProject(project.id)}
-                              onContextMenu={(event) =>
-                                handleProjectContextMenu(project.id, event)
-                              }
-                              tooltip={project.name}
-                              variant="ghost"
-                            >
-                              <span className="project-name">{project.name}</span>
-                            </Button>
-                          )}
+                          <Button
+                            aria-current={isActiveProject ? "page" : undefined}
+                            className="project-item"
+                            data-active={isActiveProject ? "true" : undefined}
+                            data-project-id={project.id}
+                            data-project-name={project.name}
+                            endContent={
+                              isOwnerProject ? (
+                                <span className="project-owner-badge" data-role="owner">
+                                  Owner
+                                </span>
+                              ) : undefined
+                            }
+                            icon={<FolderOpen size={14} />}
+                            label={isOwnerProject ? `${project.name}, Owner` : project.name}
+                            onClick={() => handleOpenProjectDetail(project.id)}
+                            tooltip={project.name}
+                            variant="ghost"
+                          >
+                            <span className="project-name">{project.name}</span>
+                          </Button>
                         </div>
-                        {isActiveProject ? (
-                          <div className="project-actions">
-                            <IconButton
-                              className="project-chat-create-button"
-                              icon={<Plus size={13} />}
-                              isDisabled={!canMutateSelectedProject}
-                              label={t("{name}에 새 채팅 만들기", { name: project.name })}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                handleCreateChatInProject(project.id);
-                              }}
-                              tooltip={t("{name}에 새 채팅 만들기", {
-                                name: project.name,
-                              })}
-                              variant="ghost"
-                            />
-                            <IconButton
-                              aria-expanded={
-                                openActionMenu?.type === "project" &&
-                                openActionMenu.projectId === project.id
-                              }
-                              aria-haspopup="menu"
-                              className="project-action-menu-button"
-                              icon={<Ellipsis size={14} />}
-                              label={t("{name} 메뉴", { name: project.name })}
-                              onClick={(event) =>
-                                toggleProjectActionMenu(project.id, event)
-                              }
-                              tooltip={t("{name} 메뉴", { name: project.name })}
-                              variant="ghost"
-                            />
-                          </div>
-                        ) : null}
                       </div>
 
-                      {isActiveProject ? (
+                      {isActiveProject && isProjectReady ? (
                         <div className="project-sessions" role="list">
                           {project.sessions.map((session) => (
                             <div
@@ -8157,7 +8391,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                               renameDraft.projectId === project.id &&
                               renameDraft.sessionId === session.id ? (
                                 <div className="history-item history-rename-editor">
-                                  <MessageSquare size={13} />
                                   <TextInput
                                     className="rename-input"
                                     hasAutoFocus
@@ -8191,7 +8424,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                                       {formatRelativeAge(session.createdAt, settings.language)}
                                     </small>
                                   }
-                                  icon={<MessageSquare size={13} />}
                                   label={t(session.title)}
                                   onClick={() =>
                                     handleSelectSession(project.id, session.id)
@@ -8238,9 +8470,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                 children: <span className="sidebar-account-name">{accountDisplayName}</span>,
                 className: "sidebar-account-button",
                 icon: (
-                  <span aria-hidden="true" className="account-avatar sidebar-account-avatar">
-                    {accountInitials}
-                  </span>
+                  <AccountAvatar className="sidebar-account-avatar" user={authUser} />
                 ),
                 isIconOnly: isSidebarCollapsedForLayout,
                 label: t("{name} 계정 메뉴", { name: accountDisplayName }),
@@ -8258,9 +8488,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
               placement="above"
             >
               <div className="account-menu-identity" role="presentation">
-                <span aria-hidden="true" className="account-avatar account-menu-avatar">
-                  {accountInitials}
-                </span>
+                <AccountAvatar className="account-menu-avatar" user={authUser} />
                 <span className="account-menu-identity-copy">
                   <strong>{accountDisplayName}</strong>
                   <small>{accountEmail}</small>
@@ -8316,40 +8544,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
             role="menu"
             style={{ top: openActionMenu.top, left: openActionMenu.left }}
           >
-            {openActionMenu.type === "project" ? (
-              <>
-                <Button
-                  data-action="rename-project"
-                  isDisabled={!canMutateActionMenuProject}
-                  label={t("Name change")}
-                  onClick={() => beginRenameProject(actionMenuProject.id)}
-                  role="menuitem"
-                  size="sm"
-                  variant="ghost"
-                />
-                {authUser && typeof actionMenuProject.apiProjectId === "number" ? (
-                  <Button
-                    data-action="manage-project-members"
-                    icon={<Users size={14} />}
-                    label={t("멤버 관리")}
-                    onClick={() => openProjectMembers(actionMenuProject.id)}
-                    role="menuitem"
-                    size="sm"
-                    variant="ghost"
-                  />
-                ) : null}
-                <Button
-                  className="danger"
-                  data-action="delete-project"
-                  isDisabled={!canDeleteActionMenuProject || isActionMenuProjectQueryPending}
-                  label={pendingDeleteProjectId === actionMenuProject.id ? t("Delete again") : t("Delete")}
-                  onClick={(event) => void handleDeleteProject(actionMenuProject.id, event)}
-                  role="menuitem"
-                  size="sm"
-                  variant="destructive"
-                />
-              </>
-            ) : actionMenuSession ? (
+            {actionMenuSession ? (
               <>
                 <Button
                   data-action="rename-session"
@@ -8387,7 +8582,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         className="chat"
         data-notice-count={noticeCount > 0 ? String(noticeCount) : undefined}
         data-empty-chat={
-          mainView === "workspace" && selectedSession?.messages.length === 0 ? "true" : undefined
+          mainView === "chat" && selectedSession?.messages.length === 0 ? "true" : undefined
         }
         isScrollable={false}
         inert={shouldInertBackgroundForProjectPanel}
@@ -8477,7 +8672,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                 })}
               />
             ) : null}
-            {selectedProject?.serverMissing ? (
+            {isPrimaryProjectContext && selectedProject?.serverMissing ? (
               <Banner
                 className="notice"
                 container="card"
@@ -8512,23 +8707,118 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
           renderProfilePage()
         ) : mainView === "members" ? (
           renderMembersPage()
-        ) : selectedSession ? (
+        ) : mainView === "projects" ? (
+          renderProjectPortfolio()
+        ) : mainView === "project-management" &&
+          selectedProject &&
+          isSelectedProjectOwner ? (
+          <Suspense fallback={<PanelLoadingState label={t("프로젝트 관리 불러오는 중")} />}>
+            <LazyProjectManagementPage
+              activeSection={projectManagementSection}
+              isProjectDeleteConfirming={
+                pendingDeleteProjectId === selectedProject.id
+              }
+              language={settings.language}
+              onBack={returnToProjectDetailFromManagement}
+              onDeleteProject={
+                canDeleteSelectedProject
+                  ? (event) =>
+                      handleDeleteProject(selectedProject.id, event)
+                  : undefined
+              }
+              onManageMembers={(trigger) =>
+                void openProjectMembers(selectedProject.id, trigger)
+              }
+              onOpenProjectGithub={() => {
+                if (
+                  !shouldSkipProjectPermission(
+                    selectedProject,
+                    "overview",
+                    "owner",
+                  )
+                ) {
+                  openProjectPanelTool("github");
+                  openProjectPanel();
+                }
+              }}
+              onRenameProject={(name) =>
+                renameProjectFromDetail(selectedProject.id, name)
+              }
+              onSectionChange={setProjectManagementSection}
+              onUpdateProjectDescription={(description) =>
+                updateProjectDescriptionFromDetail(
+                  selectedProject.id,
+                  description,
+                )
+              }
+              project={selectedProject}
+            />
+          </Suspense>
+        ) : mainView === "project-detail" && selectedProject ? (
+          <Suspense fallback={<PanelLoadingState label={t("프로젝트 상세 불러오는 중")} />}>
+            <LazyProjectDetailPage
+              activeTab={projectDetailTab}
+              composerAttachments={attachments}
+              composerDisabledMessage={selectedProjectReadOnlyReason}
+              composerPrompt={prompt}
+              currentUserId={authUser?.id ?? null}
+              isComposerSending={isSending}
+              key={selectedProject.id}
+              language={settings.language}
+              onAddProjectFiles={
+                canMutateSelectedProject
+                  ? () => void handleOpenProjectFiles(selectedProject.id)
+                  : undefined
+              }
+              onAddProjectFolder={
+                canMutateSelectedProject
+                  ? () => void handleOpenProjectDirectory(selectedProject.id)
+                  : undefined
+              }
+              onBack={handleOpenProjectPortfolio}
+              onComposerPickFiles={
+                canMutateSelectedProject && capabilities
+                  ? () => void handlePickFiles()
+                  : undefined
+              }
+              onComposerPromptChange={handlePromptChange}
+              onComposerRemoveAttachment={removeAttachment}
+              onComposerSubmit={() => handleSubmit()}
+              onDeleteProjectFile={
+                canMutateSelectedProject
+                  ? (file) => handleDeleteProjectFile(selectedProject.id, file)
+                  : undefined
+              }
+              onOpenGithub={() => {
+                openProjectPanelTool("github");
+                openProjectPanel();
+              }}
+              onManageMembers={(trigger) =>
+                void openProjectMembers(selectedProject.id, trigger)
+              }
+              onOpenManagement={
+                isSelectedProjectOwner
+                  ? (trigger) =>
+                      handleOpenProjectManagement(selectedProject.id, trigger)
+                  : undefined
+              }
+              onOpenProjectFile={openProjectFileFromDetail}
+              onOpenProjectFilesManager={() => {
+                openProjectPanelTool("files");
+                openProjectPanel();
+              }}
+              onTabChange={setProjectDetailTab}
+              memoryItems={selectedProjectMemoryItems}
+              project={selectedProject}
+              projectRole={
+                isSelectedProjectOwner ? "owner" : selectedProjectRole
+              }
+              refreshRevision={postSyncRefreshRevision}
+            />
+          </Suspense>
+        ) : mainView === "chat" && selectedSession ? (
           <>
             {selectedSession.messages.length === 0 ? (
-              isProjectBriefingPending ? (
-                <div className="chat-empty chat-analysis-pending">
-                  <div className="analysis-progress">
-                    <Spinner aria-label={t("프로젝트 분석 중")} shade="subtle" size="md" />
-                    <h1>{t("프로젝트를 분석하고 있습니다")}</h1>
-                    <p>
-                      {t("{step} · {seconds}초", {
-                        seconds: thinkingElapsedSeconds,
-                        step: t(projectAnalysisPendingStep),
-                      })}
-                    </p>
-                  </div>
-                </div>
-              ) : (
               <div className="chat-empty">
                 <h1>
                   {t("{name}에서 무엇을 도와드릴까요?", {
@@ -8536,7 +8826,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                   })}
                 </h1>
               </div>
-              )
             ) : (
               <>
                 <div
@@ -8554,16 +8843,9 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                     className="conversation"
                     role="log"
                   >
-                  {selectedSession.messages.map((message, messageIndex) => (
+                  {selectedSession.messages.map((message) => (
                     <article
                       className="message"
-                      data-briefing={
-                        selectedSession.title === "Project Briefing" &&
-                        message.role === "assistant" &&
-                        messageIndex === 0
-                          ? "true"
-                          : undefined
-                      }
                       data-role={message.role}
                       key={message.id}
                       role={message.role === "error" ? "alert" : undefined}
@@ -8580,9 +8862,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                       <div className="message-content">
                         {message.role === "assistant" ? (
                           <div className="paim-assistant-content">
-                            {selectedSession.title === "Project Briefing" && messageIndex === 0 ? (
-                              <span className="message-briefing-label">{t("프로젝트 브리핑")}</span>
-                            ) : null}
                             {typeof message.thinkingSeconds === "number" ? (
                               <div className="thought-for">
                                 {t("{seconds}초 동안 생각함", {
@@ -8768,33 +9047,33 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
               </div>
             </form>
           </>
-        ) : selectedProject ? (
+        ) : mainView === "project-setup" && selectedProject ? (
           <>
             <WorkspacePageLayout
               ariaLabel={t("프로젝트 시작 화면")}
-              aside={renderProjectHomeMemorySummary()}
+              aside={renderProjectSetupMemorySummary()}
               asideAriaLabel={t("추출될 항목")}
-              asideClassName="project-home-slots"
-              className="project-home"
-              contentClassName="project-home-main-content"
-              layoutClassName="project-home-content"
-              mainClassName="project-home-main"
+              asideClassName="project-setup-slots"
+              className="project-setup"
+              contentClassName="project-setup-main-content"
+              layoutClassName="project-setup-content"
+              mainClassName="project-setup-main"
               sectionProps={{
-                "data-context-ready": hasProjectHomeContext ? "true" : "false",
+                "data-context-ready": hasProjectSetupContext ? "true" : "false",
                 "data-drop-zone": "project-files",
                 "data-stage": "context",
               }}
             >
-                  <div className="project-home-name-row">
+                  <div className="project-setup-name-row">
                     <TextInput
-                      className="project-home-name"
-                      isDisabled={!canMutateSelectedProject}
+                      className="project-setup-name"
+                      isDisabled={!isSelectedProjectOwner}
                       isLabelHidden
                       label={t("프로젝트 이름")}
                       onBlur={(event) => {
                         const currentValue = (event.target as HTMLInputElement).value;
                         const previousName =
-                          projectHomeNameBeforeEditRef.current ?? selectedProject.name;
+                          projectSetupNameBeforeEditRef.current ?? selectedProject.name;
                         const nextName =
                           currentValue.trim() ||
                           createNextProjectName(
@@ -8805,7 +9084,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                           ...project,
                           name: nextName,
                         }));
-                        projectHomeNameBeforeEditRef.current = null;
+                        projectSetupNameBeforeEditRef.current = null;
 
                         if (nextName !== previousName) {
                           void syncProjectName(selectedProject.id, nextName, previousName);
@@ -8818,7 +9097,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                         }));
                       }}
                       onFocus={() => {
-                        projectHomeNameBeforeEditRef.current = selectedProject.name;
+                        projectSetupNameBeforeEditRef.current = selectedProject.name;
                       }}
                       onKeyDown={(event) => {
                         if (event.key === "Enter") {
@@ -8830,13 +9109,13 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                         if (event.key === "Escape") {
                           event.preventDefault();
                           const previousName =
-                            projectHomeNameBeforeEditRef.current ?? selectedProject.name;
+                            projectSetupNameBeforeEditRef.current ?? selectedProject.name;
                           event.currentTarget.value = previousName;
                           updateProject(selectedProject.id, (project) => ({
                             ...project,
                             name: previousName,
                           }));
-                          projectHomeNameBeforeEditRef.current = previousName;
+                          projectSetupNameBeforeEditRef.current = previousName;
                           event.currentTarget.blur();
                         }
                       }}
@@ -8845,35 +9124,54 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                       value={selectedProject.name}
                       width="100%"
                     />
-                    <Pencil aria-hidden="true" className="project-home-name-edit" size={15} />
+                    <Pencil aria-hidden="true" className="project-setup-name-edit" size={15} />
                   </div>
-                  <ol className="project-home-steps" aria-label={t("프로젝트 시작 단계")}>
+                  <ol className="project-setup-steps" aria-label={t("프로젝트 시작 단계")}>
                     <li aria-current="step" data-state="current">
-                      <span className="project-home-step-number">1</span>
-                      <span className="project-home-step-label">{t("맥락 추가")}</span>
+                      <span className="project-setup-step-number">1</span>
+                      <span className="project-setup-step-label">{t("맥락 추가")}</span>
                     </li>
                     <li data-state="upcoming">
-                      <span className="project-home-step-number">2</span>
-                      <span className="project-home-step-label">{t("분석")}</span>
+                      <span className="project-setup-step-number">2</span>
+                      <span className="project-setup-step-label">{t("분석")}</span>
                     </li>
                     <li data-state="upcoming">
-                      <span className="project-home-step-number">3</span>
-                      <span className="project-home-step-label">{t("첫 질문")}</span>
+                      <span className="project-setup-step-number">3</span>
+                      <span className="project-setup-step-label">{t("첫 질문")}</span>
                     </li>
                   </ol>
 
-                  <section className="project-home-section">
+                  <section className="project-setup-section">
                     <h2>{t("프로젝트 설명")}</h2>
                     <TextArea
-                      className="project-home-description"
-                      isDisabled={!canMutateSelectedProject}
+                      className="project-setup-description"
+                      isDisabled={!isSelectedProjectOwner}
                       isLabelHidden
                       label={t("프로젝트 설명")}
+                      onBlur={(event) => {
+                        const nextDescription = event.currentTarget.value;
+                        const previousDescription =
+                          projectSetupDescriptionBeforeEditRef.current ??
+                          selectedProject.description ??
+                          "";
+                        projectSetupDescriptionBeforeEditRef.current = null;
+                        if (nextDescription.trim() !== previousDescription.trim()) {
+                          void syncProjectDescription(
+                            selectedProject.id,
+                            nextDescription,
+                            previousDescription,
+                          );
+                        }
+                      }}
                       onChange={(nextDescription) => {
                         updateProject(selectedProject.id, (project) => ({
                           ...project,
                           description: nextDescription,
                         }));
+                      }}
+                      onFocus={() => {
+                        projectSetupDescriptionBeforeEditRef.current =
+                          selectedProject.description ?? "";
                       }}
                       placeholder={t("프로젝트 설명을 적어두면 PaiM이 맥락을 잡는 데 도움이 됩니다.")}
                       rows={2}
@@ -8882,8 +9180,8 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                     />
                   </section>
 
-                  <section className="project-home-section project-home-context-section">
-                    <header className="project-home-section-header">
+                  <section className="project-setup-section project-setup-context-section">
+                    <header className="project-setup-section-header">
                       <h2>{t("프로젝트 맥락 추가")}</h2>
                       <p>
                         {capabilities
@@ -8894,30 +9192,30 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                       </p>
                     </header>
                     <div
-                      className="project-home-canvas"
+                      className="project-setup-canvas"
                       data-state={selectedProjectFileCount > 0 ? "filled" : "empty"}
                     >
                     {selectedProjectFileCount > 0 ? (
                       <div
                         aria-label={t("프로젝트 자료")}
-                        className="project-home-canvas-filled"
+                        className="project-setup-canvas-filled"
                         data-expanded={areSelectedProjectSourcesExpanded ? "true" : "false"}
                         role="group"
                       >
-                        <div className="project-home-upload-summary">
-                          <span className="project-home-summary-item" data-kind="ready">
+                        <div className="project-setup-upload-summary">
+                          <span className="project-setup-summary-item" data-kind="ready">
                             {t("{count}개 완료", { count: selectedProjectSetupStatusCounts.ready })}
                           </span>
-                          <span className="project-home-summary-item" data-kind="processing">
+                          <span className="project-setup-summary-item" data-kind="processing">
                             {t("{count}개 처리 중", {
                               count: selectedProjectSetupStatusCounts.processing,
                             })}
                           </span>
-                          <span className="project-home-summary-item" data-kind="failed">
+                          <span className="project-setup-summary-item" data-kind="failed">
                             {t("{count}개 실패", { count: selectedProjectSetupStatusCounts.failed })}
                           </span>
                           <Button
-                            className="project-home-summary-action"
+                            className="project-setup-summary-action"
                             isDisabled={!canMutateSelectedProject}
                             label={t("자료 더 추가")}
                             onClick={() => void handleOpenProjectFiles(selectedProject.id)}
@@ -8925,7 +9223,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                             variant="ghost"
                           />
                         </div>
-                        <div className="project-home-source-list">
+                        <div className="project-setup-source-list">
                           {selectedProjectSetupVisibleSources.map((source) => {
                             const sourceMeta =
                               source.kind === "directory"
@@ -8938,7 +9236,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
                             return (
                               <div
-                                className="project-home-source-row"
+                                className="project-setup-source-row"
                                 data-delete={
                                   pendingSetupDeleteProjectFileId === source.id
                                     ? "confirm"
@@ -8948,17 +9246,17 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                                 key={source.id}
                               >
                                 <span
-                                  className="project-home-source-icon"
+                                  className="project-setup-source-icon"
                                   style={{ color: sourceMeta.color }}
                                 >
                                   <SourceIcon size={15} />
                                 </span>
-                                <span className="project-home-source-name">{source.name}</span>
-                                <span className="project-home-source-status">
+                                <span className="project-setup-source-name">{source.name}</span>
+                                <span className="project-setup-source-status">
                                   {t(getProjectSetupSourceStatusLabel(source))}
                                 </span>
                                 <IconButton
-                                  className="project-home-source-delete"
+                                  className="project-setup-source-delete"
                                   icon={<X size={12} />}
                                   isDisabled={!canMutateSelectedProject}
                                   label={
@@ -8984,7 +9282,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                         </div>
                         {selectedProjectSetupHiddenSourceCount > 0 ? (
                           <Button
-                            className="project-home-source-more"
+                            className="project-setup-source-more"
                             label={t("외 {count}개 자료 보기", {
                               count: selectedProjectSetupHiddenSourceCount,
                             })}
@@ -8997,18 +9295,18 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                         ) : null}
                       </div>
                     ) : (
-                      <div className="project-home-canvas-empty">
+                      <div className="project-setup-canvas-empty">
                         <FileText
                           aria-hidden="true"
-                          className="project-home-drop-icon"
+                          className="project-setup-drop-icon"
                           size={30}
                           strokeWidth={1.6}
                         />
                         <h3>{t("자료를 추가해 프로젝트 맥락을 만드세요")}</h3>
                         <p>{t("파일을 드래그하거나 아래 버튼을 이용해 추가할 수 있습니다.")}</p>
-                        <div className="project-home-picker-row">
+                        <div className="project-setup-picker-row">
                           <Button
-                            className="project-home-picker"
+                            className="project-setup-picker"
                             icon={<FileText size={14} />}
                             isDisabled={!canMutateSelectedProject}
                             label={t("파일 선택")}
@@ -9017,7 +9315,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                             variant="secondary"
                           />
                           <Button
-                            className="project-home-picker"
+                            className="project-setup-picker"
                             icon={<FolderOpen size={14} />}
                             isDisabled={!canMutateSelectedProject}
                             label={t("폴더 선택")}
@@ -9031,32 +9329,34 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                     </div>
                   </section>
 
-                  <div className="project-home-footer">
+                  <div className="project-setup-footer">
                     <p
                       aria-live="polite"
-                      className="project-home-note"
-                      id="project-home-analysis-note"
+                      className="project-setup-note"
+                      id="project-setup-analysis-note"
                     >
                       {!canMutateSelectedProject
                         ? t("프로젝트 편집 권한이 있어야 분석할 수 있습니다")
                         : selectedProjectHasDocumentInProgress
                         ? t("자료 처리 중 — 완료 후 분석할 수 있습니다")
-                        : !hasProjectHomeContext
+                        : !hasProjectSetupContext
                           ? t("설명이나 자료를 추가하면 분석할 수 있습니다")
-                        : t("분석하면 설명과 자료를 읽고 첫 브리핑을 만든 뒤 채팅으로 이어집니다.")}
+                        : t("분석하면 설명과 자료를 읽고 프로젝트 상세 Home으로 이동합니다.")}
                     </p>
-                    <div className="project-home-actions">
+                    <div className="project-setup-actions">
                       <Button
-                        className="project-home-secondary"
+                        className="project-setup-secondary"
                         isDisabled={!canMutateSelectedProject}
-                        label={t("분석 없이 채팅")}
-                        onClick={() => handleCreateChatInProject(selectedProject.id)}
+                        label={t("설정 완료")}
+                        onClick={() =>
+                          void handleCompleteSetupWithoutAnalysis(selectedProject.id)
+                        }
                         size="sm"
                         variant="ghost"
                       />
                       <Button
-                        aria-describedby="project-home-analysis-note"
-                        className="project-home-primary"
+                        aria-describedby="project-setup-analysis-note"
+                        className="project-setup-primary"
                         isDisabled={isProjectBriefingDisabled}
                         label={isSending ? t("분석 중") : t("분석 시작")}
                         onClick={() =>
@@ -9065,7 +9365,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                         size="sm"
                         variant="primary"
                       >
-                        <span className="project-home-primary-content">
+                        <span className="project-setup-primary-content">
                           <span>{isSending ? t("분석 중") : t("분석 시작")}</span>
                           <ChevronRight aria-hidden="true" size={15} />
                         </span>
@@ -9075,27 +9375,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
             </WorkspacePageLayout>
           </>
         ) : (
-          <section className="project-start" aria-labelledby="project-start-title">
-            <div className="project-start-content">
-              <div className="project-start-mark" aria-hidden="true">PaiM</div>
-              <div className="project-start-copy">
-                <h1 id="project-start-title" ref={mainViewHeadingRef} tabIndex={-1}>
-                  {t("프로젝트의 맥락을 놓치지 마세요")}
-                </h1>
-                <p>
-                  {t("자료와 대화를 연결해 결정, 액션, 이슈와 리스크를 한곳에서 정리합니다.")}
-                </p>
-              </div>
-              <Button
-                className="project-start-button"
-                icon={<FolderPlus size={16} />}
-                label={t("새 프로젝트 시작하기")}
-                onClick={() => createProjectFromName(createNextProjectName(projects))}
-                tooltip={t("새 프로젝트 시작하기")}
-                variant="primary"
-              />
-            </div>
-          </section>
+          renderProjectPortfolio()
         )}
       </LayoutContent>
 
@@ -9395,7 +9675,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                 {tab.view === "github" ? (
                   <Suspense fallback={<PanelLoadingState label={t("GitHub 불러오는 중")} />}>
                     <LazyGithubPanel
-                      canManage={canMutateSelectedProject}
+                      canManage={isSelectedProjectOwner}
                       demoStatus={visibleDemoStatus}
                       events={selectedProjectGithubEvents}
                       filteredRepositories={filteredSelectedProjectGithubRepositories}

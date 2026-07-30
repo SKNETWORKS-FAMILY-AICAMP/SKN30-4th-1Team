@@ -11,14 +11,22 @@ _collection = None
 _DEFAULT_COLLECTION = "paiM_openai_v2"
 
 
-def delete_from_existing_collection(where: dict) -> None:
-    """Delete metadata-matched rows without creating a collection or embedding client."""
+def get_existing_collection():
+    """Open the persisted collection without creating an embedding client."""
     persist_dir = os.getenv("CHROMA_PERSIST_DIR", ".chroma")
     collection_name = os.getenv("CHROMA_COLLECTION_NAME", _DEFAULT_COLLECTION)
     client = chromadb.PersistentClient(path=persist_dir)
     names = {item.name for item in client.list_collections()}
-    if collection_name in names:
-        client.get_collection(collection_name).delete(where=where)
+    if collection_name not in names:
+        return None
+    return client.get_collection(collection_name)
+
+
+def delete_from_existing_collection(where: dict) -> None:
+    """Delete metadata-matched rows without creating a collection or embedding client."""
+    collection = get_existing_collection()
+    if collection is not None:
+        collection.delete(where=where)
 
 
 def get_collection():

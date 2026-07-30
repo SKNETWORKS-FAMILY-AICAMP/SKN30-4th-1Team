@@ -8,6 +8,7 @@ export type PaimUser = {
   id: number;
   email: string;
   name: string;
+  profile_image_url?: string | null;
   created_at?: string | null;
 };
 
@@ -37,7 +38,10 @@ function isPaimUser(value: unknown): value is PaimUser {
   return (
     typeof user.id === "number" &&
     typeof user.email === "string" &&
-    typeof user.name === "string"
+    typeof user.name === "string" &&
+    (user.profile_image_url === undefined ||
+      user.profile_image_url === null ||
+      typeof user.profile_image_url === "string")
   );
 }
 

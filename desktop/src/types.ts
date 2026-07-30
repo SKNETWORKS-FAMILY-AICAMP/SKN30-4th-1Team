@@ -49,7 +49,7 @@ export type Message = {
 
 export type ChatSession = {
   id: string;
-  serverSessionId?: string;
+  createdExplicitly?: boolean;
   title: string;
   messages: Message[];
   createdAt: number;
@@ -164,7 +164,10 @@ export type ProjectMemorySuggestion = ProjectMemorySuggestionBase &
 export type ProjectWorkspace = {
   id: string;
   apiProjectId?: number;
+  currentUserRole?: "viewer" | "member" | "admin" | "owner" | null;
   serverMissing?: boolean;
+  setupCompletedAt?: number;
+  setupMode?: "analyzed" | "chat_only" | "existing";
   lastSeenAt?: string;
   name: string;
   description?: string;
@@ -175,6 +178,10 @@ export type ProjectWorkspace = {
   sessions: ChatSession[];
   createdAt: number;
 };
+
+export function isProjectSetupComplete(project: ProjectWorkspace) {
+  return typeof project.setupCompletedAt === "number";
+}
 
 export type ProjectState = {
   projects: ProjectWorkspace[];

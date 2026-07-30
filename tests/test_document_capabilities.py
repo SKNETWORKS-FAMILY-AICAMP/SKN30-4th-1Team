@@ -76,6 +76,11 @@ def test_capabilities_exactly_match_parser_registry():
             "max_file_bytes": QUERY_ATTACHMENT_MAX_FILE_BYTES,
             "max_total_bytes": QUERY_ATTACHMENT_MAX_TOTAL_BYTES,
         },
+        "desktop_chat": {
+            "storage": "local_only",
+            "server_persistence": False,
+            "legacy_session_api": "deprecated",
+        },
     }
 
 

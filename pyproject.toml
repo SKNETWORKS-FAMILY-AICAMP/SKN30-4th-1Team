@@ -39,6 +39,7 @@ packages = ["backend", "frontend"]
 [dependency-groups]
 dev = [
     "httpx",
+    "httpx2>=2.9.1",
     "pytest",
     "pytest-asyncio",
 ]

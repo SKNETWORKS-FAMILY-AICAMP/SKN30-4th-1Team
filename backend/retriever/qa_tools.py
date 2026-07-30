@@ -15,8 +15,8 @@ from typing import Annotated, Literal, Optional
 from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 
-from ..project_memory import get_project_memory
 from . import history_context, mysql_search, qa_engine
+from .index_scope import load_project_index_scope
 from .sql_project_state import fetch_project_overview_context
 
 
@@ -180,20 +180,15 @@ def search_project_evidence(
         history_topic_tokens=history_tokens,
         query_variants=retrieval_variants[:3],
     )
-    project_memory = get_project_memory(project_id)
-    parts = []
-    if project_memory:
-        parts.append(f"[프로젝트 메모리]\n{project_memory}")
-    if context:
-        parts.append(context)
-    content = "\n\n".join(parts) or "프로젝트 기록에서 관련 근거를 찾지 못했습니다."
-    _capture_evaluation_contexts(
-        ([f"[프로젝트 메모리]\n{project_memory}"] if project_memory else [])
-        + list(debug.get("retrieved_contexts") or [])
-    )
+    # _build_context captures one repository-generation scope for all MySQL
+    # and Chroma evidence. The unversioned project summary is intentionally not
+    # mixed into this targeted tool result; overview requests have a dedicated
+    # tool and summary lifecycle.
+    content = context or "프로젝트 기록에서 관련 근거를 찾지 못했습니다."
+    _capture_evaluation_contexts(list(debug.get("retrieved_contexts") or []))
     return content, {
         "tool": "search_project_evidence",
-        "status": "ok" if parts else "empty",
+        "status": "ok" if context else "empty",
         "sources": sources,
         "debug": _compact_retrieval_debug(debug),
     }
@@ -275,6 +270,7 @@ def query_structured_memory(
         _count_text_filter(category, text_query)
         if operation == "count" else None
     )
+    index_scope = load_project_index_scope(project_id)
     rows = _dedupe_rows(mysql_search.search(
         project_id,
         category=db_category,
@@ -283,6 +279,7 @@ def query_structured_memory(
         completion_status=completion_status,
         due_within_days=due_within_days,
         overdue=overdue,
+        index_scope=index_scope,
     ))
     sources = []
     for row in rows:
@@ -311,7 +308,7 @@ def query_structured_memory(
     vector_hits: list[dict] = []
     if text_query and rows:
         ranked, vector_hits = qa_engine._rank_mysql_rows(
-            project_id, rows, [text_query], limit
+            project_id, rows, [text_query], limit, index_scope
         )
     ranked = ranked[:limit]
     if ranked:

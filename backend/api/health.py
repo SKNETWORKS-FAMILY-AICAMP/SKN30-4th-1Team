@@ -26,8 +26,8 @@ _SCHEMA = {
     "projects": {"id", "name", "owner_user_id", "created_at"},
     "project_members": {"project_id", "user_id", "role", "created_at", "last_seen_at"},
     "documents": {"id", "project_id", "filename", "doc_type", "status", "file_path", "last_error", "progress_done", "progress_total", "size_bytes", "uploaded_by", "processing_token", "lease_expires_at", "uploaded_at"},
-    "repositories": {"id", "project_id", "provider", "repository_url", "branch", "status", "commit_sha", "indexed_files", "last_error", "sync_warning", "last_reconciled_pr", "connected_at", "sync_started_at"},
-    "memory": {"id", "project_id", "doc_id", "repo_id", "category", "content", "reason", "topic", "owner", "date", "due_date", "source", "created_by", "updated_by", "is_user_verified", "completed_at", "completion_status", "completion_status_source", "superseded_by", "superseded_at", "sort_order", "created_at"},
+    "repositories": {"id", "project_id", "provider", "repository_url", "branch", "status", "commit_sha", "indexed_files", "last_error", "sync_warning", "last_reconciled_pr", "active_sync_run_id", "current_sync_run_id", "connected_at", "sync_started_at"},
+    "memory": {"id", "project_id", "doc_id", "repo_id", "repo_sync_run_id", "category", "content", "reason", "topic", "owner", "date", "due_date", "source", "created_by", "updated_by", "is_user_verified", "completed_at", "completion_status", "completion_status_source", "superseded_by", "superseded_at", "sort_order", "created_at"},
     "memory_sources": {"id", "memory_id", "source_kind", "doc_id", "repo_id", "source_type", "source_path", "source_ref", "source_url", "created_at"},
     "memory_suggestions": {"id", "project_id", "memory_id", "kind", "evidence", "rationale", "confidence", "status", "created_at", "resolved_at", "resolved_by"},
     "chat_sessions": {"id", "project_id", "user_id", "title", "created_at", "updated_at"},
@@ -37,7 +37,10 @@ _SCHEMA = {
     "upload_quota_reservations": {"reservation_id", "user_id", "project_id", "kind", "size_bytes", "target_path", "temp_path", "created_at", "expires_at"},
     "storage_cleanup_pending": {"cleanup_id", "source_kind", "source_id", "user_id", "project_id", "document_id", "file_path", "size_bytes", "count_units", "needs_chroma", "created_at", "last_attempt_at"},
 }
-_VIEWS = {"active_memory": _SCHEMA["memory"]}
+_VIEWS = {
+    "published_memory": _SCHEMA["memory"],
+    "active_memory": _SCHEMA["memory"],
+}
 
 
 def _mysql_probe() -> None:

@@ -152,7 +152,7 @@ def ensure_schema_v8() -> None:
 
 
 def ensure_schema_v9() -> None:
-    """Install v9 quota schema and finish filesystem-aware legacy backfill.
+    """Install the v9 quota and repository-generation contracts.
 
     Unlike older best-effort migrations, quota accounting is a startup gate: serving
     requests with a partially migrated table could undercount storage.
@@ -169,6 +169,21 @@ def ensure_schema_v9() -> None:
             for name, definition in additions:
                 if not _column_exists(cursor, "documents", name):
                     cursor.execute(f"ALTER TABLE documents ADD COLUMN {name} {definition}")
+            repository_additions = (
+                ("active_sync_run_id", "CHAR(36) NULL AFTER last_reconciled_pr"),
+                ("current_sync_run_id", "CHAR(36) NULL AFTER active_sync_run_id"),
+                ("sync_started_at", "DATETIME(6) NULL AFTER current_sync_run_id"),
+            )
+            for name, definition in repository_additions:
+                if not _column_exists(cursor, "repositories", name):
+                    cursor.execute(
+                        f"ALTER TABLE repositories ADD COLUMN {name} {definition}"
+                    )
+            if not _column_exists(cursor, "memory", "repo_sync_run_id"):
+                cursor.execute(
+                    "ALTER TABLE memory ADD COLUMN repo_sync_run_id"
+                    " CHAR(36) NULL AFTER repo_id"
+                )
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS upload_quota_reservations (
@@ -248,6 +263,42 @@ def ensure_schema_v9() -> None:
                     "ALTER TABLE documents ADD CONSTRAINT fk_documents_uploaded_by"
                     " FOREIGN KEY (uploaded_by) REFERENCES users(id) ON DELETE SET NULL"
                 )
+            for table, index_name, columns in (
+                (
+                    "repositories",
+                    "idx_repositories_active_sync_run",
+                    "active_sync_run_id",
+                ),
+                (
+                    "repositories",
+                    "idx_repositories_current_sync_run",
+                    "current_sync_run_id",
+                ),
+                ("memory", "idx_memory_repo_sync_run", "repo_id,repo_sync_run_id"),
+            ):
+                cursor.execute(
+                    "SELECT 1 FROM information_schema.STATISTICS"
+                    " WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND INDEX_NAME=%s",
+                    (table, index_name),
+                )
+                if not cursor.fetchone():
+                    cursor.execute(
+                        f"ALTER TABLE {table} ADD INDEX {index_name} ({columns})"
+                    )
+            cursor.execute(
+                "CREATE OR REPLACE VIEW published_memory AS"
+                " SELECT m.* FROM memory m"
+                " LEFT JOIN repositories r ON r.id=m.repo_id"
+                " WHERE m.repo_id IS NULL"
+                " OR r.active_sync_run_id=m.repo_sync_run_id"
+                " OR (r.active_sync_run_id IS NULL AND m.repo_sync_run_id IS NULL)"
+            )
+            cursor.execute(
+                "CREATE OR REPLACE VIEW active_memory AS"
+                " SELECT pm.* FROM published_memory pm"
+                " LEFT JOIN published_memory successor ON successor.id=pm.superseded_by"
+                " WHERE successor.id IS NULL"
+            )
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -294,6 +345,66 @@ def backfill_dev_user_membership() -> None:
         logger.error("Dev user membership backfill 실패 — 앱은 계속 기동됩니다", exc_info=True)
 
 
+def cleanup_stale_repository_generations() -> None:
+    """Remove non-published generations before requests are accepted.
+
+    Runtime publication keeps the previous generation physically present so a
+    request holding the previous pointer snapshot can finish safely. Startup is
+    the cleanup boundary because no request can still reference that snapshot.
+    """
+    repositories = []
+    conn = None
+    mysql_cleanup_succeeded = False
+    try:
+        conn = get_connection()
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT id,active_sync_run_id FROM repositories ORDER BY id"
+            )
+            repositories = cursor.fetchall()
+            for repo in repositories:
+                cursor.execute(
+                    "DELETE FROM memory WHERE repo_id=%s"
+                    " AND NOT (repo_sync_run_id <=> %s)",
+                    (repo["id"], repo.get("active_sync_run_id")),
+                )
+        conn.commit()
+        mysql_cleanup_succeeded = True
+    except Exception:
+        if conn is not None:
+            conn.rollback()
+        logger.warning("startup_repository_mysql_generation_cleanup_failed", exc_info=True)
+    finally:
+        if conn is not None:
+            conn.close()
+
+    # Do not delete vectors when the authoritative MySQL cleanup did not
+    # commit. Keeping both copies is safer than creating a DB/vector split.
+    if not mysql_cleanup_succeeded:
+        return
+
+    try:
+        from .db.chroma import get_existing_collection
+
+        collection = get_existing_collection()
+        if collection is None:
+            return
+        for repo in repositories:
+            raw = collection.get(where={"repo_id": repo["id"]})
+            active_run_id = repo.get("active_sync_run_id")
+            delete_ids = [
+                vector_id
+                for vector_id, metadata in zip(
+                    raw.get("ids") or [], raw.get("metadatas") or []
+                )
+                if ((metadata or {}).get("repo_sync_run_id") or None) != active_run_id
+            ]
+            if delete_ids:
+                collection.delete(ids=delete_ids)
+    except Exception:
+        logger.warning("startup_repository_chroma_generation_cleanup_failed", exc_info=True)
+
+
 def recover_stale_tasks() -> None:
     """서버 재시작 시 stale processing/syncing 작업을 failed로 전환.
 
@@ -330,7 +441,17 @@ def recover_stale_tasks() -> None:
                 stale_documents = cursor.fetchall()
 
                 cursor.execute(
-                    "UPDATE repositories SET status='failed', last_error=%s"
+                    "SELECT id,current_sync_run_id FROM repositories"
+                    " WHERE status='syncing'"
+                    " AND (sync_started_at IS NULL"
+                    " OR sync_started_at < NOW() - INTERVAL %s MINUTE)"
+                    " FOR UPDATE",
+                    (stale_minutes,),
+                )
+                stale_repositories = cursor.fetchall()
+                cursor.execute(
+                    "UPDATE repositories SET status='failed',last_error=%s,"
+                    " current_sync_run_id=NULL"
                     " WHERE status='syncing'"
                     " AND (sync_started_at IS NULL"
                     "      OR sync_started_at < NOW() - INTERVAL %s MINUTE)",
@@ -352,6 +473,12 @@ def recover_stale_tasks() -> None:
                 from .quota import fail_document
                 fail_document(document["id"], _STALE_DOC_ERROR)
         doc_count = len(stale_documents)
+        from .api.repository import _cleanup_repo_generation
+        for repository in stale_repositories:
+            if repository.get("current_sync_run_id"):
+                _cleanup_repo_generation(
+                    repository["id"], repository["current_sync_run_id"]
+                )
 
         if doc_count or repo_count:
             logger.warning(

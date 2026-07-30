@@ -9,10 +9,17 @@ export type QueryAttachmentCapability = DocumentCapability & {
   max_total_bytes: number;
 };
 
+export type DesktopChatCapability = {
+  storage: "local_only";
+  server_persistence: false;
+  legacy_session_api: "deprecated";
+};
+
 export type PaimCapabilities = {
   schema_version: 1;
   project_documents: DocumentCapability;
   query_attachments: QueryAttachmentCapability;
+  desktop_chat?: DesktopChatCapability;
 };
 
 export async function fetchPaimCapabilities(signal?: AbortSignal) {

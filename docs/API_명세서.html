@@ -308,13 +308,13 @@
 
   <main>
     <!-- auth-mode: jwt-fail-closed -->
-    <!-- updated: 2026-07-22 -->
+    <!-- updated: 2026-07-29 -->
     <h1>PaiM FastAPI 명세서</h1>
     <p class="subtitle">
       Base URL (로컬): <code>http://127.0.0.1:8000</code> &nbsp;·&nbsp;
       API Prefix: <code>/api/v1</code> (GitHub App은 <code>/github/app/*</code>, prefix 없음) &nbsp;·&nbsp;
       에러 형식: <code>{"detail": "...", "request_id": "&lt;uuid&gt;"}</code> &nbsp;·&nbsp;
-      갱신: 2026-07-22 (TASK-010 — 누락 20 operation·인증/권한 최신화)
+      갱신: 2026-07-29 (#9 STT 업로드 경로 반영, 전체 47 operation)
     </p>
 
     <!-- ── Auth ───────────────────────────────────────────────── -->
@@ -586,6 +586,34 @@
           업로드 즉시 <code>processing</code> 반환 → 백그라운드 처리 완료 후 <code>indexed</code> 또는 <code>failed</code>로 갱신.
           <code>GET /documents/{doc_id}/status</code>로 폴링하여 완료 확인.
         </div>
+      </div>
+    </div>
+
+    <div class="endpoint" id="audio-upload">
+      <div class="endpoint-header">
+        <span class="method POST">POST</span>
+        <span class="path">/api/v1/projects/{project_id}/audio</span>
+      </div>
+      <div class="endpoint-desc">
+        회의 녹음을 STT 전사 → LLM 추출 → MySQL·Vector DB 적재 → Project Memory 갱신으로 연결 (최소 역할 member).
+      </div>
+      <div class="endpoint-body">
+        <div class="res-label">Request — <code>multipart/form-data</code></div>
+        <table>
+          <tr><th>필드</th><th>타입</th><th>필수</th><th>설명</th></tr>
+          <tr><td><code>file</code></td><td>File</td><td>✅</td><td>provider 지원 오디오 (OpenAI 25 MB, CLOVA 200 MB)</td></tr>
+          <tr><td><code>date</code></td><td>string</td><td>-</td><td>회의 날짜 YYYY-MM-DD</td></tr>
+        </table>
+        <div class="res-label"><span class="s201">201</span> Created</div>
+        <pre><code>{ "doc_id": 71, "status": "processing", "provider": "openai", "diarization": false }</code></pre>
+        <div class="note">
+          <code>GET /documents/{doc_id}/status</code>로 <code>indexed</code>/<code>failed</code> 폴링.
+          설정: <code>STT_PROVIDER</code>, <code>STT_MODEL</code>, <code>STT_LANGUAGE</code>, <code>STT_TIMEOUT_SECONDS</code>.
+        </div>
+        <div class="res-label"><span class="s400">400</span> 빈 오디오·미지원 확장자</div>
+        <div class="res-label"><span class="s403">403</span> member 미만</div>
+        <div class="res-label"><span class="s413">413</span> provider 크기 상한 초과</div>
+        <div class="res-label"><span class="s503">503</span> 잘못된 provider 설정</div>
       </div>
     </div>
 
@@ -1455,7 +1483,7 @@
 
     <!-- ── Implementation Status ──────────────────────────────── -->
     <h2 id="status-impl">구현 현황</h2>
-    <p style="color:#6b7280; font-size:13px; margin-bottom:12px;">갱신: 2026-07-22 · TASK-010 기준 (origin/main <code>5240f40</code> 병합 완료, 전체 46 operation)</p>
+    <p style="color:#6b7280; font-size:13px; margin-bottom:12px;">갱신: 2026-07-29 · #9 STT 업로드 경로 반영 (전체 47 operation)</p>
 
     <table>
       <tr><th>엔드포인트</th><th>상태</th><th>비고</th></tr>
@@ -1466,6 +1494,7 @@
       <tr><td><code>GET /api/v1/projects</code></td><td><span class="badge badge-done">✅ 완료</span></td><td>DEV user 시 membership JOIN</td></tr>
       <tr><td><code>GET /api/v1/projects/{id}</code></td><td><span class="badge badge-done">✅ 완료</span></td><td></td></tr>
       <tr><td><code>POST /api/v1/projects/{id}/documents</code></td><td><span class="badge badge-done">✅ 완료</span></td><td>BackgroundTask async</td></tr>
+      <tr><td><code>POST /api/v1/projects/{id}/audio</code></td><td><span class="badge badge-done">✅ 완료</span></td><td>STT → Project Memory, BackgroundTask async</td></tr>
       <tr><td><code>GET /api/v1/projects/{id}/documents</code></td><td><span class="badge badge-done">✅ 완료</span></td><td></td></tr>
       <tr><td><code>GET /api/v1/projects/{id}/documents/{doc_id}/status</code></td><td><span class="badge badge-done">✅ 완료</span></td><td>last_error 포함</td></tr>
       <tr><td><code>DELETE /api/v1/projects/{id}/documents/{doc_id}</code></td><td><span class="badge badge-done">✅ 완료</span></td><td>memory + chroma + file cleanup</td></tr>

@@ -1,14 +1,22 @@
-"""TASK-002 계층 1 — mysql_search의 supersede 필터 회귀 테스트.
-
-필터링은 SQL 술어(`m.superseded_by IS NULL`)로 DB가 수행하므로, 결정적으로 검증할 수 있는
-지점은 `search()`가 생성하는 SQL/params다. 기본 조회는 술어를 포함하고,
-include_superseded=True이면 제외함을 확인한다.
-"""
+"""mysql_search의 published-generation supersede 회귀 테스트."""
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from backend.retriever import mysql_search
+from backend.retriever.index_scope import ProjectIndexScope
+
+
+_ACTIVE_PREDICATE = "NOT EXISTS (SELECT 1 FROM memory visible_successor"
+
+
+@pytest.fixture(autouse=True)
+def _stable_empty_scope(monkeypatch):
+    monkeypatch.setattr(
+        mysql_search,
+        "load_project_index_scope",
+        lambda project_id: ProjectIndexScope(project_id),
+    )
 
 
 def _make_conn():
@@ -29,23 +37,21 @@ def _run(**kwargs):
 
 
 class _FilteringCursor:
-    """superseded 술어를 실제로 해석해 row를 필터링하는 fake cursor.
-
-    실제 DB를 대신해, execute된 SQL에 ``m.superseded_by IS NULL`` 술어가 있으면
-    superseded row(=superseded_by가 NULL이 아닌 row)를 제외하고, 없으면 전부
-    반환한다. 이렇게 술어를 문자열이 아니라 동작으로 해석해야, 향후 SQL 조립이
-    바뀌어 술어가 실질적으로 적용되지 않는 회귀를 반환 row 차이로 검출할 수 있다.
-    """
+    """Interpret published visibility and the visible-successor predicate."""
 
     def __init__(self, rows):
         self._all_rows = rows
         self._result: list = []
 
     def execute(self, sql, params):
-        if "m.superseded_by IS NULL" in sql:
-            self._result = [r for r in self._all_rows if r["superseded_by"] is None]
+        visible_rows = [r for r in self._all_rows if r.get("_visible", True)]
+        if _ACTIVE_PREDICATE in sql:
+            visible_ids = {r["id"] for r in visible_rows}
+            self._result = [
+                r for r in visible_rows if r["superseded_by"] not in visible_ids
+            ]
         else:
-            self._result = list(self._all_rows)
+            self._result = visible_rows
 
     def fetchall(self):
         # search()는 row를 mutate(pop/추가)하므로 복사본을 돌려준다.
@@ -76,27 +82,28 @@ _SUPERSEDE_ROWS = [
     {"id": 1, "superseded_by": None},
     {"id": 2, "superseded_by": 5},
     {"id": 3, "superseded_by": None},
+    {"id": 5, "superseded_by": None},
 ]
 
 
 def test_default_search_excludes_superseded():
-    """기본 조회는 superseded_by IS NULL 술어로 번복된 항목을 제외한다."""
+    """기본 조회는 같은 scope에서 보이는 successor가 있는 항목을 제외한다."""
     sql, params = _run()
-    assert "m.superseded_by IS NULL" in sql
+    assert _ACTIVE_PREDICATE in sql
     assert params == [1]
 
 
 def test_include_superseded_omits_filter():
     """include_superseded=True이면 이력 조회를 위해 술어를 넣지 않는다."""
     sql, params = _run(include_superseded=True)
-    assert "m.superseded_by IS NULL" not in sql
+    assert _ACTIVE_PREDICATE not in sql
     assert params == [1]
 
 
 def test_superseded_filter_combines_with_other_conditions():
     """필터가 category/owner 등 기존 조건과 독립적으로 조합되고 params 순서를 깨지 않는다."""
     sql, params = _run(category="decision", owner="Alice")
-    assert "m.superseded_by IS NULL" in sql
+    assert _ACTIVE_PREDICATE in sql
     assert "m.category = %s" in sql
     assert "m.owner = %s" in sql
     # superseded 술어는 값 바인딩이 없으므로 params는 project_id/category/owner만.
@@ -106,7 +113,7 @@ def test_superseded_filter_combines_with_other_conditions():
 def test_include_superseded_still_applies_other_filters():
     """옵트인이어도 다른 필터는 그대로 적용된다."""
     sql, params = _run(category="decision", include_superseded=True)
-    assert "m.superseded_by IS NULL" not in sql
+    assert _ACTIVE_PREDICATE not in sql
     assert "m.category = %s" in sql
     assert params == [1, "decision"]
 
@@ -120,13 +127,21 @@ def test_include_superseded_still_applies_other_filters():
 def test_default_search_returns_only_active_rows():
     """기본 조회는 superseded row를 제외하고 활성 row만 반환한다."""
     result = _search_rows(_SUPERSEDE_ROWS)
-    assert [r["id"] for r in result] == [1, 3]
+    assert [r["id"] for r in result] == [1, 3, 5]
 
 
 def test_include_superseded_returns_active_and_superseded_rows():
     """include_superseded=True이면 활성 row와 superseded row를 모두 반환한다."""
     result = _search_rows(_SUPERSEDE_ROWS, include_superseded=True)
-    assert [r["id"] for r in result] == [1, 2, 3]
+    assert [r["id"] for r in result] == [1, 2, 3, 5]
+
+
+def test_hidden_successor_does_not_hide_published_predecessor():
+    rows = [
+        {"id": 10, "superseded_by": 11},
+        {"id": 11, "superseded_by": None, "_visible": False},
+    ]
+    assert [r["id"] for r in _search_rows(rows)] == [10]
 
 
 # --- R-001: completed/overdue/due_within_days와 양쪽 모드의 술어·params 조합 -----
@@ -169,9 +184,9 @@ def test_filter_predicates_combine_with_supersede_mode(
         assert fragment in sql
 
     if include_superseded:
-        assert "m.superseded_by IS NULL" not in sql
+        assert _ACTIVE_PREDICATE not in sql
     else:
-        assert "m.superseded_by IS NULL" in sql
+        assert _ACTIVE_PREDICATE in sql
 
     assert params == expected_params
 
@@ -190,12 +205,14 @@ def test_fetch_supersede_graph_sql_limits_to_participating_decisions():
 
     sql, params = cursor.execute.call_args.args
     assert "m.category = 'decision'" in sql
-    assert "m.superseded_by IS NOT NULL" in sql
-    assert "m.id IN (SELECT s.superseded_by FROM memory s" in sql
+    assert "LEFT JOIN memory visible_successor" in sql
+    assert "visible_successor.id AS superseded_by" in sql
+    assert "visible_successor.id IS NOT NULL" in sql
+    assert "EXISTS (SELECT 1 FROM memory visible_predecessor" in sql
     assert "LEFT JOIN memory_sources" in sql          # C-002: 출처 식별자 조인
     assert "ms.repo_id" in sql
     assert "ORDER BY m.id ASC" in sql
-    assert params == [7, 7]
+    assert params == [7]
 
 
 def test_fetch_supersede_graph_attaches_source_info():
@@ -230,15 +247,25 @@ class _GraphCursor:
         self._result: list = []
 
     def execute(self, sql, params):
-        assert "superseded_by IS NOT NULL" in sql  # 전용 술어가 실제로 존재
+        assert "LEFT JOIN memory visible_successor" in sql
+        visible_rows = [r for r in self._all_rows if r.get("_visible", True)]
+        visible_ids = {r["id"] for r in visible_rows}
         referenced = {
-            r["superseded_by"] for r in self._all_rows if r["superseded_by"] is not None
+            r["superseded_by"]
+            for r in visible_rows
+            if r["superseded_by"] in visible_ids
         }
         self._result = sorted(
             (
-                r for r in self._all_rows
+                {
+                    **r,
+                    "superseded_by": (
+                        r["superseded_by"] if r["superseded_by"] in visible_ids else None
+                    ),
+                }
+                for r in visible_rows
                 if r["category"] == "decision"
-                and (r["superseded_by"] is not None or r["id"] in referenced)
+                and (r["superseded_by"] in visible_ids or r["id"] in referenced)
             ),
             key=lambda r: r["id"],
         )

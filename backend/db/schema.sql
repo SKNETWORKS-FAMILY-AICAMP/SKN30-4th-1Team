@@ -93,12 +93,18 @@ CREATE TABLE IF NOT EXISTS repositories (
     last_error     TEXT         DEFAULT NULL,
     sync_warning   TEXT         DEFAULT NULL,
     last_reconciled_pr INT      NULL,
+    -- 저장소 동기화는 새 세대를 staging한 뒤 active pointer를 원자적으로 바꾼다.
+    -- current_sync_run_id는 중복 worker와 늦게 끝난 worker를 막는 fence다.
+    active_sync_run_id  CHAR(36) NULL,
+    current_sync_run_id CHAR(36) NULL,
     connected_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
     -- 이 저장소의 '현재 동기화가 시작된 시각'. connected_at(연결 시각)과 축이 다르다.
     -- stale 판정은 이 값을 기준으로 한다 — connected_at은 재동기화 때 갱신되지 않아
     -- 연결한 지 오래된 저장소의 정상 동기화가 곧바로 stale로 오판됐다.
-    sync_started_at DATETIME NULL,
-    FOREIGN KEY (project_id) REFERENCES projects(id)
+    sync_started_at DATETIME(6) NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id),
+    INDEX idx_repositories_active_sync_run (active_sync_run_id),
+    INDEX idx_repositories_current_sync_run (current_sync_run_id)
 );
 
 CREATE TABLE IF NOT EXISTS memory (
@@ -106,6 +112,7 @@ CREATE TABLE IF NOT EXISTS memory (
     project_id       INT NOT NULL,
     doc_id           INT NULL,
     repo_id          INT NULL,
+    repo_sync_run_id CHAR(36) NULL,
     category         VARCHAR(20),
     content          TEXT,
     reason           TEXT,
@@ -129,13 +136,25 @@ CREATE TABLE IF NOT EXISTS memory (
     FOREIGN KEY (repo_id)    REFERENCES repositories(id),
     -- self-FK: 대체(신) decision 삭제 시 포인터를 자동 해제해 구 decision을 복귀시킨다(v8).
     CONSTRAINT fk_memory_superseded_by
-        FOREIGN KEY (superseded_by) REFERENCES memory(id) ON DELETE SET NULL
+        FOREIGN KEY (superseded_by) REFERENCES memory(id) ON DELETE SET NULL,
+    INDEX idx_memory_repo_sync_run (repo_id, repo_sync_run_id)
 );
 
--- 현재 유효한(번복되지 않은) memory만 보는 뷰(v8). 유효 항목만 봐야 하는 집계/요약
--- raw SQL은 memory 대신 이 뷰를 읽어 superseded 필터 누락을 구조적으로 방지한다.
+-- 문서는 항상 보이고, 저장소 memory는 게시된 generation만 보인다. generation
+-- 도입 전 저장소의 NULL/NULL 조합도 최초 성공 sync 전까지 호환 노출한다.
+CREATE OR REPLACE VIEW published_memory AS
+SELECT m.* FROM memory m
+LEFT JOIN repositories r ON r.id = m.repo_id
+WHERE m.repo_id IS NULL
+   OR r.active_sync_run_id = m.repo_sync_run_id
+   OR (r.active_sync_run_id IS NULL AND m.repo_sync_run_id IS NULL);
+
+-- 게시된 스냅샷 안에서만 supersede 관계를 해석한다. staging successor가 기존
+-- 게시 결정을 미리 숨기지 않도록 raw superseded_by IS NULL 조건을 쓰지 않는다.
 CREATE OR REPLACE VIEW active_memory AS
-SELECT * FROM memory WHERE superseded_by IS NULL;
+SELECT pm.* FROM published_memory pm
+LEFT JOIN published_memory successor ON successor.id = pm.superseded_by
+WHERE successor.id IS NULL;
 
 CREATE TABLE IF NOT EXISTS memory_sources (
     id          INT PRIMARY KEY AUTO_INCREMENT,

@@ -24,6 +24,7 @@ from .api.suggestion import router as suggestion_router
 from .api.delta import router as delta_router
 from .api.capabilities import router as capabilities_router
 from .chat.router import router as chat_router
+from .stt.router import router as stt_router
 from .github.router import router as github_router, SessionExpiredException
 from .rate_limit import limiter, rate_limit_exceeded_handler
 from .config import cors_origins, validate_phase_b_config
@@ -108,7 +109,16 @@ async def lifespan(app: FastAPI):
     from concurrent.futures import ThreadPoolExecutor
     from .api.auth import _auth_mode, validate_jwt_config
     from .config import validate_runtime_config
-    from .startup import ensure_runtime_schema, ensure_schema_v8, ensure_schema_v9, recover_quota_tasks, recover_stale_tasks, backfill_dev_user_membership, stale_watchdog
+    from .startup import (
+        backfill_dev_user_membership,
+        cleanup_stale_repository_generations,
+        ensure_runtime_schema,
+        ensure_schema_v8,
+        ensure_schema_v9,
+        recover_quota_tasks,
+        recover_stale_tasks,
+        stale_watchdog,
+    )
     from .retriever.memory_vector import backfill_memory_vectors
     from .storage import ensure_upload_root_safe
     if _auth_mode() == "dev":
@@ -128,6 +138,7 @@ async def lifespan(app: FastAPI):
     ensure_schema_v9()
     recover_quota_tasks()
     recover_stale_tasks()
+    cleanup_stale_repository_generations()
     backfill_dev_user_membership()
     try:
         backfill_memory_vectors()
@@ -209,6 +220,7 @@ app.include_router(suggestion_router, prefix="/api/v1")
 app.include_router(delta_router,      prefix="/api/v1")
 app.include_router(capabilities_router, prefix="/api/v1")
 app.include_router(chat_router,    prefix="/api/v1")
+app.include_router(stt_router,     prefix="/api/v1")
 # github_router는 자체 prefix(/github/app)를 사용하므로 /api/v1 붙이지 않음
 app.include_router(github_router)
 app.include_router(health_router)

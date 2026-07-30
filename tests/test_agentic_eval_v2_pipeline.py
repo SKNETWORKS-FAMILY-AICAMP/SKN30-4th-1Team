@@ -134,7 +134,6 @@ def test_compare_runs_applies_contract_ragas_and_performance_gates():
 
 def test_search_tool_captures_full_context_only_for_evaluation(monkeypatch):
     """검색 Tool이 공개 debug와 분리해 평가용 전체 근거를 전달하는지 확인한다."""
-    monkeypatch.setattr(qa_tools, "get_project_memory", lambda project_id: "프로젝트 요약")
     monkeypatch.setattr(
         qa_tools.qa_engine,
         "_build_context",
@@ -156,7 +155,7 @@ def test_search_tool_captures_full_context_only_for_evaluation(monkeypatch):
             current_question="질문",
         )
 
-    assert contexts == ["[프로젝트 메모리]\n프로젝트 요약", "전체 검색 본문"]
+    assert contexts == ["전체 검색 본문"]
     assert "retrieved_contexts" not in artifact["debug"]
 
 
