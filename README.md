@@ -60,6 +60,93 @@ flowchart LR
 
 PaiM은 프로젝트 상태를 임의로 확정하지 않습니다. 새 정보는 메모리에 축적하되, 액션 완료처럼 기존 상태를 바꾸는 일은 근거를 제시한 뒤 사람의 승인을 받습니다.
 
+## AI 아키텍처
+
+PaiM은 질문 유형을 미리 고정하는 라우터 대신, 하나의 **Agentic 오케스트레이터**가 질문에 필요한 읽기 전용 도구를 직접 선택합니다. 정답이 명확해야 하는 상태 정보는 MySQL에서 조회하고, 문서의 맥락은 키워드와 벡터를 결합한 하이브리드 검색으로 찾습니다.
+
+```mermaid
+flowchart TB
+    subgraph Ingestion["프로젝트 지식 수집"]
+        INPUT["문서 · PDF · DOCX<br/>회의 음성"]
+        CONVERT["텍스트 변환 · 청킹"]
+        EXTRACT["Extractor LLM<br/>결정 · 액션 · 이슈 · 리스크"]
+        INPUT --> CONVERT --> EXTRACT
+    end
+
+    subgraph GitHub["GitHub 동기화"]
+        REPO["README · 커밋<br/>Issue · PR"]
+        INDEX["소스별 규칙으로<br/>정규화 · 인덱싱"]
+        REPO --> INDEX
+    end
+
+    MYSQL[("MySQL<br/>구조화 상태 · 권한 · 이력")]
+    CHROMA[("ChromaDB<br/>문서 · 코드 근거 벡터")]
+
+    EXTRACT --> MYSQL
+    EXTRACT --> CHROMA
+    INDEX --> MYSQL
+    INDEX --> CHROMA
+
+    subgraph QA["Agentic Q&A"]
+        QUESTION["사용자 질문<br/>+ 임시 첨부"]
+        AGENT["LangGraph<br/>Agentic 오케스트레이터"]
+        SQL_TOOL["Structured Memory<br/>정확한 목록 · 상태 · 개수"]
+        SEARCH_TOOL["Hybrid Evidence Search<br/>BM25 + Vector RRF"]
+        OVERVIEW_TOOL["Project Overview<br/>요약 · Action Plan"]
+        ANSWER["근거와 출처가 있는 답변"]
+
+        QUESTION --> AGENT
+        AGENT --> SQL_TOOL
+        AGENT --> SEARCH_TOOL
+        AGENT --> OVERVIEW_TOOL
+        SQL_TOOL --> AGENT
+        SEARCH_TOOL --> AGENT
+        OVERVIEW_TOOL --> AGENT
+        AGENT --> ANSWER
+    end
+
+    MYSQL --> SQL_TOOL
+    MYSQL --> OVERVIEW_TOOL
+    MYSQL --> SEARCH_TOOL
+    CHROMA --> SEARCH_TOOL
+
+    subgraph Reconciler["상태 변경 제어"]
+        MERGED["머지된 PR"]
+        MATCH["Reconciler LLM<br/>진행 중 액션과 대조"]
+        INBOX["완료 제안 Inbox<br/>PR 링크 · 판단 근거"]
+        APPROVAL{"사용자 승인"}
+
+        MERGED --> MATCH --> INBOX --> APPROVAL
+    end
+
+    MYSQL --> MATCH
+    APPROVAL -->|승인| MYSQL
+    APPROVAL -->|거절| KEEP["기존 상태 유지"]
+```
+
+### 핵심 기술 선택
+
+| 문제 | 구현 | 선택 이유 |
+| --- | --- | --- |
+| 담당자·상태·개수처럼 정확해야 하는 질문 | MySQL 구조화 조회 | LLM의 추측과 검색 누락 방지 |
+| 문서 표현이 달라도 같은 맥락 찾기 | BM25 + Vector Search를 RRF로 결합 | 키워드 일치와 의미 유사도의 장점 결합 |
+| 질문마다 필요한 근거가 다름 | LangGraph Agentic 도구 호출 | 고정 라우팅 없이 여러 근거를 조합 |
+| README·커밋·회의록의 의미가 다름 | 소스 유형별 추출 프롬프트 | 설치 문구를 할 일로 오인하는 문제 방지 |
+| PR 머지를 액션 완료와 연결 | Reconciler LLM + 근거 기반 제안 | 자동화하면서도 잘못된 완료 처리 방지 |
+| AI가 기존 상태를 바꾸는 위험 | 승인·거절이 있는 Human-in-the-loop | 최종 결정권을 사용자에게 유지 |
+
+### 서비스 구성
+
+| 영역 | 기술 |
+| --- | --- |
+| Desktop | Tauri 2 · React 19 · TypeScript · Vite |
+| Backend | FastAPI · Python 3.11+ |
+| AI | LangGraph · LangChain · OpenAI |
+| Data | MySQL 8 · ChromaDB |
+| Search | BM25 · Vector Search · Reciprocal Rank Fusion |
+| Operations | Docker Compose · Caddy · AWS · GitHub Actions |
+| Security | JWT 인증 · 프로젝트 역할 기반 권한 · Rate Limit · Storage Quota |
+
 ## 주요 화면
 
 ### 프로젝트 채팅
@@ -71,12 +158,6 @@ PaiM은 프로젝트 상태를 임의로 확정하지 않습니다. 새 정보�
 | 프로젝트 메모리 | GitHub 연결 |
 | --- | --- |
 | ![PaiM 프로젝트 메모리 화면설계](desktop/assets/readme/v1.0.6-screen-memory.png) | ![PaiM GitHub 저장소 연결 화면설계](desktop/assets/readme/v1.0.6-screen-github.png) |
-
-## 기술 구성
-
-Tauri 2 · React 19 · TypeScript · FastAPI · LangGraph · MySQL 8 · ChromaDB · Docker Compose
-
-상세 구성은 [아키텍처 문서](docs/ARCHITECTURE.md)에서 확인할 수 있습니다.
 
 ## 시작하기
 
