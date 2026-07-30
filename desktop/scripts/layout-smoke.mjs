@@ -15,6 +15,7 @@ const AUTH_STORAGE_KEY = `${AUTH_STORAGE_KEY_PREFIX}${encodeURIComponent(API_SER
 const SERVER_B_AUTH_STORAGE_KEY = `${AUTH_STORAGE_KEY_PREFIX}${encodeURIComponent(API_SERVER_B)}`;
 const AUTH_SCENARIO_STORAGE_KEY = "paim.smoke.authScenario.v1";
 const SETTINGS_STORAGE_KEY = "paim.settings.v1";
+const SERVER_DOCUMENTS_STORAGE_KEY = "paim.smoke.serverDocuments.v1";
 const SMOKE_ACCESS_TOKEN = "paim-smoke-access-token";
 const SMOKE_USER = {
   id: 1,
@@ -146,6 +147,12 @@ function createPaimApiMockScript() {
         requested: 0,
         resolved: 0,
       };
+      const audioControl = {
+        lastDate: null,
+        lastFile: null,
+        polled: 0,
+        requested: 0,
+      };
       const deltaControl = {
         enabled: false,
         requested: 0,
@@ -168,6 +175,21 @@ function createPaimApiMockScript() {
       let nextDocumentId = 7000;
       let nextProjectId = 1000;
       let nextSessionId = 1000;
+      try {
+        const seededDocuments = JSON.parse(
+          localStorage.getItem(${JSON.stringify(SERVER_DOCUMENTS_STORAGE_KEY)}) || "{}",
+        );
+        Object.entries(seededDocuments).forEach(([projectId, documents]) => {
+          if (Array.isArray(documents)) {
+            serverDocumentsByProject.set(
+              Number(projectId),
+              documents.map((document) => ({ ...document })),
+            );
+          }
+        });
+      } catch {
+        // Invalid optional smoke seed behaves like an empty server.
+      }
 
       window.__paimLayoutSeedSupersedeSuggestion = (suggestionId = 901) => {
         includeSupersedingDecision = true;
@@ -319,6 +341,16 @@ function createPaimApiMockScript() {
           (count, documents) => count + documents.length,
           0,
         ),
+      });
+      window.__paimLayoutConfigureAudio = () => {
+        audioControl.lastDate = null;
+        audioControl.lastFile = null;
+        audioControl.polled = 0;
+        audioControl.requested = 0;
+      };
+      window.__paimLayoutReadAudioControl = () => ({
+        ...audioControl,
+        lastFile: audioControl.lastFile ? { ...audioControl.lastFile } : null,
       });
 
       const json = (payload, status = 200) =>
@@ -836,6 +868,41 @@ function createPaimApiMockScript() {
           return empty();
         }
 
+        const projectAudioMatch = url.pathname.match(
+          /^\\/api\\/v1\\/projects\\/(\\d+)\\/audio$/,
+        );
+        if (projectAudioMatch && method === "POST") {
+          const projectId = Number(projectAudioMatch[1]);
+          const file = init?.body instanceof FormData ? init.body.get("file") : null;
+          const date = init?.body instanceof FormData ? init.body.get("date") : null;
+          const docId = nextDocumentId;
+          nextDocumentId += 1;
+          audioControl.requested += 1;
+          audioControl.lastDate = typeof date === "string" ? date : null;
+          audioControl.lastFile = file instanceof File
+            ? { name: file.name, size: file.size, type: file.type }
+            : null;
+          const document = {
+            id: docId,
+            filename: file instanceof File ? file.name : "meeting.mp3",
+            doc_type: "meeting",
+            status: "processing",
+            uploaded_at: "2026-07-30T00:00:00.000Z",
+          };
+          serverDocumentsByProject.set(projectId, [
+            document,
+            ...(serverDocumentsByProject.get(projectId) || []).filter(
+              (existing) => existing.filename !== document.filename,
+            ),
+          ]);
+          return json({
+            doc_id: docId,
+            status: "processing",
+            provider: "openai",
+            diarization: false,
+          }, 201);
+        }
+
         const projectDocumentsMatch = url.pathname.match(
           /^\\/api\\/v1\\/projects\\/(\\d+)\\/documents$/,
         );
@@ -883,8 +950,34 @@ function createPaimApiMockScript() {
           /^\\/api\\/v1\\/projects\\/(\\d+)\\/documents\\/(\\d+)\\/status$/,
         );
         if (projectDocumentStatusMatch && method === "GET") {
+          const projectId = Number(projectDocumentStatusMatch[1]);
+          const docId = Number(projectDocumentStatusMatch[2]);
+          const documents = serverDocumentsByProject.get(projectId) || [];
+          const document = documents.find((candidate) => candidate.id === docId);
+          if (document?.doc_type === "meeting") {
+            audioControl.polled += 1;
+            if (document.status === "failed") {
+              return json({
+                doc_id: docId,
+                status: "failed",
+                last_error: "STT_NO_SPEECH",
+                progress_done: 0,
+                progress_total: 0,
+                extracted: { decision: 0, action: 0, issue: 0, risk: 0 },
+              });
+            }
+            document.status = "indexed";
+            return json({
+              doc_id: docId,
+              status: "indexed",
+              last_error: null,
+              progress_done: 4,
+              progress_total: 4,
+              extracted: { decision: 1, action: 2, issue: 1, risk: 0 },
+            });
+          }
           return json({
-            doc_id: Number(projectDocumentStatusMatch[2]),
+            doc_id: docId,
             status: "indexed",
             blocks: 1,
             error_message: null,
@@ -954,7 +1047,12 @@ function createPaimTauriMockScript() {
       const callbacks = new Map();
       const listeners = new Map();
       let nextCallbackId = 1;
+      let nextDialogSelection = null;
       let nextEventId = 1;
+
+      window.__paimLayoutSelectDialogPath = (path) => {
+        nextDialogSelection = typeof path === "string" ? path : null;
+      };
 
       const unregisterCallback = (callbackId) => {
         callbacks.delete(callbackId);
@@ -1008,6 +1106,11 @@ function createPaimTauriMockScript() {
           if (cmd === "plugin:event|emit") {
             window.__paimLayoutEmitTauriEvent?.(args.event, args.payload);
             return null;
+          }
+          if (cmd === "plugin:dialog|open") {
+            const selection = nextDialogSelection;
+            nextDialogSelection = null;
+            return selection;
           }
           if (cmd === "path_kind") {
             return "file";
@@ -9662,6 +9765,244 @@ async function verifyProjectChatQuestion(send) {
   return { value, failures };
 }
 
+// 회의 음성은 native 선택 → 접근 가능한 확인 dialog → STT polling까지 한 흐름으로 이어진다.
+async function verifyMeetingAudioFlow(send) {
+  const projectState = createDefaultSmokeProjectStorage();
+  const tauriMockScript = await installPaimTauriMock(send);
+  const failures = [];
+
+  await evaluateAndNavigateToSelector(
+    send,
+    `localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(projectState)})`,
+    APP_URL,
+    ".portfolio-page",
+  );
+  await openProjectDetailFromPortfolio(send);
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector('#project-detail-tab-files')?.click()`,
+  });
+  await waitForSelector(send, ".project-detail-file-add-actions");
+  await send("Runtime.evaluate", {
+    expression: `(() => {
+      window.__paimLayoutConfigureAudio?.();
+      window.__paimLayoutSelectDialogPath?.('/mock/weekly-sync.mp3');
+      const buttons = Array.from(
+        document.querySelectorAll('.project-detail-file-add-actions button'),
+      );
+      const audioButton = buttons.find((button) => button.textContent.includes('회의 음성'));
+      audioButton?.click();
+    })()`,
+  });
+  await waitForSelector(send, ".audio-upload-dialog");
+  await send("Runtime.evaluate", {
+    awaitPromise: true,
+    expression: `(async () => {
+      const timeoutAt = Date.now() + 2500;
+      while (Date.now() < timeoutAt) {
+        if (document.querySelector('.audio-upload-dialog')?.open === true) {
+          return true;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      return false;
+    })()`,
+  });
+  await sleep(80);
+
+  const dialogResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const dialog = document.querySelector('.audio-upload-dialog');
+      const dateInput = dialog?.querySelector('input[type="date"]');
+      return {
+        ariaLabel: dialog?.getAttribute('aria-label') || '',
+        closeLabel: dialog?.querySelector('button[aria-label="닫기"]')?.getAttribute('aria-label') || '',
+        dateDescription: dialog?.querySelector('.audio-upload-date-description')?.textContent.trim() || '',
+        dateLabel: dateInput?.labels?.[0]?.textContent.trim() || '',
+        dateValue: dateInput?.value || '',
+        focusedText: document.activeElement?.textContent?.trim() || '',
+        hasEnglishClose: Boolean(dialog?.querySelector('button[aria-label="Close"]')),
+        text: dialog?.textContent || '',
+      };
+    })()`,
+  });
+
+  await send("Runtime.evaluate", {
+    expression: `Array.from(document.querySelectorAll('.audio-upload-dialog button'))
+      .find((button) => button.textContent.trim() === '전사 시작')?.click()`,
+  });
+  await sleep(6200);
+
+  const completedResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const control = window.__paimLayoutReadAudioControl?.() || {};
+      const row = Array.from(document.querySelectorAll('.project-detail-file-row'))
+        .find((candidate) => candidate.querySelector('strong')?.textContent.trim() === 'weekly-sync.mp3');
+      const state = JSON.parse(
+        localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}',
+      );
+      const project = state.projects?.find(
+        (candidate) => candidate.id === state.selectedProjectId,
+      );
+      const storedAudio = project?.files?.find(
+        (file) => file.name === 'weekly-sync.mp3',
+      );
+      const audioDialog = document.querySelector('.audio-upload-dialog');
+      return {
+        control,
+        dialogClosed: !audioDialog || audioDialog.open !== true,
+        openDisabled: row?.querySelector('.project-detail-file-open')?.disabled === true,
+        statusText: row?.querySelector('.project-detail-file-copy small')?.textContent.trim() || '',
+        storedAudio,
+      };
+    })()`,
+  });
+
+  await send("Runtime.evaluate", {
+    expression: `(() => {
+      const state = JSON.parse(
+        localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}',
+      );
+      const project = state.projects?.find(
+        (candidate) => candidate.id === state.selectedProjectId,
+      );
+      const audio = project?.files?.find((file) => file.name === 'weekly-sync.mp3');
+      if (!project || !audio) return;
+      const indexedWithoutDetails = { ...audio };
+      delete indexedWithoutDetails.extracted;
+      delete indexedWithoutDetails.lastError;
+      delete indexedWithoutDetails.processingProgressDone;
+      delete indexedWithoutDetails.processingProgressTotal;
+      const failedWithoutDetails = {
+        id: 'restart-failed-audio',
+        name: 'failed-sync.mp3',
+        path: 'server-document://7001/failed-sync.mp3',
+        kind: 'file',
+        docId: 7001,
+        documentType: 'meeting',
+        documentStatus: 'failed',
+        serverOnly: true,
+        uploadedAt: Date.now() - 1000,
+      };
+      project.files = [failedWithoutDetails, indexedWithoutDetails];
+      localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, JSON.stringify(state));
+      localStorage.setItem(
+        ${JSON.stringify(SERVER_DOCUMENTS_STORAGE_KEY)},
+        JSON.stringify({
+          1: [
+            {
+              id: 7001,
+              filename: 'failed-sync.mp3',
+              doc_type: 'meeting',
+              status: 'failed',
+              uploaded_at: '2026-07-30T00:00:01.000Z',
+            },
+            {
+              id: 7000,
+              filename: 'weekly-sync.mp3',
+              doc_type: 'meeting',
+              status: 'indexed',
+              uploaded_at: '2026-07-30T00:00:00.000Z',
+            },
+          ],
+        }),
+      );
+    })()`,
+  });
+  await navigateAndWaitForSelector(send, APP_URL, ".portfolio-page");
+  await openProjectDetailFromPortfolio(send);
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector('#project-detail-tab-files')?.click()`,
+  });
+  await waitForSelector(send, ".project-detail-file-list");
+  await sleep(700);
+
+  const restartResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const state = JSON.parse(
+        localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}',
+      );
+      const project = state.projects?.find(
+        (candidate) => candidate.id === state.selectedProjectId,
+      );
+      const indexed = project?.files?.find((file) => file.docId === 7000);
+      const failed = project?.files?.find((file) => file.docId === 7001);
+      const failedRow = Array.from(document.querySelectorAll('.project-detail-file-row'))
+        .find((candidate) => candidate.querySelector('strong')?.textContent.trim() === 'failed-sync.mp3');
+      return {
+        indexed,
+        failed,
+        failedStatusText:
+          failedRow?.querySelector('.project-detail-file-copy small')?.textContent.trim() || '',
+        polled: window.__paimLayoutReadAudioControl?.().polled ?? 0,
+      };
+    })()`,
+  });
+
+  const dialog = dialogResult.result.value;
+  const completed = completedResult.result.value;
+  const restart = restartResult.result.value;
+
+  if (
+    dialog.ariaLabel !== "회의 음성 전사" ||
+    dialog.closeLabel !== "닫기" ||
+    dialog.hasEnglishClose ||
+    dialog.focusedText !== "회의 음성 전사" ||
+    dialog.dateLabel !== "회의 날짜" ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(dialog.dateValue) ||
+    !dialog.dateDescription.includes("상대 날짜") ||
+    !dialog.text.includes("25 MiB") ||
+    !dialog.text.includes("CLOVA 회의 음성 계약")
+  ) {
+    failures.push("meeting audio dialog should expose localized controls, date context, and safe limits");
+  }
+
+  if (
+    completed.control?.requested !== 1 ||
+    completed.control?.polled < 1 ||
+    completed.control?.lastFile?.name !== "weekly-sync.mp3" ||
+    completed.control?.lastFile?.size <= 0 ||
+    completed.control?.lastDate !== dialog.dateValue
+  ) {
+    failures.push("meeting audio should post one multipart file/date and poll its document status");
+  }
+
+  if (
+    !completed.dialogClosed ||
+    !completed.openDisabled ||
+    !completed.statusText.includes("회의 분석 완료") ||
+    completed.storedAudio?.documentType !== "meeting" ||
+    completed.storedAudio?.documentStatus !== "indexed" ||
+    completed.storedAudio?.transcriptionProvider !== "openai" ||
+    completed.storedAudio?.extracted?.action !== 2
+  ) {
+    failures.push("completed meeting audio should persist as a non-previewable indexed source with extracted counts");
+  }
+
+  if (
+    restart.polled < 2 ||
+    restart.indexed?.extracted?.action !== 2 ||
+    restart.failed?.documentStatus !== "failed" ||
+    restart.failed?.lastError !== "회의 음성에서 인식할 수 있는 발화를 찾지 못했습니다" ||
+    !restart.failedStatusText.includes("음성 전사 실패") ||
+    !restart.failedStatusText.includes("인식할 수 있는 발화")
+  ) {
+    failures.push("restart should hydrate indexed counts and the safe failure reason for terminal meetings");
+  }
+
+  debugLayout("meeting audio flow", { dialog, completed, restart });
+  await send("Runtime.evaluate", {
+    expression: `localStorage.removeItem(${JSON.stringify(SERVER_DOCUMENTS_STORAGE_KEY)})`,
+  });
+  await send("Page.removeScriptToEvaluateOnNewDocument", {
+    identifier: tauriMockScript.identifier,
+  });
+  await navigateAndWaitForSelector(send, APP_URL, ".app-shell");
+  return { value: { dialog, completed, restart }, failures };
+}
+
 // 파일 패널은 프로젝트 폴더 트리를 검색, 접기/펼치기, 최대화 상태로 보여줘야 한다.
 async function verifyProjectOverviewFiles(send) {
   const projectFiles = [
@@ -14514,7 +14855,16 @@ try {
   await navigateAndWaitForSelector(send, APP_URL, ".app-shell");
 
   let hasFailures = false;
-  if (process.env.PAIM_LAYOUT_FOCUS === "project-regressions") {
+  if (process.env.PAIM_LAYOUT_FOCUS === "meeting-audio") {
+    const result = await verifyMeetingAudioFlow(send);
+    if (result.failures.length > 0) {
+      hasFailures = true;
+      console.log("FAIL meeting audio flow");
+      result.failures.forEach((failure) => console.log(`  - ${failure}`));
+    } else {
+      console.log("PASS meeting audio uploads, polls, and remains non-previewable");
+    }
+  } else if (process.env.PAIM_LAYOUT_FOCUS === "project-regressions") {
     const focusedChecks = [
       ["project-scoped detail and chat drafts", await verifyProjectScopedDetailAndChatDrafts(send)],
       ["delta briefing standard chat", await verifyProjectDeltaBriefingCreatesStandardChat(send)],
@@ -14994,6 +15344,16 @@ try {
     chatQuestionResult.failures.forEach((failure) => console.log(`  - ${failure}`));
   } else {
     console.log("PASS project chat question uses the demo response flow");
+  }
+
+  const meetingAudioResult = await verifyMeetingAudioFlow(send);
+
+  if (meetingAudioResult.failures.length > 0) {
+    hasFailures = true;
+    console.log("FAIL meeting audio flow");
+    meetingAudioResult.failures.forEach((failure) => console.log(`  - ${failure}`));
+  } else {
+    console.log("PASS meeting audio uploads, polls, and remains non-previewable");
   }
 
   const overviewFilesResult = await verifyProjectOverviewFiles(send);

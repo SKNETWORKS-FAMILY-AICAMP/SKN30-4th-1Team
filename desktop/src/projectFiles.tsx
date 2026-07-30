@@ -1,10 +1,12 @@
 import {
+  AudioLines,
   ArrowLeft,
   ChevronRight,
   Ellipsis,
   Folder,
   FolderOpen,
   LoaderCircle,
+  RefreshCw,
   Search,
   Upload,
   X,
@@ -13,6 +15,7 @@ import { Badge, type BadgeVariant } from "@astryxdesign/core/Badge";
 import { Banner } from "@astryxdesign/core/Banner";
 import { BreadcrumbItem, Breadcrumbs } from "@astryxdesign/core/Breadcrumbs";
 import { Button } from "@astryxdesign/core/Button";
+import { Card } from "@astryxdesign/core/Card";
 import { Center } from "@astryxdesign/core/Center";
 import { ClickableCard } from "@astryxdesign/core/ClickableCard";
 import { CodeBlock } from "@astryxdesign/core/CodeBlock";
@@ -28,6 +31,7 @@ import {
   type CSSProperties,
   type KeyboardEvent,
   type PointerEvent,
+  type ReactNode,
 } from "react";
 
 import { useI18n } from "./i18n";
@@ -40,6 +44,7 @@ import {
   type ProjectFileGroup,
   type ProjectFileVisualMeta,
 } from "./projectFileUtils";
+import { getExtractionTotal, isMeetingDocument } from "./stt";
 import type {
   Attachment,
   DemoStatus,
@@ -53,6 +58,44 @@ const PROJECT_FILE_TREE_KEYBOARD_LARGE_STEP = 50;
 
 function getProjectSourceManageButtonId(sourceId: string) {
   return `project-source-manage-${sourceId}`;
+}
+
+type ProjectSourceCardProps = {
+  children: ReactNode;
+  isMeeting: boolean;
+  label: string;
+  onOpen: () => void;
+};
+
+function ProjectSourceCard({
+  children,
+  isMeeting,
+  label,
+  onOpen,
+}: ProjectSourceCardProps) {
+  if (isMeeting) {
+    return (
+      <Card
+        aria-label={label}
+        className="project-source-card"
+        padding={2}
+        role="group"
+      >
+        {children}
+      </Card>
+    );
+  }
+
+  return (
+    <ClickableCard
+      className="project-source-card"
+      label={label}
+      onClick={onOpen}
+      padding={2}
+    >
+      {children}
+    </ClickableCard>
+  );
 }
 
 type ProjectFileTreeProps = {
@@ -82,9 +125,11 @@ type ProjectFilesPanelProps = {
   onBackToLibrary: () => void;
   onClosePreview: () => void;
   onCancelImport: () => void;
+  onOpenAudio: () => void;
   onOpenDirectory: () => void;
   onOpenFiles: () => void;
   onOpenSource: (source: Attachment) => void;
+  onRefreshDocumentStatus: (source: Attachment) => void;
   onConfirmDelete: (source: Attachment) => Promise<boolean>;
   onQueryChange: (query: string) => void;
   onSelectFile: (entry: Attachment) => void;
@@ -530,9 +575,11 @@ export function ProjectFilesPanel({
   onBackToLibrary,
   onClosePreview,
   onCancelImport,
+  onOpenAudio,
   onOpenDirectory,
   onOpenFiles,
   onOpenSource,
+  onRefreshDocumentStatus,
   onConfirmDelete,
   onQueryChange,
   onSelectFile,
@@ -711,6 +758,11 @@ export function ProjectFilesPanel({
               items={[
                 { label: t("파일 추가"), onClick: onOpenFiles },
                 { label: t("폴더 추가"), onClick: onOpenDirectory },
+                {
+                  icon: <AudioLines size={15} />,
+                  label: t("회의 음성 추가"),
+                  onClick: onOpenAudio,
+                },
               ]}
             />
           </div>
@@ -753,12 +805,15 @@ export function ProjectFilesPanel({
                         const documentStatusMeta = getProjectDocumentStatusMeta(source);
 
                         return (
-                          <ClickableCard
-                            className="project-source-card"
+                          <ProjectSourceCard
+                            isMeeting={isMeetingDocument(source.documentType)}
                             key={source.id}
-                            label={t("{name} 열기", { name: source.name })}
-                            onClick={() => onOpenSource(source)}
-                            padding={2}
+                            label={
+                              isMeetingDocument(source.documentType)
+                                ? t("{name} 회의 음성 상태", { name: source.name })
+                                : t("{name} 열기", { name: source.name })
+                            }
+                            onOpen={() => onOpenSource(source)}
                           >
                             <div className="project-source-icon">
                               <SourceIcon size={18} style={{ color: sourceMeta.color }} />
@@ -768,17 +823,72 @@ export function ProjectFilesPanel({
                               <span>
                                 {source.kind === "directory"
                                   ? t("폴더 · {count}개 항목", { count: sourceCount })
+                                  : isMeetingDocument(source.documentType)
+                                    ? source.transcriptionProvider
+                                      ? t("회의 음성 · {provider}", {
+                                          provider: source.transcriptionProvider,
+                                        })
+                                      : t("회의 음성")
                                   : t("파일")}
                               </span>
                               {documentStatusMeta ? (
-                                <Badge
-                                  className="project-document-status"
-                                  label={t(documentStatusMeta.label)}
-                                  variant={documentStatusMeta.variant}
-                                />
+                                <span title={t(documentStatusMeta.title)}>
+                                  <Badge
+                                    className="project-document-status"
+                                    label={t(documentStatusMeta.label)}
+                                    variant={documentStatusMeta.variant}
+                                  />
+                                </span>
+                              ) : null}
+                              {isMeetingDocument(source.documentType) &&
+                              source.documentStatus === "processing" &&
+                              typeof source.processingProgressDone === "number" &&
+                              typeof source.processingProgressTotal === "number" ? (
+                                <small>
+                                  {t("메모리 분석 {done}/{total}", {
+                                    done: source.processingProgressDone,
+                                    total: source.processingProgressTotal,
+                                  })}
+                                </small>
+                              ) : null}
+                              {isMeetingDocument(source.documentType) &&
+                              source.documentStatus === "indexed" &&
+                              getExtractionTotal(source.extracted) > 0 ? (
+                                <small>
+                                  {t("프로젝트 메모리 {count}개 추출", {
+                                    count: getExtractionTotal(source.extracted),
+                                  })}
+                                </small>
+                              ) : null}
+                              {isMeetingDocument(source.documentType) &&
+                              (source.documentStatus === "failed" ||
+                                source.documentStatus === "delayed") ? (
+                                <small
+                                  className="project-source-status-detail"
+                                  data-tone={source.documentStatus}
+                                >
+                                  {t(
+                                    source.lastError ||
+                                      documentStatusMeta?.title ||
+                                      "회의 음성을 처리하지 못했습니다",
+                                  )}
+                                </small>
                               ) : null}
                             </div>
                             <div className="project-source-actions">
+                              {isMeetingDocument(source.documentType) &&
+                              (source.documentStatus === "processing" ||
+                                source.documentStatus === "delayed") ? (
+                                <Button
+                                  icon={<RefreshCw size={14} />}
+                                  isIconOnly
+                                  label={t("상태 새로고침")}
+                                  onClick={() => onRefreshDocumentStatus(source)}
+                                  size="sm"
+                                  tooltip={t("상태 새로고침")}
+                                  variant="ghost"
+                                />
+                              ) : null}
                               <DropdownMenu
                                 button={{
                                   icon: <Ellipsis size={15} />,
@@ -802,7 +912,7 @@ export function ProjectFilesPanel({
                                 menuWidth={112}
                               />
                             </div>
-                          </ClickableCard>
+                          </ProjectSourceCard>
                         );
                       })}
                     </div>
@@ -820,7 +930,7 @@ export function ProjectFilesPanel({
           ) : (
             <EmptyState
               className="project-sources-empty"
-              description={t("PaiM에게 제공할 파일이나 폴더를 업로드하세요.")}
+              description={t("PaiM에게 제공할 파일·폴더·회의 음성을 업로드하세요.")}
               icon={<FolderOpen size={32} />}
               title={t("등록된 자료가 없습니다")}
             />

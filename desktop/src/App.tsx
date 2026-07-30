@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  AudioLines,
   ArrowDown,
   ArrowLeft,
   ArrowUp,
@@ -112,6 +113,13 @@ import {
   isPaimApiError,
 } from "./paimApi";
 import {
+  createPendingDocumentDeleteQueue,
+  getPendingDocumentDeletesStorageKey,
+  type PendingDocumentDeleteAttemptResult,
+  type PendingDocumentDeleteQueue,
+  type PendingDocumentDeleteTarget,
+} from "./pendingDocumentDeletes";
+import {
   fetchPaimCapabilities,
   formatBytesAsMiB,
   formatExtensions,
@@ -133,6 +141,12 @@ import {
   type ProjectFileVisualMeta,
 } from "./projectFileUtils";
 import {
+  needsProjectDocumentStatusHydration,
+  reconcileProjectDocumentAttachments,
+  removeOlderMeetingDocumentGenerations,
+  type ServerDocumentAttachment,
+} from "./projectDocumentSync";
+import {
   DEFAULT_PAIM_API_ROOT_URL,
   getPaimApiRootUrl,
   loadPaimSettings,
@@ -145,6 +159,22 @@ import {
   type SuggestionMinConfidence,
   type ThemeSetting,
 } from "./settings";
+import { AudioUploadDialog } from "./AudioUploadDialog";
+import {
+  getExtractionTotal,
+  getLocalISODate,
+  getSttFailureMessage,
+  isISODate,
+  isKnownAudioFileName,
+  isMeetingDocument,
+  isSupportedAudioFileName,
+  STT_DOCUMENT_TYPE,
+  STT_SAFE_EXTENSIONS,
+  STT_SAFE_MAX_FILE_BYTES,
+  type AudioUploadDraft,
+  type AudioUploadResponse,
+  type DocumentExtractionCounts,
+} from "./stt";
 import { WorkspacePageLayout } from "./WorkspacePageLayout";
 import { ProjectPortfolioPage } from "./ProjectPortfolioPage";
 import { ProfileAvatar } from "./ProfileAvatar";
@@ -388,7 +418,9 @@ type ApiDocumentStatusResponse = {
   doc_id: number;
   status: ApiDocumentStatus;
   last_error?: string | null;
-  extracted?: Record<string, number>;
+  progress_done?: number | null;
+  progress_total?: number | null;
+  extracted?: DocumentExtractionCounts;
 };
 
 type ApiQueryHistoryMessage = {
@@ -524,6 +556,8 @@ type SessionDraft = {
 const SERVER_SYNC_TIMEOUT_MS = 3000;
 const DOCUMENT_STATUS_POLL_INTERVAL_MS = 3000;
 const DOCUMENT_STATUS_POLL_TIMEOUT_MS = 180000;
+const AUDIO_STATUS_POLL_INTERVAL_MS = 5000;
+const AUDIO_STATUS_POLL_TIMEOUT_MS = 15 * 60 * 1000;
 const GITHUB_REPOSITORY_SYNC_POLL_INTERVAL_MS = 3000;
 const GITHUB_REPOSITORY_SYNC_TIMEOUT_MS = 600000;
 const QUERY_HISTORY_LIMIT = 20;
@@ -1194,7 +1228,9 @@ function getProjectSetupSourceStatusLabel(attachment: Attachment) {
   return attachment.kind === "directory" ? "폴더" : "로컬";
 }
 
-function createServerDocumentAttachment(document: ApiDocumentListItem): Attachment {
+function createServerDocumentAttachment(
+  document: ApiDocumentListItem,
+): ServerDocumentAttachment {
   const uploadedAt = parsePaimTimestamp(document.uploaded_at);
 
   return {
@@ -1203,6 +1239,7 @@ function createServerDocumentAttachment(document: ApiDocumentListItem): Attachme
     path: `server-document://${document.id}/${document.filename}`,
     kind: "file",
     docId: document.id,
+    documentType: document.doc_type ?? null,
     documentStatus: toProjectDocumentStatus(document.status),
     serverOnly: true,
     uploadedAt: Number.isFinite(uploadedAt) ? uploadedAt : Date.now(),
@@ -1238,31 +1275,13 @@ function getAttachmentDocIds(attachments: Attachment[]) {
 function mergeServerDocumentsIntoAttachments(
   attachments: Attachment[],
   documents: ApiDocumentListItem[],
+  tombstonedDocumentIds: ReadonlySet<number> = new Set<number>(),
 ) {
-  const documentsById = new Map(documents.map((document) => [document.id, document]));
-  const updatedAttachments = mapAttachments(attachments, (attachment) => {
-    if (typeof attachment.docId !== "number") {
-      return attachment;
-    }
-
-    const document = documentsById.get(attachment.docId);
-
-    if (!document) {
-      return attachment;
-    }
-
-    return {
-      ...attachment,
-      uploadName: document.filename,
-      documentStatus: toProjectDocumentStatus(document.status),
-    };
-  });
-  const existingDocIds = getAttachmentDocIds(updatedAttachments);
-  const serverOnlyAttachments = documents
-    .filter((document) => !existingDocIds.has(document.id))
-    .map(createServerDocumentAttachment);
-
-  return [...serverOnlyAttachments, ...updatedAttachments];
+  return reconcileProjectDocumentAttachments(
+    attachments,
+    documents.map(createServerDocumentAttachment),
+    tombstonedDocumentIds,
+  );
 }
 
 function getGithubRepositoryUrl(repository: GitRepositoryInfo) {
@@ -1453,20 +1472,28 @@ function getGithubRepositoryOwner(repositories: GithubAvailableRepository[]) {
 function createStoredAttachments(attachments: Attachment[] = []): Attachment[] {
   return attachments.map((attachment) => ({
     id: attachment.id,
-	    name: attachment.name,
-	    uploadName: attachment.uploadName,
-	    path: attachment.path,
-	    kind: attachment.kind,
-	    children: attachment.children ? createStoredAttachments(attachment.children) : undefined,
-	    childrenLoaded: attachment.childrenLoaded,
-	    docId: attachment.docId,
-	    documentStatus: attachment.documentStatus,
-	    isExpanded: attachment.isExpanded,
-	    lastError: attachment.lastError,
-	    serverOnly: attachment.serverOnly,
-	    uploadedAt: attachment.uploadedAt,
-	  }));
-	}
+    name: attachment.name,
+    uploadName: attachment.uploadName,
+    path: attachment.path,
+    kind: attachment.kind,
+    children: attachment.children
+      ? createStoredAttachments(attachment.children)
+      : undefined,
+    childrenLoaded: attachment.childrenLoaded,
+    docId: attachment.docId,
+    documentType: attachment.documentType,
+    documentStatus: attachment.documentStatus,
+    diarization: attachment.diarization,
+    extracted: attachment.extracted,
+    isExpanded: attachment.isExpanded,
+    lastError: attachment.lastError,
+    processingProgressDone: attachment.processingProgressDone,
+    processingProgressTotal: attachment.processingProgressTotal,
+    serverOnly: attachment.serverOnly,
+    transcriptionProvider: attachment.transcriptionProvider,
+    uploadedAt: attachment.uploadedAt,
+  }));
+}
 
 function loadSessionDrafts(storageKey: string) {
   const drafts = new Map<string, SessionDraft>();
@@ -1867,6 +1894,10 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     () => `${projectStorageKey}${SESSION_DRAFT_STORAGE_SUFFIX}`,
     [projectStorageKey],
   );
+  const pendingDocumentDeletesStorageKey = useMemo(
+    () => getPendingDocumentDeletesStorageKey(projectStorageKey),
+    [projectStorageKey],
+  );
   const allowLegacyProjectCacheFallback =
     !canLogout &&
     normalizePaimServerUrl(initialProjectApiRootUrl) === DEFAULT_PAIM_API_ROOT_URL;
@@ -1957,6 +1988,8 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   const [pendingSetupDeleteProjectFileId, setPendingSetupDeleteProjectFileId] = useState<string | null>(
     null,
   );
+  const [audioUploadDraft, setAudioUploadDraft] = useState<AudioUploadDraft | null>(null);
+  const [isAudioUploadStarting, setIsAudioUploadStarting] = useState(false);
   // 앱 진입점은 프로젝트 포트폴리오다. 프로젝트 선택은 상세 화면으로,
   // 새 프로젝트 생성은 설정 흐름으로 이동하고 채팅은 첫 전송 때만 만들어진다.
   const {
@@ -2058,8 +2091,36 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   const didHydrateAttachmentPreviewsRef = useRef(false);
   const didSyncProjectsRef = useRef(false);
   const documentPollTimeoutsRef = useRef(new Map<string, number>());
+  const documentStatusHydrationTimeoutsRef = useRef(new Map<string, number>());
+  const documentStatusHydrationsRef = useRef(new Set<string>());
+  const documentStatusRequestsRef = useRef(
+    new Map<string, Promise<ApiDocumentStatusResponse>>(),
+  );
+  const manualDocumentStatusRefreshesRef = useRef(new Set<string>());
+  const postDocumentProcessingSyncTimeoutsRef = useRef(new Set<number>());
   const documentUploadControllersRef = useRef(new Map<string, AbortController>());
-  const cancelledDocumentIdsRef = useRef(new Set<number>());
+  const pendingDocumentDeleteQueueRef = useRef<PendingDocumentDeleteQueue | null>(null);
+  const pendingDocumentDeleteRetryTimeoutRef = useRef<number | null>(null);
+  if (!pendingDocumentDeleteQueueRef.current) {
+    pendingDocumentDeleteQueueRef.current = createPendingDocumentDeleteQueue({
+      deleteDocument: ({ apiProjectId, docId }) =>
+        fetchPaimJson<void>(`/projects/${apiProjectId}/documents/${docId}`, {
+          method: "DELETE",
+        }),
+      onPersistenceError: () => {
+        setDemoStatusState({
+          kind: "warning",
+          message:
+            "삭제 예약을 저장하지 못했습니다. 앱을 닫기 전에 서버 정리를 다시 시도합니다",
+          ok: false,
+          scope: "overview",
+        });
+      },
+      storage: window.localStorage,
+      storageKey: pendingDocumentDeletesStorageKey,
+    });
+  }
+  const pendingDocumentDeleteQueue = pendingDocumentDeleteQueueRef.current;
   const githubRepositoryPollTimeoutsRef = useRef(new Map<string, number>());
   const postGithubSyncRefreshTimeoutsRef = useRef<number[]>([]);
   const demoStatusTimeoutRef = useRef<number | null>(null);
@@ -2254,6 +2315,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   const shouldInertBackgroundForProjectPanel =
     showProjectPanel &&
     !isProjectPanelCollapsed &&
+    !audioUploadDraft &&
     (isProjectPanelMaximized || isProjectPanelOverlay);
   useEffect(() => {
     if (!shouldInertBackgroundForProjectPanel) {
@@ -3598,8 +3660,21 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         window.clearTimeout(timeoutId);
       }
       documentPollTimeoutsRef.current.clear();
+      for (const timeoutId of documentStatusHydrationTimeoutsRef.current.values()) {
+        window.clearTimeout(timeoutId);
+      }
+      documentStatusHydrationTimeoutsRef.current.clear();
+      documentStatusHydrationsRef.current.clear();
+      for (const timeoutId of postDocumentProcessingSyncTimeoutsRef.current) {
+        window.clearTimeout(timeoutId);
+      }
+      postDocumentProcessingSyncTimeoutsRef.current.clear();
       documentUploadControllersRef.current.forEach((controller) => controller.abort());
       documentUploadControllersRef.current.clear();
+      if (pendingDocumentDeleteRetryTimeoutRef.current !== null) {
+        window.clearTimeout(pendingDocumentDeleteRetryTimeoutRef.current);
+        pendingDocumentDeleteRetryTimeoutRef.current = null;
+      }
       for (const timeoutId of githubRepositoryPollTimeoutsRef.current.values()) {
         window.clearTimeout(timeoutId);
       }
@@ -3615,6 +3690,19 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   useEffect(() => {
     setPendingGithubDisconnectProjectId(null);
   }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (audioUploadDraft && audioUploadDraft.projectId !== selectedProjectId) {
+      setAudioUploadDraft(null);
+      setIsAudioUploadStarting(false);
+    }
+  }, [audioUploadDraft, selectedProjectId]);
+
+  useEffect(() => {
+    if (serverStatus === "online" && pendingDocumentDeleteQueue.size() > 0) {
+      void flushPendingDocumentDeletes(true);
+    }
+  }, [pendingDocumentDeleteQueue, serverStatus]);
 
   useEffect(() => {
     if (didHydrateAttachmentPreviewsRef.current) {
@@ -3948,6 +4036,50 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     }));
   }
 
+  function schedulePendingDocumentDeleteFlush() {
+    if (pendingDocumentDeleteRetryTimeoutRef.current !== null) {
+      window.clearTimeout(pendingDocumentDeleteRetryTimeoutRef.current);
+      pendingDocumentDeleteRetryTimeoutRef.current = null;
+    }
+    if (serverStatus === "offline") {
+      return;
+    }
+
+    const nextRetryAt = pendingDocumentDeleteQueue.nextRetryAt();
+    if (nextRetryAt === null) {
+      return;
+    }
+
+    pendingDocumentDeleteRetryTimeoutRef.current = window.setTimeout(() => {
+      pendingDocumentDeleteRetryTimeoutRef.current = null;
+      void flushPendingDocumentDeletes();
+    }, Math.min(Math.max(0, nextRetryAt - Date.now()), 300000));
+  }
+
+  function syncPendingDocumentDeleteResults(
+    results: PendingDocumentDeleteAttemptResult[],
+  ) {
+    schedulePendingDocumentDeleteFlush();
+    return results;
+  }
+
+  async function flushPendingDocumentDeletes(force = false) {
+    if (serverStatus === "offline") {
+      return [];
+    }
+
+    const results = await pendingDocumentDeleteQueue.flush({ force });
+    return syncPendingDocumentDeleteResults(results);
+  }
+
+  async function enqueuePendingDocumentDelete(
+    target: PendingDocumentDeleteTarget,
+  ) {
+    const result = await pendingDocumentDeleteQueue.enqueue(target);
+    syncPendingDocumentDeleteResults([result]);
+    return result.outcome === "completed";
+  }
+
   function clearDocumentPoll(projectId: string, docId: number) {
     const pollKey = `${projectId}:${docId}`;
     const timeoutId = documentPollTimeoutsRef.current.get(pollKey);
@@ -3981,61 +4113,468 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     });
   }
 
+  function applyDocumentStatusResponse(
+    projectId: string,
+    attachmentId: string,
+    expectedDocId: number,
+    status: ApiDocumentStatusResponse,
+    documentType?: string | null,
+  ) {
+    const documentStatus = toProjectDocumentStatus(status.status);
+    const isAudioDocument = isMeetingDocument(documentType);
+
+    updateProjectAttachment(projectId, attachmentId, (attachment) => {
+      if (attachment.docId !== expectedDocId) {
+        return attachment;
+      }
+
+      return {
+        ...attachment,
+        docId: status.doc_id,
+        documentStatus,
+        extracted: status.extracted ?? attachment.extracted,
+        lastError: status.last_error
+          ? isAudioDocument
+            ? getSttFailureMessage(status.last_error)
+            : status.last_error
+          : documentStatus === "failed" && isAudioDocument
+            ? getSttFailureMessage()
+            : null,
+        processingProgressDone: status.progress_done ?? null,
+        processingProgressTotal: status.progress_total ?? null,
+      };
+    });
+
+    return documentStatus;
+  }
+
+  function getDocumentStatusHydrationKey(projectId: string, docId: number) {
+    return `${projectId}:${docId}`;
+  }
+
+  function fetchDocumentStatusOnce(apiProjectId: number, docId: number) {
+    const requestKey = `${apiProjectId}:${docId}`;
+    const existingRequest = documentStatusRequestsRef.current.get(requestKey);
+    if (existingRequest) {
+      return existingRequest;
+    }
+
+    const request = fetchPaimJson<ApiDocumentStatusResponse>(
+      `/projects/${apiProjectId}/documents/${docId}/status`,
+    ).finally(() => {
+      if (documentStatusRequestsRef.current.get(requestKey) === request) {
+        documentStatusRequestsRef.current.delete(requestKey);
+      }
+    });
+    documentStatusRequestsRef.current.set(requestKey, request);
+    return request;
+  }
+
+  function clearDocumentStatusHydration(projectId: string, docId: number) {
+    const hydrationKey = getDocumentStatusHydrationKey(projectId, docId);
+    const timeoutId = documentStatusHydrationTimeoutsRef.current.get(hydrationKey);
+    if (typeof timeoutId === "number") {
+      window.clearTimeout(timeoutId);
+    }
+    documentStatusHydrationTimeoutsRef.current.delete(hydrationKey);
+    documentStatusHydrationsRef.current.delete(hydrationKey);
+  }
+
+  function scheduleProjectDocumentsSyncAfterProcessing(
+    projectId: string,
+    apiProjectId: number,
+    delay: number,
+  ) {
+    const timeoutId = window.setTimeout(() => {
+      postDocumentProcessingSyncTimeoutsRef.current.delete(timeoutId);
+      void syncProjectDocuments(projectId, apiProjectId);
+    }, delay);
+    postDocumentProcessingSyncTimeoutsRef.current.add(timeoutId);
+  }
+
+  function scheduleProjectDocumentStatusHydration(
+    projectId: string,
+    apiProjectId: number,
+    attachmentId: string,
+    docId: number,
+    documentType?: string | null,
+    attempt = 0,
+    delay = 0,
+  ) {
+    const hydrationKey = getDocumentStatusHydrationKey(projectId, docId);
+    if (
+      documentStatusHydrationTimeoutsRef.current.has(hydrationKey) ||
+      documentStatusHydrationsRef.current.has(hydrationKey)
+    ) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      documentStatusHydrationTimeoutsRef.current.delete(hydrationKey);
+      void hydrateProjectDocumentStatus(
+        projectId,
+        apiProjectId,
+        attachmentId,
+        docId,
+        documentType,
+        attempt,
+      );
+    }, delay);
+    documentStatusHydrationTimeoutsRef.current.set(hydrationKey, timeoutId);
+  }
+
+  async function hydrateProjectDocumentStatus(
+    projectId: string,
+    apiProjectId: number,
+    attachmentId: string,
+    docId: number,
+    documentType?: string | null,
+    attempt = 0,
+  ) {
+    const hydrationKey = getDocumentStatusHydrationKey(projectId, docId);
+    if (documentStatusHydrationsRef.current.has(hydrationKey)) {
+      return;
+    }
+
+    documentStatusHydrationsRef.current.add(hydrationKey);
+    let retryDelay: number | null = null;
+
+    try {
+      if (!hasProjectAttachment(projectId, attachmentId)) {
+        return;
+      }
+      const status = await fetchDocumentStatusOnce(apiProjectId, docId);
+      const documentStatus = applyDocumentStatusResponse(
+        projectId,
+        attachmentId,
+        docId,
+        status,
+        documentType,
+      );
+
+      if (!isProjectDocumentTerminal(documentStatus)) {
+        scheduleDocumentStatusPoll(
+          projectId,
+          apiProjectId,
+          attachmentId,
+          docId,
+          documentType,
+        );
+      }
+    } catch (error) {
+      if (isPaimApiError(error) && error.status === 404) {
+        void syncProjectDocuments(projectId, apiProjectId);
+      } else if (
+        attempt < 5 &&
+        (!isPaimApiError(error) ||
+          error.status === 408 ||
+          error.status === 425 ||
+          error.status === 429 ||
+          error.status >= 500)
+      ) {
+        retryDelay = Math.min(5000 * 2 ** attempt, 30000);
+      }
+    } finally {
+      documentStatusHydrationsRef.current.delete(hydrationKey);
+    }
+
+    if (retryDelay !== null) {
+      scheduleProjectDocumentStatusHydration(
+        projectId,
+        apiProjectId,
+        attachmentId,
+        docId,
+        documentType,
+        attempt + 1,
+        retryDelay,
+      );
+    }
+  }
+
   function scheduleDocumentStatusPoll(
     projectId: string,
     apiProjectId: number,
     attachmentId: string,
     docId: number,
+    documentType?: string | null,
     startedAt = Date.now(),
+    transientFailureCount = 0,
   ) {
+    clearDocumentStatusHydration(projectId, docId);
     clearDocumentPoll(projectId, docId);
 
+    const isAudioDocument = isMeetingDocument(documentType);
+    const pollInterval = isAudioDocument
+      ? Math.min(
+          AUDIO_STATUS_POLL_INTERVAL_MS * 2 ** Math.min(transientFailureCount, 3),
+          30000,
+        )
+      : DOCUMENT_STATUS_POLL_INTERVAL_MS;
+    const pollTimeout = isAudioDocument
+      ? AUDIO_STATUS_POLL_TIMEOUT_MS
+      : DOCUMENT_STATUS_POLL_TIMEOUT_MS;
     const pollKey = `${projectId}:${docId}`;
     const timeoutId = window.setTimeout(async () => {
-      try {
-        const status = await fetchPaimJson<ApiDocumentStatusResponse>(
-          `/projects/${apiProjectId}/documents/${docId}/status`,
-        );
-        const documentStatus = toProjectDocumentStatus(status.status);
+      if (!hasProjectAttachment(projectId, attachmentId)) {
+        documentPollTimeoutsRef.current.delete(pollKey);
+        return;
+      }
 
-        updateProjectAttachment(projectId, attachmentId, (attachment) => ({
-          ...attachment,
-          docId: status.doc_id,
-          documentStatus,
-          lastError: status.last_error ?? null,
-        }));
+      try {
+        const status = await fetchDocumentStatusOnce(apiProjectId, docId);
+        const documentStatus = applyDocumentStatusResponse(
+          projectId,
+          attachmentId,
+          docId,
+          status,
+          documentType,
+        );
+        const lastError =
+          isAudioDocument && status.last_error
+            ? getSttFailureMessage(status.last_error)
+            : status.last_error ?? null;
 
         if (isProjectDocumentTerminal(documentStatus)) {
+          const currentAttachment = collectFileAttachments(
+            projectsRef.current.find((project) => project.id === projectId)?.files ?? [],
+          ).find((attachment) => attachment.id === attachmentId);
+          const completedAttachment = currentAttachment
+            ? {
+                ...currentAttachment,
+                docId: status.doc_id,
+                documentStatus,
+              }
+            : undefined;
+
+          if (
+            isAudioDocument &&
+            documentStatus === "indexed" &&
+            completedAttachment
+          ) {
+            updateProject(projectId, (project) => ({
+              ...project,
+              files: removeOlderMeetingDocumentGenerations(
+                project.files ?? [],
+                completedAttachment,
+              ),
+            }));
+          }
+
           void refreshProjectMemoryCounts(projectId, apiProjectId);
           setPostSyncRefreshRevision((currentRevision) => currentRevision + 1);
           documentPollTimeoutsRef.current.delete(pollKey);
+          if (isAudioDocument && documentStatus === "indexed") {
+            scheduleProjectDocumentsSyncAfterProcessing(projectId, apiProjectId, 750);
+          } else {
+            void syncProjectDocuments(projectId, apiProjectId);
+          }
+
+          if (isAudioDocument) {
+            const extractedCount = getExtractionTotal(status.extracted);
+            setDemoStatus({
+              kind: documentStatus === "indexed" ? "success" : "error",
+              ok: documentStatus === "indexed",
+              message:
+                documentStatus === "indexed"
+                  ? extractedCount > 0
+                    ? t("회의 음성 분석 완료 · 프로젝트 메모리 {count}개 추출", {
+                        count: extractedCount,
+                      })
+                    : t("회의 음성 분석을 완료했습니다")
+                  : t(lastError || "회의 음성을 처리하지 못했습니다"),
+              projectId,
+              scope: "overview",
+            });
+          }
           return;
         }
 
-        if (Date.now() - startedAt >= DOCUMENT_STATUS_POLL_TIMEOUT_MS) {
+        if (Date.now() - startedAt >= pollTimeout) {
           updateProjectAttachment(projectId, attachmentId, (attachment) => ({
             ...attachment,
             documentStatus: "delayed",
-            lastError: "처리 지연 — 나중에 다시 확인",
+            lastError: isAudioDocument
+              ? "회의 음성 처리 지연 — 앱을 다시 열면 상태를 이어서 확인합니다"
+              : "처리 지연 — 나중에 다시 확인",
           }));
           void refreshProjectMemoryCounts(projectId, apiProjectId);
           documentPollTimeoutsRef.current.delete(pollKey);
           return;
         }
 
-        scheduleDocumentStatusPoll(projectId, apiProjectId, attachmentId, docId, startedAt);
+        scheduleDocumentStatusPoll(
+          projectId,
+          apiProjectId,
+          attachmentId,
+          docId,
+          documentType,
+          startedAt,
+        );
       } catch (error) {
+        const hasAudioPollTimedOut =
+          isAudioDocument && Date.now() - startedAt >= pollTimeout;
+        if (hasAudioPollTimedOut) {
+          updateProjectAttachment(projectId, attachmentId, (attachment) => ({
+            ...attachment,
+            documentStatus: "delayed",
+            lastError: "회의 음성 처리 지연 — 상태 새로고침으로 다시 확인할 수 있습니다",
+          }));
+          void refreshProjectMemoryCounts(projectId, apiProjectId);
+          documentPollTimeoutsRef.current.delete(pollKey);
+          return;
+        }
+
+        const shouldRetryAudioPoll =
+          isAudioDocument &&
+          (!isPaimApiError(error) ||
+            error.status === 408 ||
+            error.status === 425 ||
+            error.status === 429 ||
+            error.status >= 500) &&
+          Date.now() - startedAt < pollTimeout;
+
+        if (shouldRetryAudioPoll) {
+          updateProjectAttachment(projectId, attachmentId, (attachment) => ({
+            ...attachment,
+            documentStatus: "processing",
+            lastError: "서버 연결을 기다린 뒤 회의 음성 상태를 다시 확인합니다",
+          }));
+          scheduleDocumentStatusPoll(
+            projectId,
+            apiProjectId,
+            attachmentId,
+            docId,
+            documentType,
+            startedAt,
+            transientFailureCount + 1,
+          );
+          return;
+        }
+
         updateProjectAttachment(projectId, attachmentId, (attachment) => ({
           ...attachment,
           documentStatus: "failed",
-          lastError: getErrorMessage(error, "문서 처리 상태를 확인할 수 없습니다"),
+          lastError: getErrorMessage(
+            error,
+            isAudioDocument
+              ? "회의 음성 처리 상태를 확인할 수 없습니다"
+              : "문서 처리 상태를 확인할 수 없습니다",
+          ),
         }));
         void refreshProjectMemoryCounts(projectId, apiProjectId);
         documentPollTimeoutsRef.current.delete(pollKey);
       }
-    }, DOCUMENT_STATUS_POLL_INTERVAL_MS);
+    }, pollInterval);
 
     documentPollTimeoutsRef.current.set(pollKey, timeoutId);
+  }
+
+  async function handleRefreshProjectDocumentStatus(
+    projectId: string,
+    attachment: Attachment,
+  ) {
+    if (
+      !isMeetingDocument(attachment.documentType) ||
+      (attachment.documentStatus !== "processing" &&
+        attachment.documentStatus !== "delayed") ||
+      typeof attachment.docId !== "number"
+    ) {
+      return;
+    }
+
+    const targetProject = projectsRef.current.find((project) => project.id === projectId);
+    if (!targetProject || shouldSkipProjectPermission(targetProject)) {
+      return;
+    }
+
+    const refreshKey = `${projectId}:${attachment.docId}`;
+    if (manualDocumentStatusRefreshesRef.current.has(refreshKey)) {
+      return;
+    }
+    manualDocumentStatusRefreshesRef.current.add(refreshKey);
+    clearDocumentStatusHydration(projectId, attachment.docId);
+    clearDocumentPoll(projectId, attachment.docId);
+
+    try {
+      const apiProject = await ensureApiProject(targetProject);
+      if (typeof apiProject.apiProjectId !== "number") {
+        throw new Error("서버 프로젝트를 준비할 수 없습니다");
+      }
+
+      const status = await fetchDocumentStatusOnce(
+        apiProject.apiProjectId,
+        attachment.docId,
+      );
+      const documentStatus = applyDocumentStatusResponse(
+        projectId,
+        attachment.id,
+        attachment.docId,
+        status,
+        attachment.documentType,
+      );
+
+      if (documentStatus === "indexed") {
+        const currentAttachment = collectFileAttachments(
+          projectsRef.current.find((project) => project.id === projectId)?.files ?? [],
+        ).find((candidate) => candidate.id === attachment.id);
+        if (currentAttachment) {
+          updateProject(projectId, (project) => ({
+            ...project,
+            files: removeOlderMeetingDocumentGenerations(
+              project.files ?? [],
+              currentAttachment,
+            ),
+          }));
+        }
+        await Promise.all([
+          syncProjectDocuments(projectId, apiProject.apiProjectId),
+          refreshProjectMemoryCounts(projectId, apiProject.apiProjectId),
+        ]);
+        setPostSyncRefreshRevision((currentRevision) => currentRevision + 1);
+        setDemoStatus({
+          kind: "success",
+          message: "회의 음성 상태와 프로젝트 메모리를 새로고침했습니다",
+          ok: true,
+          projectId,
+          scope: "overview",
+        });
+      } else if (documentStatus === "failed") {
+        await syncProjectDocuments(projectId, apiProject.apiProjectId);
+        void refreshProjectMemoryCounts(projectId, apiProject.apiProjectId);
+        setDemoStatus({
+          kind: "error",
+          message: getSttFailureMessage(status.last_error),
+          ok: false,
+          projectId,
+          scope: "overview",
+        });
+      } else {
+        scheduleDocumentStatusPoll(
+          projectId,
+          apiProject.apiProjectId,
+          attachment.id,
+          attachment.docId,
+          attachment.documentType,
+        );
+        setDemoStatus({
+          kind: "info",
+          message: "회의 음성을 계속 처리하고 있습니다",
+          ok: true,
+          projectId,
+          scope: "overview",
+        });
+      }
+    } catch (error) {
+      setDemoStatus({
+        kind: "warning",
+        message: getErrorMessage(error, "회의 음성 상태를 새로고침할 수 없습니다"),
+        ok: false,
+        projectId,
+        scope: "overview",
+      });
+    } finally {
+      manualDocumentStatusRefreshesRef.current.delete(refreshKey);
+    }
   }
 
   async function syncProjectDocuments(projectId: string, apiProjectId: number) {
@@ -4043,18 +4582,54 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       return;
     }
 
+    await flushPendingDocumentDeletes(true);
+
     try {
       const documents = await fetchPaimJson<ApiDocumentListItem[]>(
         `/projects/${apiProjectId}/documents`,
       );
-      const visibleDocuments = documents.filter(
-        (document) => !cancelledDocumentIdsRef.current.has(document.id),
+      const tombstonedDocumentIds = new Set(
+        pendingDocumentDeleteQueue
+          .list()
+          .filter((entry) => entry.apiProjectId === apiProjectId)
+          .map((entry) => entry.docId),
+      );
+      const mergedFiles = mergeServerDocumentsIntoAttachments(
+        projectsRef.current.find((project) => project.id === projectId)?.files ?? [],
+        documents,
+        tombstonedDocumentIds,
       );
 
       updateProject(projectId, (project) => ({
         ...project,
-        files: mergeServerDocumentsIntoAttachments(project.files ?? [], visibleDocuments),
+        files: mergedFiles,
       }));
+
+      collectFileAttachments(mergedFiles)
+        .forEach((attachment) => {
+          if (typeof attachment.docId !== "number") {
+            return;
+          }
+          if (needsProjectDocumentStatusHydration(attachment)) {
+            scheduleProjectDocumentStatusHydration(
+              projectId,
+              apiProjectId,
+              attachment.id,
+              attachment.docId,
+              attachment.documentType,
+            );
+            return;
+          }
+          if (!isProjectDocumentTerminal(attachment.documentStatus)) {
+            scheduleDocumentStatusPoll(
+              projectId,
+              apiProjectId,
+              attachment.id,
+              attachment.docId,
+              attachment.documentType,
+            );
+          }
+        });
     } catch (error) {
       setDemoStatus({
         ok: false,
@@ -4456,6 +5031,278 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     return getErrorMessage(error, "Q&A 응답을 가져올 수 없습니다");
   }
 
+  async function readAudioUploadFile(draft: AudioUploadDraft) {
+    if (!supportsExtension(draft.name, [...STT_SAFE_EXTENSIONS])) {
+      throw new Error(
+        t("지원하지 않는 회의 음성 형식입니다 · {formats}", {
+          formats: formatExtensions([...STT_SAFE_EXTENSIONS]),
+        }),
+      );
+    }
+
+    try {
+      const encoded = await invoke<string>("read_file_base64", {
+        maxBytes: STT_SAFE_MAX_FILE_BYTES,
+        path: draft.path,
+      });
+      const bytes = base64ToBytes(encoded);
+
+      if (bytes.byteLength === 0) {
+        throw new Error(t("회의 음성 파일이 비어 있습니다"));
+      }
+      if (bytes.byteLength > STT_SAFE_MAX_FILE_BYTES) {
+        throw new Error(
+          t("{name}은 {limit}를 초과해 전사할 수 없습니다", {
+            limit: formatBytesAsMiB(STT_SAFE_MAX_FILE_BYTES),
+            name: draft.name,
+          }),
+        );
+      }
+
+      return new File([bytes], draft.name, { type: "application/octet-stream" });
+    } catch (error) {
+      if (String(error).includes("FILE_TOO_LARGE")) {
+        throw new Error(
+          t("{name}은 {limit}를 초과해 전사할 수 없습니다", {
+            limit: formatBytesAsMiB(STT_SAFE_MAX_FILE_BYTES),
+            name: draft.name,
+          }),
+        );
+      }
+      throw error;
+    }
+  }
+
+  function prepareProjectAudioUpload(projectId: string, path: string) {
+    const targetProject = projectsRef.current.find((project) => project.id === projectId);
+    if (!targetProject || shouldSkipProjectPermission(targetProject)) {
+      return false;
+    }
+
+    const name = getFileName(path);
+    if (!isSupportedAudioFileName(name)) {
+      throw new Error(
+        t("지원하지 않는 회의 음성 형식입니다 · {formats}", {
+          formats: formatExtensions([...STT_SAFE_EXTENSIONS]),
+        }),
+      );
+    }
+
+    setAudioUploadDraft({
+      date: getLocalISODate(),
+      name,
+      path,
+      projectId,
+    });
+    return true;
+  }
+
+  async function handleOpenProjectAudio(projectId: string) {
+    const targetProject = projectsRef.current.find((project) => project.id === projectId);
+
+    if (!targetProject || shouldSkipProjectPermission(targetProject)) {
+      return;
+    }
+    if (!canUseTauriDialog()) {
+      setDemoStatus({
+        ok: false,
+        message: "데스크톱 앱에서 회의 음성을 업로드할 수 있습니다",
+        scope: "overview",
+      });
+      return;
+    }
+
+    try {
+      const selectedPath = await open({
+        directory: false,
+        filters: [{ name: t("지원 오디오"), extensions: [...STT_SAFE_EXTENSIONS] }],
+        multiple: false,
+        title: t("전사할 회의 음성 선택"),
+      });
+      const [path] = normalizeDialogPaths(selectedPath);
+
+      if (!path) {
+        return;
+      }
+
+      prepareProjectAudioUpload(projectId, path);
+    } catch (error) {
+      setDemoStatus({
+        kind: "error",
+        ok: false,
+        message: getErrorMessage(error, "회의 음성 파일을 선택할 수 없습니다"),
+        projectId,
+        scope: "overview",
+      });
+    }
+  }
+
+  function closeAudioUploadDialog() {
+    if (!isAudioUploadStarting) {
+      setAudioUploadDraft(null);
+    }
+  }
+
+  async function handleConfirmAudioUpload() {
+    const draft = audioUploadDraft;
+    if (!draft || (draft.date && !isISODate(draft.date))) {
+      return;
+    }
+
+    const targetProject = projectsRef.current.find(
+      (project) => project.id === draft.projectId,
+    );
+    if (!targetProject || shouldSkipProjectPermission(targetProject)) {
+      return;
+    }
+    if (serverStatus !== "online") {
+      setDemoStatus({
+        kind: "warning",
+        message: "서버에 다시 연결한 뒤 전사를 시작할 수 있습니다",
+        ok: false,
+        projectId: draft.projectId,
+        scope: "overview",
+      });
+      return;
+    }
+
+    setIsAudioUploadStarting(true);
+
+    try {
+      const [apiProject, file] = await Promise.all([
+        ensureApiProject(targetProject),
+        readAudioUploadFile(draft),
+      ]);
+      if (typeof apiProject.apiProjectId !== "number") {
+        throw new Error("서버 프로젝트를 준비할 수 없습니다");
+      }
+
+      const entry: Attachment = {
+        id: createId("project-audio"),
+        name: draft.name,
+        path: draft.path,
+        kind: "file",
+        documentStatus: "uploading",
+        documentType: STT_DOCUMENT_TYPE,
+        uploadedAt: Date.now(),
+      };
+      const uploadKey = getDocumentUploadKey(draft.projectId, entry.id);
+      const controller = new AbortController();
+      documentUploadControllersRef.current.set(uploadKey, controller);
+
+      flushSync(() => {
+        updateProject(draft.projectId, (project) => ({
+          ...project,
+          files: [entry, ...(project.files ?? [])],
+        }));
+      });
+      if (selectedProjectIdRef.current === draft.projectId) {
+        setProjectSourcesMode("library");
+      }
+      setAudioUploadDraft(null);
+      setDemoStatus({
+        kind: "info",
+        ok: true,
+        message: "회의 음성을 서버에 업로드하는 중입니다",
+        projectId: draft.projectId,
+        scope: "overview",
+      });
+
+      try {
+        const formData = new FormData();
+        formData.append("file", file, draft.name);
+        if (draft.date) {
+          formData.append("date", draft.date);
+        }
+
+        const response = await fetchPaimFormData<AudioUploadResponse>(
+          `/projects/${apiProject.apiProjectId}/audio`,
+          formData,
+        );
+
+        if (
+          controller.signal.aborted ||
+          !hasProjectAttachment(draft.projectId, entry.id)
+        ) {
+          const cleaned = await enqueuePendingDocumentDelete({
+            apiProjectId: apiProject.apiProjectId,
+            docId: response.doc_id,
+          });
+          if (!cleaned) {
+            setDemoStatus({
+              kind: "warning",
+              ok: false,
+              message: "취소한 회의 음성의 서버 정리를 계속 재시도합니다",
+              projectId: draft.projectId,
+              scope: "overview",
+            });
+          }
+          return;
+        }
+
+        updateProjectAttachment(draft.projectId, entry.id, (attachment) => ({
+          ...attachment,
+          diarization: response.diarization,
+          docId: response.doc_id,
+          documentStatus: toProjectDocumentStatus(response.status),
+          documentType: STT_DOCUMENT_TYPE,
+          lastError: null,
+          serverOnly: true,
+          transcriptionProvider: response.provider,
+        }));
+        scheduleDocumentStatusPoll(
+          draft.projectId,
+          apiProject.apiProjectId,
+          entry.id,
+          response.doc_id,
+          STT_DOCUMENT_TYPE,
+        );
+        setDemoStatus({
+          kind: "success",
+          ok: true,
+          message: response.diarization
+            ? t("회의 음성 전사를 시작했습니다 · {provider} · 화자 분리 지원", {
+                provider: response.provider,
+              })
+            : t("회의 음성 전사를 시작했습니다 · {provider}", {
+                provider: response.provider,
+              }),
+          projectId: draft.projectId,
+          scope: "overview",
+        });
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          updateProjectAttachment(draft.projectId, entry.id, (attachment) => ({
+            ...attachment,
+            documentStatus: "failed",
+            lastError: getErrorMessage(error, "회의 음성을 업로드할 수 없습니다"),
+          }));
+          setDemoStatus({
+            kind: "error",
+            ok: false,
+            message: getErrorMessage(error, "회의 음성을 업로드할 수 없습니다"),
+            projectId: draft.projectId,
+            scope: "overview",
+          });
+        }
+      } finally {
+        if (documentUploadControllersRef.current.get(uploadKey) === controller) {
+          documentUploadControllersRef.current.delete(uploadKey);
+        }
+      }
+    } catch (error) {
+      setDemoStatus({
+        kind: "error",
+        ok: false,
+        message: getErrorMessage(error, "회의 음성 업로드를 시작할 수 없습니다"),
+        projectId: draft.projectId,
+        scope: "overview",
+      });
+    } finally {
+      setIsAudioUploadStarting(false);
+    }
+  }
+
   // 서버 업로드는 로컬 파일을 base64로 읽어 브라우저 FormData 파일로 감싼다.
   async function readUploadFile(entry: Attachment) {
     if (!capabilities) {
@@ -4527,17 +5374,15 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       );
 
       if (controller.signal.aborted) {
-        cancelledDocumentIdsRef.current.add(response.doc_id);
-        try {
-          await fetchPaimJson<void>(
-            `/projects/${apiProjectId}/documents/${response.doc_id}`,
-            { method: "DELETE" },
-          );
-          cancelledDocumentIdsRef.current.delete(response.doc_id);
-        } catch {
+        const cleaned = await enqueuePendingDocumentDelete({
+          apiProjectId,
+          docId: response.doc_id,
+        });
+        if (!cleaned) {
           setDemoStatus({
+            kind: "warning",
             ok: false,
-            message: "취소한 업로드의 서버 문서를 정리하지 못했습니다",
+            message: "취소한 업로드의 서버 정리를 계속 재시도합니다",
             projectId,
             scope: "overview",
           });
@@ -5346,6 +6191,62 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       return;
     }
 
+    const topLevelPaths = (
+      await Promise.all(
+        paths.map(async (path) => {
+          try {
+            return {
+              kind: await invoke<"directory" | "file">("path_kind", { path }),
+              path,
+            };
+          } catch {
+            return null;
+          }
+        }),
+      )
+    ).filter(
+      (entry): entry is { kind: "directory" | "file"; path: string } => entry !== null,
+    );
+    const audioPaths = topLevelPaths
+      .filter(
+        (entry) =>
+          entry.kind === "file" &&
+          isSupportedAudioFileName(getFileName(entry.path)),
+      )
+      .map((entry) => entry.path);
+
+    if (audioPaths.length > 1) {
+      setDemoStatus({
+        kind: "warning",
+        ok: false,
+        message: "회의 음성은 한 번에 하나씩 올려 주세요",
+        projectId,
+        scope: "overview",
+      });
+      return;
+    }
+
+    const generalPaths = topLevelPaths
+      .filter((entry) => entry.path !== audioPaths[0])
+      .map((entry) => entry.path);
+    if (audioPaths.length === 1) {
+      try {
+        prepareProjectAudioUpload(projectId, audioPaths[0]);
+      } catch (error) {
+        setDemoStatus({
+          kind: "error",
+          ok: false,
+          message: getErrorMessage(error, "회의 음성 파일을 선택할 수 없습니다"),
+          projectId,
+          scope: "overview",
+        });
+        return;
+      }
+    }
+    if (generalPaths.length === 0) {
+      return;
+    }
+
     const operation = beginProjectFileImport(projectId, "drop");
     if (!operation) {
       return;
@@ -5363,7 +6264,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       const uploadedAt = Date.now();
       const entries = (
         await Promise.all(
-          paths.map(async (path) => {
+          generalPaths.map(async (path) => {
             try {
               const kind = await invoke<"directory" | "file">("path_kind", { path });
               if (operation.controller.signal.aborted) {
@@ -5399,7 +6300,8 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       }
 
       registerProjectEntries(projectId, entries);
-      const failedCount = paths.length - entries.length;
+      const failedCount =
+        paths.length - audioPaths.length - entries.length;
       if (failedCount > 0) {
         setDemoStatus({
           kind: "warning",
@@ -5692,6 +6594,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         }
 
         clearDocumentPoll(projectId, docId);
+        clearDocumentStatusHydration(projectId, docId);
       }
     }
 
@@ -7332,6 +8235,16 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       });
       return;
     }
+    if (paths.some((path) => isKnownAudioFileName(getFileName(path)))) {
+      setDemoStatus({
+        kind: "warning",
+        ok: false,
+        message:
+          "음성 파일은 프로젝트 자료함의 회의 녹음 업로드를 이용해 주세요.",
+        scope: "overview",
+      });
+      return;
+    }
     const supportedPaths = paths.filter((path) =>
       supportsExtension(getFileName(path), queryAttachmentExtensions),
     );
@@ -8765,6 +9678,11 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
               isComposerSending={isSending}
               key={selectedProject.id}
               language={settings.language}
+              onAddProjectAudio={
+                canMutateSelectedProject
+                  ? () => void handleOpenProjectAudio(selectedProject.id)
+                  : undefined
+              }
               onAddProjectFiles={
                 canMutateSelectedProject
                   ? () => void handleOpenProjectFiles(selectedProject.id)
@@ -8807,6 +9725,9 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                 openProjectPanelTool("files");
                 openProjectPanel();
               }}
+              onRefreshProjectFileStatus={(file) =>
+                void handleRefreshProjectDocumentStatus(selectedProject.id, file)
+              }
               onTabChange={setProjectDetailTab}
               memoryItems={selectedProjectMemoryItems}
               project={selectedProject}
@@ -9222,6 +10143,15 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                             size="sm"
                             variant="ghost"
                           />
+                          <Button
+                            className="project-setup-summary-action"
+                            icon={<AudioLines size={13} />}
+                            isDisabled={!canMutateSelectedProject}
+                            label={t("회의 음성")}
+                            onClick={() => void handleOpenProjectAudio(selectedProject.id)}
+                            size="sm"
+                            variant="ghost"
+                          />
                         </div>
                         <div className="project-setup-source-list">
                           {selectedProjectSetupVisibleSources.map((source) => {
@@ -9320,6 +10250,17 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                             isDisabled={!canMutateSelectedProject}
                             label={t("폴더 선택")}
                             onClick={() => void handleOpenProjectDirectory(selectedProject.id)}
+                            size="sm"
+                            variant="secondary"
+                          />
+                          <Button
+                            className="project-setup-picker"
+                            icon={<AudioLines size={14} />}
+                            isDisabled={!canMutateSelectedProject}
+                            label={t("회의 음성")}
+                            onClick={() =>
+                              void handleOpenProjectAudio(selectedProject.id)
+                            }
                             size="sm"
                             variant="secondary"
                           />
@@ -9641,9 +10582,16 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                         setProjectFilePreviewForTab(tab.id, null)
                       }
                       onCancelImport={() => cancelProjectFileImport(selectedProject.id)}
+                      onOpenAudio={() => void handleOpenProjectAudio(selectedProject.id)}
                       onOpenDirectory={() => void handleOpenProjectDirectory(selectedProject.id)}
                       onOpenFiles={() => void handleOpenProjectFiles(selectedProject.id)}
                       onOpenSource={handleOpenProjectSource}
+                      onRefreshDocumentStatus={(source) =>
+                        void handleRefreshProjectDocumentStatus(
+                          selectedProject.id,
+                          source,
+                        )
+                      }
                       onQueryChange={(query) =>
                         updateProjectPanelTab(tab.id, (currentTab) => ({
                           ...currentTab,
@@ -9726,6 +10674,18 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
           })}
         </LayoutPanel>
       ) : null}
+          <AudioUploadDialog
+            draft={audioUploadDraft}
+            isServerOnline={serverStatus === "online"}
+            isSubmitting={isAudioUploadStarting}
+            onCancel={closeAudioUploadDialog}
+            onConfirm={() => void handleConfirmAudioUpload()}
+            onDateChange={(date) =>
+              setAudioUploadDraft((currentDraft) =>
+                currentDraft ? { ...currentDraft, date } : currentDraft,
+              )
+            }
+          />
           </div>
         </AppShell>
       </Theme>

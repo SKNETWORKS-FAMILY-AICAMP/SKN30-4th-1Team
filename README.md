@@ -3,7 +3,7 @@
 > **내가 쉬는 동안 프로젝트를 파악해주는 AI PM.**
 > 회의록·문서·GitHub 활동을 하나의 **살아있는 메모리**로 쌓고, AI가 스스로 Issue와 PR을 읽어 액션 완료를 감지하고 다음 할 일을 제안합니다.
 
-**Download:** https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/releases
+**Download:** https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/releases
 
 ![Python](https://img.shields.io/badge/Python-3.14-3776AB?style=flat-square&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-Backend-009688?style=flat-square&logo=fastapi&logoColor=white)
@@ -98,7 +98,7 @@ repo sync → 머지 PR × 열린 액션 대조(Reconciler) → 완료 제안 �
 
 ### 사용자 — 릴리즈 설치
 
-1. [Releases](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/releases)에서 설치 파일 다운로드 — macOS `.dmg`, Windows `-setup.exe` / `.msi`
+1. [Releases](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/releases)에서 설치 파일 다운로드 — macOS `.dmg`, Windows `-setup.exe` / `.msi`
 2. macOS에서 "확인되지 않은 개발자" 경고 시: 시스템 설정 → 개인정보 보호 및 보안 → **그래도 열기** (코드 서명은 4차 로드맵)
 3. 로컬 백엔드 준비(아래) 후 앱 실행 — 설정에서 서버 주소 변경 가능
 

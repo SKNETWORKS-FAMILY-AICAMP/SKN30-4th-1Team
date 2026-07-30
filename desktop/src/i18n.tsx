@@ -514,6 +514,10 @@ const en: Record<string, string> = {
   "지원 문서 {count}개 서버 업로드 중...": "Uploading {count} supported documents to the server...",
   "취소한 업로드의 서버 문서를 정리하지 못했습니다":
     "The server copy of the cancelled upload could not be removed",
+  "취소한 업로드의 서버 정리를 계속 재시도합니다":
+    "Retrying cleanup of the canceled server upload.",
+  "삭제 예약을 저장하지 못했습니다. 앱을 닫기 전에 서버 정리를 다시 시도합니다":
+    "Could not save the cleanup request. Retrying server cleanup before the app closes.",
   "서버에 연결되지 않아 로컬 채팅만 삭제했습니다": "The server is offline, so only the local chat was deleted.",
   "서버에 연결되지 않아 프로젝트를 삭제할 수 없습니다": "The project cannot be deleted while the server is offline.",
   "드롭한 파일이나 폴더를 등록할 수 없습니다": "Could not add the dropped files or folders.",
@@ -521,6 +525,83 @@ const en: Record<string, string> = {
   "프로젝트 파일을 업로드할 수 없습니다": "Could not upload the project files.",
   "데스크톱 앱에서 폴더를 업로드할 수 있습니다": "Folders can be uploaded from the desktop app.",
   "프로젝트 폴더를 업로드할 수 없습니다": "Could not upload the project folder.",
+  "회의 음성": "Meeting audio",
+  "회의 음성 추가": "Add meeting audio",
+  "회의 음성 전사": "Transcribe meeting audio",
+  "{name} 회의 음성 상태": "{name} meeting audio status",
+  "녹음 파일을 전사해 프로젝트 메모리로 반영합니다.":
+    "Transcribe a recording and add the results to project memory.",
+  "지원 형식 및 제한: {details}": "Supported formats and limit: {details}",
+  "회의 날짜": "Meeting date",
+  "회의에서 언급된 상대 날짜를 해석할 기준일입니다.":
+    "This date is used to interpret relative dates mentioned in the meeting.",
+  "올바른 회의 날짜를 선택해 주세요": "Choose a valid meeting date.",
+  "전사 후 자동 분석": "Automatic analysis after transcription",
+  "서버가 음성을 전사한 뒤 결정·액션·이슈·리스크를 추출합니다. 처리에는 몇 분이 걸릴 수 있습니다.":
+    "The server transcribes the audio, then extracts decisions, actions, issues, and risks. Processing may take several minutes.",
+  "CLOVA 회의 음성 계약에서 지원하는 형식만 선택할 수 있습니다.":
+    "You can select only formats supported by the CLOVA meeting-audio contract.",
+  "상태 새로고침": "Refresh status",
+  "회의 음성은 한 번에 하나씩 올려 주세요":
+    "Upload one meeting recording at a time.",
+  "음성 파일은 프로젝트 자료함의 회의 녹음 업로드를 이용해 주세요.":
+    "Use Meeting recording upload in the project library for audio files.",
+  "지원 오디오": "Supported audio",
+  "전사할 회의 음성 선택": "Select meeting audio to transcribe",
+  "전사 시작": "Start transcription",
+  "회의 음성 · {provider}": "Meeting audio · {provider}",
+  "메모리 분석 {done}/{total}": "Analyzing memory {done}/{total}",
+  "프로젝트 메모리 {count}개 추출": "Extracted {count} project memory items",
+  "PaiM에게 제공할 파일·폴더·회의 음성을 업로드하세요.":
+    "Upload files, folders, or meeting audio for PaiM.",
+  "회의 음성 분석 완료 · 프로젝트 메모리 {count}개 추출":
+    "Meeting audio analyzed · extracted {count} project memory items",
+  "회의 음성 분석을 완료했습니다": "Meeting audio analysis complete",
+  "지원하지 않는 회의 음성 형식입니다 · {formats}":
+    "Unsupported meeting audio format · {formats}",
+  "회의 음성 파일이 비어 있습니다": "The meeting audio file is empty.",
+  "{name}은 {limit}를 초과해 전사할 수 없습니다":
+    "{name} exceeds {limit} and cannot be transcribed.",
+  "데스크톱 앱에서 회의 음성을 업로드할 수 있습니다":
+    "Meeting audio can be uploaded from the desktop app.",
+  "회의 음성 파일을 선택할 수 없습니다": "Could not select the meeting audio file.",
+  "서버에 다시 연결한 뒤 전사를 시작할 수 있습니다":
+    "Reconnect to the server before starting transcription.",
+  "회의 음성을 서버에 업로드하는 중입니다": "Uploading meeting audio to the server.",
+  "취소한 회의 음성의 서버 문서를 정리하지 못했습니다":
+    "Could not remove the canceled meeting audio from the server.",
+  "취소한 회의 음성의 서버 정리를 계속 재시도합니다":
+    "Retrying cleanup of the canceled meeting audio on the server.",
+  "회의 음성 전사를 시작했습니다 · {provider} · 화자 분리 지원":
+    "Started meeting transcription · {provider} · speaker diarization supported",
+  "회의 음성 전사를 시작했습니다 · {provider}":
+    "Started meeting transcription · {provider}",
+  "회의 음성을 업로드할 수 없습니다": "Could not upload the meeting audio.",
+  "회의 음성 업로드를 시작할 수 없습니다": "Could not start the meeting audio upload.",
+  "회의 음성 처리 지연 — 앱을 다시 열면 상태를 이어서 확인합니다":
+    "Meeting audio is taking longer — reopen the app to resume status checks.",
+  "서버 연결을 기다린 뒤 회의 음성 상태를 다시 확인합니다":
+    "Waiting for the server, then checking the meeting audio status again.",
+  "회의 음성 처리 상태를 확인할 수 없습니다":
+    "Could not check the meeting audio processing status.",
+  "회의 음성 파일이 서버 허용 크기를 초과했습니다":
+    "The meeting audio exceeds the server size limit.",
+  "전사 결과를 프로젝트 메모리로 반영하지 못했습니다":
+    "Could not add the transcription results to project memory.",
+  "음성 전사 서비스 인증 정보가 설정되지 않았습니다":
+    "Audio transcription credentials are not configured.",
+  "음성 전사에 필요한 서버 구성 요소가 없습니다":
+    "The server is missing a required audio transcription component.",
+  "회의 음성에서 인식할 수 있는 발화를 찾지 못했습니다":
+    "No recognizable speech was found in the meeting audio.",
+  "음성 전사 서비스에서 처리에 실패했습니다":
+    "The audio transcription service could not process the recording.",
+  "서버가 이 회의 음성 형식을 지원하지 않습니다":
+    "The server does not support this meeting audio format.",
+  "회의 음성 처리가 취소되었습니다": "Meeting audio processing was canceled.",
+  "회의 음성 처리가 중단되어 다시 업로드해야 합니다":
+    "Meeting audio processing stopped and the file must be uploaded again.",
+  "회의 음성을 처리하지 못했습니다": "Could not process the meeting audio.",
   "하위 폴더를 읽을 수 없습니다": "Could not read the subfolder.",
   "서버 문서는 로컬 경로가 없어 미리볼 수 없습니다":
     "Server documents cannot be previewed because they do not have a local path.",

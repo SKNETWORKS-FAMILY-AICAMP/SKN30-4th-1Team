@@ -1121,6 +1121,8 @@ button:not(:disabled):not([aria-disabled="true"]) {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
 }
 
@@ -1165,6 +1167,11 @@ button:not(:disabled):not([aria-disabled="true"]) {
   cursor: default;
   color: var(--muted);
   opacity: 0.62;
+}
+
+.project-detail-file-open[data-meeting="true"]:disabled {
+  color: var(--text);
+  opacity: 1;
 }
 
 .project-detail-file-open:focus-visible,
@@ -4431,6 +4438,7 @@ button:not(:disabled):not([aria-disabled="true"]) {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   margin-bottom: 10px;
   color: var(--faint);
@@ -7610,6 +7618,194 @@ button:not(:disabled):not([aria-disabled="true"]) {
   min-width: 0;
 }
 
+.audio-upload-dialog-content {
+  display: grid;
+  gap: 18px;
+}
+
+.audio-upload-file-card {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  background:
+    linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--accent-purple) 8%, transparent),
+      transparent 58%
+    ),
+    var(--surface);
+}
+
+.audio-upload-file-icon {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent-purple) 28%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent-purple) 11%, var(--surface-strong));
+  color: var(--accent-purple);
+}
+
+.audio-upload-file-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.audio-upload-file-copy strong,
+.audio-upload-file-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audio-upload-file-copy strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 780;
+}
+
+.audio-upload-file-copy small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.audio-upload-date-field {
+  display: grid;
+  gap: 6px;
+}
+
+.audio-upload-date-label {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.audio-upload-date-description,
+.audio-upload-date-error {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.audio-upload-date-description {
+  color: var(--muted);
+}
+
+.audio-upload-date-input {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 10px;
+  background: var(--surface);
+  color: var(--text);
+  color-scheme: light dark;
+  font: inherit;
+  font-size: 12px;
+}
+
+.audio-upload-date-input:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--muted) 52%, var(--border));
+}
+
+.audio-upload-date-input:focus-visible {
+  border-color: color-mix(in srgb, var(--accent-purple) 70%, var(--border));
+  outline: 2px solid color-mix(in srgb, var(--accent-purple) 30%, transparent);
+  outline-offset: 1px;
+}
+
+.audio-upload-date-input[aria-invalid="true"] {
+  border-color: color-mix(in srgb, var(--risk-fg) 66%, var(--border));
+}
+
+.audio-upload-date-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.audio-upload-date-error {
+  color: var(--risk-fg);
+}
+
+.audio-upload-contract-note {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  border: 1px solid color-mix(in srgb, var(--decision-fg) 22%, var(--border));
+  border-radius: 10px;
+  padding: 12px;
+  background: color-mix(in srgb, var(--decision-fg) 6%, var(--surface));
+}
+
+.audio-upload-contract-note > span {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--decision-fg) 14%, transparent);
+  color: var(--decision-fg);
+}
+
+.audio-upload-contract-note strong {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.audio-upload-contract-note p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.audio-upload-offline-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid color-mix(in srgb, var(--issue-fg) 28%, var(--border));
+  border-radius: 9px;
+  padding: 9px 10px;
+  background: color-mix(in srgb, var(--issue-fg) 7%, var(--surface));
+  color: color-mix(in srgb, var(--issue-fg) 82%, var(--text));
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.audio-upload-offline-note svg {
+  flex: 0 0 auto;
+}
+
+.audio-upload-safety-note {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--faint);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.audio-upload-safety-note svg:last-child {
+  margin-left: auto;
+}
+
+.audio-upload-dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .project-sources-secondary {
   display: inline-flex;
   align-items: center;
@@ -7740,6 +7936,22 @@ button:not(:disabled):not([aria-disabled="true"]) {
   color: var(--faint);
   font-size: 11px;
   font-weight: 650;
+}
+
+.project-source-body .project-source-status-detail {
+  overflow: visible;
+  color: var(--muted);
+  line-height: 1.45;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.project-source-body .project-source-status-detail[data-tone="failed"] {
+  color: color-mix(in srgb, var(--risk-fg) 78%, var(--text));
+}
+
+.project-source-body .project-source-status-detail[data-tone="delayed"] {
+  color: color-mix(in srgb, var(--issue-fg) 78%, var(--text));
 }
 
 .project-source-body .project-document-status {
@@ -8651,6 +8863,7 @@ button:not(:disabled):not([aria-disabled="true"]) {
 
 .project-setup-picker-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 12px;
 }
