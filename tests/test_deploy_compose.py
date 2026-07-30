@@ -154,6 +154,18 @@ def test_caddyfile_starts_with_global_options_block():
     assert lines[0] == "{", "전역 옵션 블록이 먼저 와야 한다"
 
 
+def test_caddy_separates_audio_and_document_upload_limits():
+    """25 MiB 데스크톱 오디오가 일반 문서용 12 MB 프록시 상한에 막히면 안 된다."""
+    raw = (_ROOT / "deploy" / "Caddyfile").read_text(encoding="utf-8")
+    assert "method POST" in raw
+    assert "path /api/v1/projects/*/audio /api/v1/projects/*/audio/" in raw
+    assert "max_size 30MB" in raw
+    assert "max_size 12MB" in raw
+    assert raw.index("handle @audio_upload") < raw.index("max_size 30MB")
+    assert raw.index("max_size 30MB") < raw.index("handle {")
+    assert raw.index("handle {") < raw.index("max_size 12MB")
+
+
 @pytest.mark.parametrize(
     "key",
     ["DB_USER", "DB_PASSWORD", "DB_NAME", "PAIM_JWT_SECRET",
