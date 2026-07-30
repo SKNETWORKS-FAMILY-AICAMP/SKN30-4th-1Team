@@ -55,12 +55,12 @@ uv run pytest -q tests/test_agentic_openai_live.py
 
 | ID | 질문 유형 | 기대 경로·판정 |
 |---|---|---|
-| A01 | 특정 작업 담당자 | `search_project_evidence`, 근거의 담당자만 답변 |
-| A02 | 결정 이유·배경 | `search_project_evidence`, 근거 없는 이유 추측 금지 |
-| A03 | 특정 수치·비율 | `search_project_evidence`, 수치와 출처 일치 |
-| A04 | 상태 조건 목록 | `query_structured_memory`, 질문의 명시 조건만 전달 |
-| A05 | 상태 조건 개수 | `query_structured_memory`, 중복 제거된 개수 |
-| A06 | 프로젝트 전반 브리핑 | `get_project_overview`, 전체 목록 과다 노출 금지 |
+| A01 | 특정 작업 담당자 | `search_hybrid_vector_rag`, 근거의 담당자만 답변 |
+| A02 | 결정 이유·배경 | `search_hybrid_vector_rag`, 근거 없는 이유 추측 금지 |
+| A03 | 특정 수치·비율 | `search_hybrid_vector_rag`, 수치와 출처 일치 |
+| A04 | 상태 조건 목록 | `query_sql_state`, 질문의 명시 조건만 전달 |
+| A05 | 상태 조건 개수 | `query_sql_state`, 중복 제거된 개수 |
+| A06 | 프로젝트 전반 브리핑 | `query_sql_state(operation=overview)`, 전체 목록 과다 노출 금지 |
 | A07 | 상태와 배경 혼합 | structured + evidence Tool 조합, 한 답변으로 합성 |
 | A08 | “그 전에는?” 후속 질문 | 이전 대상이 실제 검색어에 반영되고 변경 이력 답변 |
 | A09 | 임시 첨부에만 있는 사실 | 첨부를 임시 근거로 사용하고 실제 출처만 반환 |

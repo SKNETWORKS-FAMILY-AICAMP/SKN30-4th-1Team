@@ -39,6 +39,14 @@ def test_questions_have_frozen_small_set_and_valid_sources():
     )
 
 
+def test_explicit_change_reason_question_expects_history_mode():
+    """명시적인 결정 변경 이유 질문은 대화 이력 없이도 변경 이력 검색을 요구한다."""
+    questions = _load_json("questions.json")["questions"]
+    question = next(item for item in questions if item["id"] == "M-SEM-01")
+
+    assert question["expected_history_mode"] is True
+
+
 def test_golden_matches_questions_and_uses_only_allowed_sources():
     """독립 골든셋이 질문과 일대일 대응하고 허용된 근거만 쓰는지 확인한다."""
     questions = _load_json("questions.json")

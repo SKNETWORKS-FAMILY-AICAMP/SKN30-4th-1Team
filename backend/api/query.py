@@ -2,6 +2,7 @@ import base64
 import binascii
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Dict
 
@@ -38,6 +39,28 @@ class QueryRequest(BaseModel):
     attachments: List[QueryAttachment] = []
 
 
+@dataclass(frozen=True)
+class AttachmentEvidence:
+    """현재 요청에서만 사용하는 첨부 근거와 인용용 provenance."""
+
+    filename: str
+    file_type: str
+    extraction_status: str
+    source_location: str
+    truncated: bool
+    content: str
+
+    def debug(self) -> dict:
+        """원문을 노출하지 않고 trace에 남길 첨부 상태를 반환한다."""
+        return {
+            "filename": self.filename,
+            "file_type": self.file_type,
+            "extraction_status": self.extraction_status,
+            "source_location": self.source_location,
+            "truncated": self.truncated,
+        }
+
+
 def _warn_ignored_legacy_routing_mode() -> None:
     """Keep the existing env name observable while the runtime is Agentic-only."""
     if os.getenv("PAIM_QUERY_ROUTING_MODE", "").strip().lower() == "legacy":
@@ -53,9 +76,11 @@ def _clip_attachment_text(text: str, limit: int, marker: str) -> str:
     return text[:limit] + f"\n[{marker}]"
 
 
-def _prepare_attachment_context(attachments: List[QueryAttachment]) -> tuple[str, List[str]]:
-    sections = []
-    sources: List[str] = []
+def _prepare_attachment_evidence(
+    attachments: List[QueryAttachment],
+) -> List[AttachmentEvidence]:
+    """첨부를 검증·추출해 저장하지 않는 요청 단위 근거로 만든다."""
+    evidence: List[AttachmentEvidence] = []
     used_chars = 0
     used_bytes = 0
 
@@ -97,6 +122,7 @@ def _prepare_attachment_context(attachments: List[QueryAttachment]) -> tuple[str
         # 답할 수 있어야 하므로, 실패 사유를 본문에 남기고 계속 진행한다.
         try:
             text = convert(filename, data).text.strip()
+            extraction_status = "ok" if text else "empty"
         except ConversionError as exc:
             # 추출 내용의 입력 경계 위반은 변환 실패가 아니라 검증 실패다.
             # 관대한 placeholder 정책 대상이 아니며 415로 중단한다.
@@ -107,18 +133,50 @@ def _prepare_attachment_context(attachments: List[QueryAttachment]) -> tuple[str
                 ) from exc
             logger.info("첨부 변환 실패 filename=%s code=%s", filename, exc.code)
             text = ""
+            extraction_status = "failed"
         text = text or "(텍스트를 추출할 수 없습니다.)"
+        truncated = (
+            len(text) > _ATTACHMENT_MAX_CHARS_PER_FILE
+            or len(text) > remaining
+        )
         text = _clip_attachment_text(text, _ATTACHMENT_MAX_CHARS_PER_FILE, "첨부 내용 잘림")
         text = _clip_attachment_text(text, remaining, "전체 첨부 한도 초과로 잘림")
-        # 표준 출처 마커를 붙여 SYSTEM_QA의 인용 규칙이 첨부에도 적용되도록 한다
-        # (구조화 기록·원문 맥락과 동일 형식, 리뷰 R-004).
-        sections.append(f"### {filename}\n(출처: {filename})\n{text}")
-        sources.append(filename)
+        evidence.append(AttachmentEvidence(
+            filename=filename,
+            file_type=Path(filename).suffix.lower().lstrip("."),
+            extraction_status=extraction_status,
+            source_location=filename,
+            truncated=truncated,
+            content=text,
+        ))
         used_chars += len(text)
 
-    if not sections:
+    return evidence
+
+
+def _render_attachment_evidence(
+    evidence: List[AttachmentEvidence],
+) -> tuple[str, List[str]]:
+    """첨부 근거를 기존 프롬프트·출처 계약에 맞게 렌더링한다."""
+    if not evidence:
         return "", []
+    sections = [
+        (
+            f"### {item.filename}\n"
+            f"(출처: {item.filename})\n"
+            f"(유형: {item.file_type}, 추출 상태: {item.extraction_status}, "
+            f"잘림: {'예' if item.truncated else '아니요'})\n"
+            f"{item.content}"
+        )
+        for item in evidence
+    ]
+    sources = [item.filename for item in evidence]
     return "[첨부 자료]\n" + "\n\n".join(sections), sources
+
+
+def _prepare_attachment_context(attachments: List[QueryAttachment]) -> tuple[str, List[str]]:
+    """기존 내부 호출자를 위한 첨부 컨텍스트 호환 함수."""
+    return _render_attachment_evidence(_prepare_attachment_evidence(attachments))
 
 
 @router.post(
@@ -134,7 +192,10 @@ def _prepare_attachment_context(attachments: List[QueryAttachment]) -> tuple[str
 def query(request: Request, project_id: int, body: QueryRequest):
     require_project_access(project_id)
     _warn_ignored_legacy_routing_mode()
-    attachment_context, attachment_sources = _prepare_attachment_context(body.attachments)
+    attachment_evidence = _prepare_attachment_evidence(body.attachments)
+    attachment_context, attachment_sources = _render_attachment_evidence(
+        attachment_evidence
+    )
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
@@ -153,6 +214,7 @@ def query(request: Request, project_id: int, body: QueryRequest):
             history=body.history,
             attachment_context=attachment_context,
             attachment_sources=attachment_sources,
+            attachment_evidence=[item.debug() for item in attachment_evidence],
         )
         result["route"] = "semantic"
         debug = result.get("debug") or {}

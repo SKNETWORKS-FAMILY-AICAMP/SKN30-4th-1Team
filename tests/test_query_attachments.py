@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 from backend.main import app
+from backend.pipeline.converters import ConversionError, ErrorCode
 
 
 _client = TestClient(app, raise_server_exceptions=False)
@@ -21,6 +22,13 @@ def test_query_attachment_becomes_temporary_agentic_evidence():
 
     def fake_run_agentic_qa(**kwargs):
         assert kwargs["attachment_sources"] == ["note.txt"]
+        assert kwargs["attachment_evidence"] == [{
+            "filename": "note.txt",
+            "file_type": "txt",
+            "extraction_status": "ok",
+            "source_location": "note.txt",
+            "truncated": False,
+        }]
         assert "[첨부 자료]" in kwargs["attachment_context"]
         assert "릴리즈명은 Bluefin" in kwargs["attachment_context"]
         return {
@@ -72,6 +80,7 @@ def test_query_without_attachment_still_uses_agentic_orchestrator():
         "history": [],
         "attachment_context": "",
         "attachment_sources": [],
+        "attachment_evidence": [],
     }
 
 
@@ -123,3 +132,36 @@ def test_query_attachment_context_marks_truncation(monkeypatch):
     assert sources == ["long.md"]
     assert "12345" in context
     assert "첨부 내용 잘림" in context
+    evidence = query_api._prepare_attachment_evidence([
+        query_api.QueryAttachment(filename="long.md", content_base64=encoded)
+    ])
+    assert evidence[0].truncated is True
+    assert evidence[0].extraction_status == "ok"
+    assert evidence[0].source_location == "long.md"
+
+
+def test_query_attachment_marks_conversion_failure(monkeypatch):
+    """검증 후 추출 실패는 요청 단위 provenance와 placeholder로 남긴다."""
+    from backend.api import query as query_api
+
+    monkeypatch.setattr(
+        query_api,
+        "convert",
+        lambda *args: (_ for _ in ()).throw(
+            ConversionError(ErrorCode.EMPTY_DOCUMENT, "추출 가능한 텍스트 없음")
+        ),
+    )
+    attachment = query_api.QueryAttachment(
+        filename="empty.txt",
+        content_base64=base64.b64encode(b"valid text").decode(),
+    )
+
+    evidence = query_api._prepare_attachment_evidence([attachment])
+    context, sources = query_api._render_attachment_evidence(evidence)
+
+    assert evidence[0].extraction_status == "failed"
+    assert evidence[0].source_location == "empty.txt"
+    assert evidence[0].truncated is False
+    assert sources == ["empty.txt"]
+    assert "추출 상태: failed" in context
+    assert "텍스트를 추출할 수 없습니다" in context

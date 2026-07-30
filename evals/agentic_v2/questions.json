@@ -22,7 +22,7 @@
       "allowed_capabilities": ["hybrid_search"],
       "max_tool_rounds": 1,
       "expected_arguments": {},
-      "expected_history_mode": false,
+      "expected_history_mode": true,
       "must_abstain": false,
       "required_evidence_kinds": ["project"],
       "ragas_metrics": ["context_precision", "context_recall", "faithfulness", "answer_correctness", "response_relevancy"]
@@ -232,7 +232,11 @@
       "required_capabilities": ["overview"],
       "allowed_capabilities": ["overview", "hybrid_search"],
       "max_tool_rounds": 2,
-      "expected_arguments": {},
+      "expected_arguments": {
+        "operation": "overview",
+        "text_query": "",
+        "category": "all"
+      },
       "expected_history_mode": null,
       "must_abstain": false,
       "required_evidence_kinds": ["project"],
@@ -505,7 +509,11 @@
       "required_capabilities": ["overview"],
       "allowed_capabilities": ["overview", "hybrid_search"],
       "max_tool_rounds": 2,
-      "expected_arguments": {},
+      "expected_arguments": {
+        "operation": "overview",
+        "text_query": "",
+        "category": "all"
+      },
       "expected_history_mode": null,
       "must_abstain": false,
       "required_evidence_kinds": ["project"],
