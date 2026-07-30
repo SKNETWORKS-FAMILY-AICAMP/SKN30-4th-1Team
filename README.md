@@ -22,14 +22,40 @@ PaiM은 회의록, 문서, 음성 기록과 GitHub 활동을 하나의 **프로�
 
 ## 작동 방식
 
-```text
-문서·회의 음성 ──→ 텍스트 변환·구조화 추출 ──┐
-                                                ├─→ 프로젝트 메모리
-GitHub 저장소 ───→ README·커밋·Issue·PR 동기화 ┘      │
-                                                        ├─→ 근거 기반 Q&A·델타 브리핑
-머지된 PR ───────→ 진행 중 액션과 대조 ────────────────┘
-                              │
-                              └─→ 완료 제안 ──→ 사용자 승인 또는 거절
+```mermaid
+flowchart LR
+    subgraph Sources["프로젝트 소스"]
+        DOC["문서 · 회의 음성"]
+        GH["GitHub 저장소"]
+    end
+
+    subgraph Processing["수집 및 분석"]
+        EXTRACT["텍스트 변환<br/>구조화 추출"]
+        SYNC["README · 커밋<br/>Issue · PR 동기화"]
+    end
+
+    MEMORY[("프로젝트 메모리")]
+    INSIGHT["근거 기반 Q&A<br/>델타 브리핑"]
+
+    DOC --> EXTRACT
+    GH --> SYNC
+    EXTRACT --> MEMORY
+    SYNC --> MEMORY
+    MEMORY --> INSIGHT
+
+    subgraph Reconcile["완료 감지"]
+        PR["머지된 PR"]
+        MATCH["진행 중 액션과 대조"]
+        SUGGEST["완료 제안"]
+        REVIEW{"사용자 검토"}
+    end
+
+    PR --> MATCH
+    MEMORY --> MATCH
+    MATCH --> SUGGEST
+    SUGGEST --> REVIEW
+    REVIEW -->|승인| MEMORY
+    REVIEW -->|거절| REJECT["변경 없음"]
 ```
 
 PaiM은 프로젝트 상태를 임의로 확정하지 않습니다. 새 정보는 메모리에 축적하되, 액션 완료처럼 기존 상태를 바꾸는 일은 근거를 제시한 뒤 사람의 승인을 받습니다.
