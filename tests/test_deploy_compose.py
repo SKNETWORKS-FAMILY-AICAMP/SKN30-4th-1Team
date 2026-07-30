@@ -112,8 +112,8 @@ def test_backend_pins_agentic_openai_contract(prod: dict):
     env = prod["services"]["backend"]["environment"]
     assert env["LLM_PROVIDER"] == "openai"
     assert env["OPENAI_MODEL"] == "gpt-4.1-mini"
-    assert env["OPENAI_BASE_URL"] == ""
-    assert env["OPENAI_API_BASE"] == ""
+    assert env["OPENAI_BASE_URL"] == "https://api.openai.com/v1"
+    assert env["OPENAI_API_BASE"] == "https://api.openai.com/v1"
 
 
 def test_backend_reads_env_file(prod: dict):
