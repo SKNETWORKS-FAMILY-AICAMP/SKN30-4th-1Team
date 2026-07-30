@@ -121,7 +121,15 @@ def _prepare_attachment_context(attachments: List[QueryAttachment]) -> tuple[str
     return "[첨부 자료]\n" + "\n\n".join(sections), sources
 
 
-@router.post("/projects/{project_id}/query")
+@router.post(
+    "/projects/{project_id}/query",
+    summary="Query project knowledge without server chat persistence",
+    description=(
+        "Processes the supplied question and history for this request only. "
+        "It does not create or update server-backed chat sessions."
+    ),
+    openapi_extra={"x-paim-chat-persistence": "none"},
+)
 @limiter.limit(RATE_LIMIT_QUERY, key_func=authenticated_user_key)
 def query(request: Request, project_id: int, body: QueryRequest):
     require_project_access(project_id)

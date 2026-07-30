@@ -49,7 +49,6 @@ export type Message = {
 
 export type ChatSession = {
   id: string;
-  serverSessionId?: string;
   createdExplicitly?: boolean;
   title: string;
   messages: Message[];

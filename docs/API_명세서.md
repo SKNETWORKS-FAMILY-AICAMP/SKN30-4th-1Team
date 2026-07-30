@@ -129,7 +129,7 @@ MySQL, schema, ChromaDB, upload 저장소의 준비 상태를 확인한다. 인�
 
 ### `GET /api/v1/capabilities`
 
-데스크톱 앱이 사용할 문서 형식과 업로드 크기 제한을 조회한다. 인증이 필요하다.
+데스크톱 앱이 사용할 문서 형식·업로드 제한과 로컬 채팅 정책을 조회한다. 인증이 필요하다.
 
 **응답 `200`**
 ```json
@@ -143,6 +143,11 @@ MySQL, schema, ChromaDB, upload 저장소의 준비 상태를 확인한다. 인�
     "extensions": ["docx", "md", "pdf", "txt"],
     "max_file_bytes": 8388608,
     "max_total_bytes": 8388608
+  },
+  "desktop_chat": {
+    "storage": "local_only",
+    "server_persistence": false,
+    "legacy_session_api": "deprecated"
   }
 }
 ```
@@ -1145,7 +1150,8 @@ Git 로그 텍스트를 동기 처리해 메모리로 추출·적재한다. (최
 
 ## 채팅 세션
 
-> **경로 확정 (2026-07-02)**: 세션 엔드포인트는 `/api/v1/projects/{id}/sessions/*` 로 확정되었습니다.
+> **Deprecated**: `/api/v1/projects/{id}/sessions/*`는 구형 클라이언트 호환용이다.
+> 현재 데스크톱은 이 API를 호출하지 않고 개인 채팅을 로컬에만 저장한다.
 
 ### `POST /api/v1/projects/{project_id}/sessions`
 
@@ -1283,6 +1289,9 @@ Git 로그 텍스트를 동기 처리해 메모리로 추출·적재한다. (최
 ### `POST /api/v1/projects/{project_id}/query`
 
 프로젝트 기반 자연어 질의. (최소 역할: viewer)
+
+요청에 포함된 `history`는 이번 답변 생성에만 사용하며 서버 채팅 테이블에 저장하지 않는다.
+OpenAPI operation에는 `x-paim-chat-persistence: none`이 표시된다.
 
 **요청 Body**
 ```json

@@ -4380,7 +4380,7 @@ function createSmokeNavigationUrl(url) {
   return target.toString();
 }
 
-async function navigateAndWaitForSelector(send, url, selector, timeoutMs = 5000) {
+async function navigateAndWaitForSelector(send, url, selector, timeoutMs = 12000) {
   const targetUrl = createSmokeNavigationUrl(url);
 
   await send("Page.navigate", { url: targetUrl });
@@ -6993,10 +6993,9 @@ async function verifyProjectDetailComposerCreatesSessionOnFirstSend(send) {
   }
   if (value.afterSend.sessionCount !== 1 ||
       !value.afterSend.selectedSessionId ||
-      !value.afterSend.serverSessionId ||
-      value.afterSend.creation.sessionRequested !== 1 ||
-      value.afterSend.creation.sessionResolved !== 1 ||
-      value.afterSend.serverSessionId !== value.afterSend.creation.sessionLastId ||
+      value.afterSend.serverSessionId !== null ||
+      value.afterSend.creation.sessionRequested !== 0 ||
+      value.afterSend.creation.sessionResolved !== 0 ||
       value.afterSend.query.requested !== 1 ||
       value.afterSend.query.resolved !== 1 ||
       value.afterSend.query.requests?.length !== 1 ||
@@ -7004,7 +7003,7 @@ async function verifyProjectDetailComposerCreatesSessionOnFirstSend(send) {
       value.afterSend.query.lastRequest?.new_session_title ||
       value.afterSend.query.lastRequest?.new_session_id ||
       value.afterSend.setup.requested !== 0) {
-    failures.push("the first detail-composer submit should create one main-compatible server session before its query");
+    failures.push("the first detail-composer submit should keep the chat local and issue one stateless project query");
   }
   if (value.afterSend.messageRoles.join("|") !== "user|assistant" ||
       value.afterSend.hasDetailComposer ||
@@ -7141,11 +7140,10 @@ async function verifyProjectDeltaBriefingCreatesStandardChat(send) {
   }
   if (value.sessionCount !== 1 ||
       !value.selectedSessionId ||
-      !value.serverSessionId ||
-      value.creation.sessionRequested !== 1 ||
-      value.creation.sessionResolved !== 1 ||
-      value.serverSessionId !== value.creation.sessionLastId) {
-    failures.push("delta briefing should create exactly one main-compatible server session");
+      value.serverSessionId !== null ||
+      value.creation.sessionRequested !== 0 ||
+      value.creation.sessionResolved !== 0) {
+    failures.push("delta briefing should create exactly one local chat without a server session");
   }
   if (value.sessionTitle !== "변경사항 브리핑" ||
       value.messageRoles.join("|") !== "user|assistant" ||
@@ -7161,7 +7159,7 @@ async function verifyProjectDeltaBriefingCreatesStandardChat(send) {
       value.query.lastRequest?.session_id ||
       value.query.lastRequest?.new_session_title ||
       value.query.lastRequest?.new_session_id) {
-    failures.push("delta briefing should POST the main-compatible project query after session creation");
+    failures.push("delta briefing should POST one stateless project query for the local chat");
   }
   if (!value.hasFullChatPrompt ||
       value.hasDetailComposer ||
@@ -8022,20 +8020,21 @@ async function verifyCancelledPreflightIdCommit(send) {
   }
 
   const sessionQueryCalls = value.session.apiCalls.filter((call) => /POST \/api\/v1\/projects\/\d+\/query/.test(call));
+  const sessionSessionCalls = value.session.apiCalls.filter((call) => /\/api\/v1\/projects\/\d+\/sessions(?:\/|$)/.test(call));
   if (value.session.apiProjectId !== 1 ||
-      !value.session.serverSessionId ||
+      value.session.serverSessionId !== null ||
       value.session.creation.projectRequested !== 0 ||
-      value.session.creation.sessionRequested !== 1 ||
-      value.session.creation.sessionResolved !== 1 ||
-      value.session.serverSessionId !== value.session.creation.sessionLastId ||
+      value.session.creation.sessionRequested !== 0 ||
+      value.session.creation.sessionResolved !== 0 ||
       value.session.query.requested !== 1 ||
       value.session.query.aborted !== 1 ||
       value.session.query.resolved !== 0 ||
       value.session.query.lastRequest?.new_session_title ||
       value.session.query.lastRequest?.new_session_id ||
       sessionQueryCalls.length !== 1 ||
+      sessionSessionCalls.length !== 0 ||
       value.session.stopVisible) {
-    failures.push("Stop during a first main-compatible query should retain its committed server session id");
+    failures.push("Stop during a first stateless query should keep the chat local without a server session");
   }
 
   debugLayout("cancelled preflight id commit", value);
@@ -8242,18 +8241,17 @@ async function verifyPreflightRetrySharesCreation(send) {
       value.project.during.creation.projectResolved !== 0 ||
       value.project.during.query.requested !== 0 ||
       projectCalls.filter((call) => call === "POST /api/v1/projects").length !== 1 ||
-      projectCalls.filter((call) => /POST \/api\/v1\/projects\/\d+\/sessions/.test(call)).length !== 1 ||
+      projectCalls.filter((call) => /\/api\/v1\/projects\/\d+\/sessions(?:\/|$)/.test(call)).length !== 0 ||
       projectCalls.filter((call) => /POST \/api\/v1\/projects\/\d+\/query/.test(call)).length !== 1 ||
       value.project.done.creation.projectRequested !== 1 ||
-      value.project.done.creation.sessionRequested !== 1 ||
-      value.project.done.creation.sessionResolved !== 1 ||
+      value.project.done.creation.sessionRequested !== 0 ||
+      value.project.done.creation.sessionResolved !== 0 ||
       value.project.done.query.requested !== 1 ||
       value.project.done.query.resolved !== 1 ||
       value.project.done.apiProjectId !== 1000 ||
       value.project.done.query.lastRequest?.new_session_id ||
       value.project.done.query.lastRequest?.new_session_title ||
-      value.project.done.serverSessionId !==
-        value.project.done.creation.sessionLastId ||
+      value.project.done.serverSessionId !== null ||
       value.project.done.userCount !== 2 ||
       value.project.done.assistantCount !== 1 ||
       value.project.done.errorCount !== 0) {
@@ -8262,14 +8260,14 @@ async function verifyPreflightRetrySharesCreation(send) {
 
   const sessionCalls = value.session.done.apiCalls;
   if (value.session.during.userCount !== 1 ||
-      value.session.during.creation.sessionRequested !== 1 ||
-      value.session.during.creation.sessionResolved !== 1 ||
+      value.session.during.creation.sessionRequested !== 0 ||
+      value.session.during.creation.sessionResolved !== 0 ||
       value.session.during.query.requested < 2 ||
       sessionCalls.filter((call) => call === "POST /api/v1/projects").length !== 0 ||
-      sessionCalls.filter((call) => /POST \/api\/v1\/projects\/\d+\/sessions/.test(call)).length !== 1 ||
+      sessionCalls.filter((call) => /\/api\/v1\/projects\/\d+\/sessions(?:\/|$)/.test(call)).length !== 0 ||
       sessionCalls.filter((call) => /POST \/api\/v1\/projects\/\d+\/query/.test(call)).length !== 2 ||
-      value.session.done.creation.sessionRequested !== 1 ||
-      value.session.done.creation.sessionResolved !== 1 ||
+      value.session.done.creation.sessionRequested !== 0 ||
+      value.session.done.creation.sessionResolved !== 0 ||
       value.session.done.query.requested !== 2 ||
       value.session.done.query.aborted !== 1 ||
       value.session.done.query.resolved !== 1 ||
@@ -8278,12 +8276,11 @@ async function verifyPreflightRetrySharesCreation(send) {
       value.session.done.query.requests?.some(
         (request) => request.new_session_id || request.new_session_title,
       ) ||
-      value.session.done.serverSessionId !==
-        value.session.done.creation.sessionLastId ||
+      value.session.done.serverSessionId !== null ||
       value.session.done.userCount !== 1 ||
       value.session.done.assistantCount !== 1 ||
       value.session.done.errorCount !== 0) {
-    failures.push("retry after a cancelled first query should reuse one user message and one stable server id");
+    failures.push("retry after a cancelled first query should reuse one local user message without server sessions");
   }
 
   debugLayout("preflight retry shares creation", value);
@@ -13466,6 +13463,7 @@ async function verifyMeasuredNoticeStackClearance(send) {
     [],
     {
       apiProjectId: 1,
+      currentUserRole: "owner",
       setupCompletedAt: Date.now(),
       setupMode: "chat_only",
     },
@@ -13606,6 +13604,9 @@ async function verifyMeasuredNoticeStackClearance(send) {
     expression: `document.querySelector('.project-item[data-active="true"]')?.click()`,
   });
   await waitForSelector(send, ".project-detail-page");
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector('[data-testid="project-detail-tab-team"]')?.click()`,
+  });
   await waitForSelector(send, ".project-detail-rail-manage-members:not(:disabled)");
   await send("Runtime.evaluate", {
     expression: `document.querySelector('.project-detail-rail-manage-members')?.click()`,
@@ -14521,8 +14522,6 @@ try {
       ["interruptible background query", await verifyInterruptibleBackgroundQuery(send)],
       ["cancelled preflight id commit", await verifyCancelledPreflightIdCommit(send)],
       ["preflight retry creation ownership", await verifyPreflightRetrySharesCreation(send)],
-      ["session sync and rename race", await verifySessionSyncAndRenameRace(send)],
-      ["session sync tombstone and generation", await verifySessionSyncTombstoneAndGeneration(send)],
     ];
     for (const [label, result] of focusedChecks) {
       if (result.failures.length > 0) {

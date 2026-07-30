@@ -417,34 +417,12 @@ type ProjectQueryOptions = {
   since?: string;
 };
 
-type ApiChatSessionResponse = {
-  id: string;
-  project_id: number;
-  title: string;
-  created_explicitly?: boolean;
-  created_at?: string;
-  updated_at?: string;
-};
-
 type ApiProjectSetupResponse = {
   project_id: number;
   setup_status: "ready";
   setup_mode: "analyzed" | "chat_only" | "existing";
   setup_completed_at: string;
   setup_completed_by?: number | null;
-};
-
-type ApiChatMessageResponse = {
-  id: number;
-  role: string;
-  text: string;
-  token_count?: number;
-  created_at?: string;
-};
-
-type ApiChatSessionWithMessages = {
-  session: ApiChatSessionResponse;
-  messages: Message[];
 };
 
 type ApiRepositoryStatus = "connected" | "syncing" | "indexed" | "failed";
@@ -538,6 +516,11 @@ type RenameDraft = {
   value: string;
 };
 
+type SessionDraft = {
+  attachments: Attachment[];
+  prompt: string;
+};
+
 const SERVER_SYNC_TIMEOUT_MS = 3000;
 const DOCUMENT_STATUS_POLL_INTERVAL_MS = 3000;
 const DOCUMENT_STATUS_POLL_TIMEOUT_MS = 180000;
@@ -550,6 +533,7 @@ const ACTION_MENU_SESSION_HEIGHT = 76;
 const ACTION_MENU_GAP = 12;
 const DESTRUCTIVE_CONFIRMATION_TIMEOUT_MS = 6000;
 const PROJECT_STORAGE_KEY = "paim.projects.v8";
+const SESSION_DRAFT_STORAGE_SUFFIX = ".drafts";
 const PROJECT_ROLE_RETRY_DELAYS_MS = [400, 1200] as const;
 const PROJECT_BRIEFING_QUESTION =
   "이 프로젝트의 목적, 현재 상태(완료된 것과 진행 중인 것), 그리고 다음에 해야 할 액션을 프로젝트 기록을 근거로 간결하게 브리핑해줘. 담당자와 마감일이 있는 액션은 함께 표기해줘.";
@@ -730,89 +714,6 @@ function isEmptyDefaultSession(session: ChatSession) {
   );
 }
 
-// 서버 세션 row를 로컬 ChatSession 형태로 변환한다.
-function createSessionFromApi(apiSession: ApiChatSessionResponse, messages: Message[]): ChatSession {
-  const createdAt = parsePaimTimestamp(apiSession.created_at);
-  const createdExplicitly =
-    apiSession.created_explicitly ??
-    (messages.length > 0 || (apiSession.title || "New Chat") !== "New Chat");
-
-  return {
-    id: createId("session"),
-    serverSessionId: apiSession.id,
-    // 구 서버에는 marker가 없다. 그 경우 메시지 없는 기본 제목만 레거시 자동
-    // 세션으로 간주하고, 내용이나 사용자가 붙인 제목이 있으면 실제 세션으로 보존한다.
-    createdExplicitly,
-    title: apiSession.title || "New Chat",
-    createdAt: Number.isFinite(createdAt) ? createdAt : Date.now(),
-    messages,
-  };
-}
-
-// 서버 메시지의 text 필드를 기존 content 필드로 매핑한다.
-function createMessageFromApi(apiMessage: ApiChatMessageResponse): Message | null {
-  if (apiMessage.role !== "assistant" && apiMessage.role !== "user") {
-    return null;
-  }
-
-  return {
-    id: `server-message-${apiMessage.id}`,
-    role: apiMessage.role,
-    content: apiMessage.text,
-  };
-}
-
-// 서버 세션 목록은 정렬 기준으로 삼고, 로컬 전용 세션은 아직 서버에 없으므로 뒤에 보존한다.
-function mergeServerChatSessions(
-  localSessions: ChatSession[],
-  serverSessions: ApiChatSessionWithMessages[],
-  serverSessionIdsAtRequest = new Set<string>(),
-  deletedServerSessionIds = new Set<string>(),
-) {
-  const localSessionsByServerId = new Map(
-    localSessions
-      .filter((session) => session.serverSessionId)
-      .map((session) => [session.serverSessionId as string, session]),
-  );
-  const localServerSessionIds = new Set(localSessionsByServerId.keys());
-  const applicableServerSessions = serverSessions.filter(
-    ({ session }) =>
-      !deletedServerSessionIds.has(session.id) &&
-      (!serverSessionIdsAtRequest.has(session.id) ||
-        localServerSessionIds.has(session.id)),
-  );
-  const returnedServerSessionIds = new Set(
-    applicableServerSessions.map(({ session }) => session.id),
-  );
-  const syncedSessions = applicableServerSessions.map(({ session, messages }) => {
-    const localSession = localSessionsByServerId.get(session.id);
-
-    if (!localSession) {
-      return createSessionFromApi(session, messages);
-    }
-
-    return {
-      ...localSession,
-      serverSessionId: session.id,
-      createdExplicitly:
-        session.created_explicitly ?? localSession.createdExplicitly,
-      title: localSession.title || session.title,
-      messages:
-        localSession.messages.length > 0 ? localSession.messages : messages,
-    };
-  });
-  const localOnlySessions = localSessions.filter(
-    (session) =>
-      !session.serverSessionId ||
-      (!returnedServerSessionIds.has(session.serverSessionId) &&
-        !serverSessionIdsAtRequest.has(session.serverSessionId)),
-  );
-
-  return [...syncedSessions, ...localOnlySessions].filter(
-    (session) => !isEmptyDefaultSession(session),
-  );
-}
-
 // 이전 버전이 자동으로 넣던 첫 assistant 인사는 새 empty state와 중복되므로 로딩 때만 걷어낸다.
 function removeLegacyWelcomeMessages(messages: Message[]) {
   if (
@@ -947,10 +848,18 @@ function createProjectState(
   const validProjects = projects
     .map((project) => {
       const sessions = (project.sessions ?? [])
-        .map((session) => ({
-          ...session,
-          messages: removeLegacyWelcomeMessages(session.messages),
-        }))
+        .map((session) => {
+          // Older clients stored the server row id beside otherwise local chat data.
+          // Preserve the chat while dropping that obsolete linkage.
+          const localSession = { ...session } as ChatSession & {
+            serverSessionId?: unknown;
+          };
+          delete localSession.serverSessionId;
+          return {
+            ...localSession,
+            messages: removeLegacyWelcomeMessages(localSession.messages),
+          };
+        })
         .filter((session) => !isEmptyDefaultSession(session));
       const hasLegacyConversation = sessions.some((session) =>
         session.messages.some(
@@ -1559,6 +1468,44 @@ function createStoredAttachments(attachments: Attachment[] = []): Attachment[] {
 	  }));
 	}
 
+function loadSessionDrafts(storageKey: string) {
+  const drafts = new Map<string, SessionDraft>();
+  try {
+    const saved = JSON.parse(
+      window.localStorage.getItem(storageKey) || "{}",
+    ) as Record<string, Partial<SessionDraft>>;
+    Object.entries(saved).forEach(([key, draft]) => {
+      const prompt = typeof draft.prompt === "string" ? draft.prompt : "";
+      const attachments = Array.isArray(draft.attachments)
+        ? createStoredAttachments(draft.attachments)
+        : [];
+      if (prompt.trim() || attachments.length > 0) {
+        drafts.set(key, { attachments, prompt });
+      }
+    });
+  } catch {
+    return drafts;
+  }
+  return drafts;
+}
+
+function saveSessionDrafts(storageKey: string, drafts: Map<string, SessionDraft>) {
+  const saved = Object.fromEntries(
+    Array.from(drafts.entries()).map(([key, draft]) => [
+      key,
+      {
+        attachments: createStoredAttachments(draft.attachments),
+        prompt: draft.prompt,
+      },
+    ]),
+  );
+  try {
+    window.localStorage.setItem(storageKey, JSON.stringify(saved));
+  } catch {
+    // Project messages remain intact even when draft storage is full.
+  }
+}
+
 function createStoredSessions(sessions: ChatSession[]) {
   return sessions.map((session) => ({
     ...session,
@@ -1916,11 +1863,18 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     () => getProjectStorageKey(authUser, canLogout, initialProjectApiRootUrl),
     [authUser, canLogout, initialProjectApiRootUrl],
   );
+  const sessionDraftStorageKey = useMemo(
+    () => `${projectStorageKey}${SESSION_DRAFT_STORAGE_SUFFIX}`,
+    [projectStorageKey],
+  );
   const allowLegacyProjectCacheFallback =
     !canLogout &&
     normalizePaimServerUrl(initialProjectApiRootUrl) === DEFAULT_PAIM_API_ROOT_URL;
   const [initialProjectState] = useState(() =>
     loadProjectState(projectStorageKey, allowLegacyProjectCacheFallback),
+  );
+  const [initialSessionDrafts] = useState(() =>
+    loadSessionDrafts(sessionDraftStorageKey),
   );
   const {
     canDeleteSelectedProject,
@@ -2097,15 +2051,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   const apiProjectEnsurePromisesRef = useRef(
     new Map<string, Promise<ProjectWorkspace>>(),
   );
-  const serverSessionEnsurePromisesRef = useRef(
-    new Map<string, Promise<string>>(),
-  );
-  const pendingServerSessionTitlesRef = useRef(new Map<string, string>());
-  const serverSessionTitleSyncPromisesRef = useRef(
-    new Map<string, Promise<void>>(),
-  );
-  const deletedServerSessionIdsRef = useRef(new Map<string, Set<string>>());
-  const projectSessionSyncGenerationRef = useRef(new Map<string, number>());
   const isScrollingToChatBottomRef = useRef(false);
   const shouldStickToChatBottomRef = useRef(true);
   const actionMenuTriggerRef = useRef<HTMLElement | null>(null);
@@ -2122,9 +2067,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   const projectFileImportRegistryRef = useRef(createLatestProjectOperationRegistry());
   const ignoredProjectDeltaRef = useRef<Record<string, string>>({});
   const githubLoginSessionsRef = useRef(githubLoginSessions);
-  const sessionDraftsRef = useRef(
-    new Map<string, { attachments: Attachment[]; prompt: string }>(),
-  );
+  const sessionDraftsRef = useRef(initialSessionDrafts);
   const projectSetupDescriptionBeforeEditRef = useRef<string | null>(null);
   const projectSetupNameBeforeEditRef = useRef<string | null>(null);
   const zoomScaleRef = useRef(zoomScale);
@@ -3394,26 +3337,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   useEffect(() => {
     if (
       !isPrimaryProjectContext ||
-      serverStatus !== "online" ||
-      !selectedProject ||
-      selectedProject.serverMissing ||
-      typeof selectedProject.apiProjectId !== "number"
-    ) {
-      return;
-    }
-
-    void syncProjectChatSessions(selectedProject.id, selectedProject.apiProjectId);
-  }, [
-    isPrimaryProjectContext,
-    selectedProject?.apiProjectId,
-    selectedProject?.id,
-    selectedProject?.serverMissing,
-    serverStatus,
-  ]);
-
-  useEffect(() => {
-    if (
-      !isPrimaryProjectContext ||
       !selectedProject ||
       selectedProject.serverMissing ||
       typeof selectedProject.apiProjectId !== "number"
@@ -3692,41 +3615,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   useEffect(() => {
     setPendingGithubDisconnectProjectId(null);
   }, [selectedProjectId]);
-
-  useEffect(() => {
-    if (!showProjectPanel || projectPanelView !== "github" || !selectedProjectId) {
-      return;
-    }
-
-    const projectId = selectedProjectId;
-    void refreshGithubRepositoryActivity(projectId);
-
-    const handleWindowFocus = () => {
-      void refreshGithubRepositoryHead(projectId);
-    };
-    window.addEventListener("focus", handleWindowFocus);
-
-    return () => {
-      window.removeEventListener("focus", handleWindowFocus);
-      cancelLatestProjectOperation(githubRepositoryActivityRegistryRef.current, projectId);
-      updateGithubRepository(projectId, (repository) =>
-        repository.remoteCheckStatus === "checking"
-          ? {
-              ...repository,
-              remoteCheckStatus: "unknown",
-              remoteCheckError: null,
-            }
-          : repository,
-      );
-    };
-  }, [
-    projectPanelView,
-    selectedProject?.githubRepository?.branch,
-    selectedProject?.githubRepository?.path,
-    selectedProject?.githubRepository?.repoId,
-    selectedProjectId,
-    showProjectPanel,
-  ]);
 
   useEffect(() => {
     if (didHydrateAttachmentPreviewsRef.current) {
@@ -4351,137 +4239,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     }
   }
 
-  // 서버 세션 목록과 각 세션의 복호화 메시지를 함께 가져온다.
-  async function fetchProjectChatSessions(apiProjectId: number) {
-    const sessions = await fetchPaimJson<ApiChatSessionResponse[]>(
-      `/projects/${apiProjectId}/sessions`,
-    );
-
-    const sessionsWithMessages = await Promise.all(
-      sessions.map(async (session) => {
-        try {
-          const messages = await fetchPaimJson<ApiChatMessageResponse[]>(
-            `/projects/${apiProjectId}/sessions/${encodeURIComponent(session.id)}/messages`,
-          );
-
-          return {
-            session,
-            messages: messages
-              .map(createMessageFromApi)
-              .filter((message): message is Message => message !== null),
-          };
-        } catch (error) {
-          // 목록을 받은 직후 다른 흐름에서 세션이 삭제되면 메시지 조회는 404가
-          // 될 수 있다. 삭제된 row만 제외하고 나머지 세션 동기화는 계속한다.
-          if (isPaimApiError(error) && error.status === 404) {
-            return null;
-          }
-          throw error;
-        }
-      }),
-    );
-
-    return sessionsWithMessages.filter(
-      (session): session is ApiChatSessionWithMessages => session !== null,
-    );
-  }
-
-  // 선택된 프로젝트의 서버 세션을 로컬 캐시에 병합한다.
-  async function syncProjectChatSessions(projectId: string, apiProjectId: number) {
-    if (serverStatus === "offline") {
-      return;
-    }
-
-    const requestGeneration =
-      (projectSessionSyncGenerationRef.current.get(projectId) ?? 0) + 1;
-    projectSessionSyncGenerationRef.current.set(projectId, requestGeneration);
-
-    try {
-      const serverSessionIdsAtRequest = new Set(
-        (
-          projectsRef.current.find((project) => project.id === projectId)
-            ?.sessions ?? []
-        )
-          .map((session) => session.serverSessionId)
-          .filter((sessionId): sessionId is string => Boolean(sessionId)),
-      );
-      const serverSessions = await fetchProjectChatSessions(apiProjectId);
-      if (
-        projectSessionSyncGenerationRef.current.get(projectId) !==
-        requestGeneration
-      ) {
-        return;
-      }
-
-      const deletedServerSessionIds = new Set(
-        deletedServerSessionIdsRef.current.get(projectId) ?? [],
-      );
-      updateProject(projectId, (project) => ({
-        ...project,
-        // 세션 GET이 진행되는 동안 브리핑/질문 응답이 도착할 수 있다.
-        // 요청 전 스냅샷이 아니라 적용 시점의 최신 로컬 세션에 서버 row를 병합해야
-        // 방금 추가된 메시지와 로컬 전용 채팅을 덮어쓰지 않는다.
-        sessions: mergeServerChatSessions(
-          project.sessions,
-          serverSessions,
-          serverSessionIdsAtRequest,
-          deletedServerSessionIds,
-        ),
-      }));
-
-      queueMicrotask(() => {
-        if (
-          projectSessionSyncGenerationRef.current.get(projectId) !==
-          requestGeneration
-        ) {
-          return;
-        }
-
-        const returnedServerSessionIds = new Set(
-          serverSessions.map(({ session }) => session.id),
-        );
-        const remainingDeletedServerSessionIds = new Set(
-          [...deletedServerSessionIds].filter((sessionId) =>
-            returnedServerSessionIds.has(sessionId),
-          ),
-        );
-        if (remainingDeletedServerSessionIds.size > 0) {
-          deletedServerSessionIdsRef.current.set(
-            projectId,
-            remainingDeletedServerSessionIds,
-          );
-        } else {
-          deletedServerSessionIdsRef.current.delete(projectId);
-        }
-
-        const latestSessions =
-          projectsRef.current.find((project) => project.id === projectId)?.sessions ?? [];
-        if (
-          selectedProjectIdRef.current === projectId &&
-          selectedSessionIdRef.current &&
-          !latestSessions.some((session) => session.id === selectedSessionIdRef.current)
-        ) {
-          setSelectedSessionId(null);
-          if (mainViewRef.current === "chat") {
-            openProjectDetail("overview");
-          }
-        }
-      });
-    } catch (error) {
-      if (
-        projectSessionSyncGenerationRef.current.get(projectId) !==
-        requestGeneration
-      ) {
-        return;
-      }
-      setDemoStatus({
-        ok: false,
-        message: getErrorMessage(error, "서버 채팅 세션을 불러올 수 없습니다"),
-        scope: "overview",
-      });
-    }
-  }
-
   async function startGithubRepositorySync(
     projectId: string,
     apiProjectId: number,
@@ -4987,212 +4744,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     }));
   }
 
-  // 현재 main 서버는 채팅 row를 먼저 만든 뒤 프로젝트 query를 수행한다.
-  async function createServerChatSession(apiProjectId: number, title: string) {
-    return fetchPaimJson<ApiChatSessionResponse>(
-      `/projects/${apiProjectId}/sessions`,
-      {
-        method: "POST",
-        body: JSON.stringify({ title: title || "New Chat" }),
-      },
-    );
-  }
-
-  // 같은 로컬 채팅의 중복 POST를 막고, 생성된 서버 id를 로컬 상태에 연결한다.
-  async function ensureServerChatSession(
-    projectId: string,
-    session: ChatSession,
-    apiProjectId: number,
-    title: string,
-  ) {
-    const sessionKey = `${projectId}\u0000${session.id}`;
-    const latestSession = projectsRef.current
-      .find((project) => project.id === projectId)
-      ?.sessions.find((candidate) => candidate.id === session.id);
-    if (latestSession?.serverSessionId || session.serverSessionId) {
-      return latestSession?.serverSessionId ?? session.serverSessionId!;
-    }
-
-    const existingPromise =
-      serverSessionEnsurePromisesRef.current.get(sessionKey);
-    if (existingPromise) {
-      return existingPromise;
-    }
-
-    const creationPromise = (async () => {
-      const createdSession = await createServerChatSession(apiProjectId, title);
-      const currentSession = projectsRef.current
-        .find((project) => project.id === projectId)
-        ?.sessions.find((candidate) => candidate.id === session.id);
-
-      if (!currentSession) {
-        const deletedServerSessionIds =
-          deletedServerSessionIdsRef.current.get(projectId) ?? new Set<string>();
-        deletedServerSessionIds.add(createdSession.id);
-        deletedServerSessionIdsRef.current.set(
-          projectId,
-          deletedServerSessionIds,
-        );
-        try {
-          await fetchPaimJson<void>(
-            `/projects/${apiProjectId}/sessions/${encodeURIComponent(
-              createdSession.id,
-            )}`,
-            { method: "DELETE" },
-          );
-        } catch {
-          // The server row may already have been removed with its project.
-        }
-        throw new Error("로컬에서 제거된 채팅의 서버 생성을 취소했습니다");
-      }
-
-      updateSessionInProject(projectId, session.id, (candidate) => ({
-        ...candidate,
-        serverSessionId: createdSession.id,
-      }));
-
-      const currentTitle =
-        pendingServerSessionTitlesRef.current.get(sessionKey) ||
-        currentSession.title ||
-        title ||
-        "New Chat";
-      if (currentTitle !== (createdSession.title || title || "New Chat")) {
-        void syncChatSessionTitle(projectId, session.id, currentTitle);
-      }
-
-      return createdSession.id;
-    })();
-
-    serverSessionEnsurePromisesRef.current.set(sessionKey, creationPromise);
-    try {
-      return await creationPromise;
-    } finally {
-      if (
-        serverSessionEnsurePromisesRef.current.get(sessionKey) ===
-        creationPromise
-      ) {
-        serverSessionEnsurePromisesRef.current.delete(sessionKey);
-      }
-    }
-  }
-
-  // 서버에 이미 연결된 세션의 제목 변경만 동기화한다.
-  async function syncChatSessionTitle(projectId: string, sessionId: string, title: string) {
-    if (serverStatus === "offline") {
-      return;
-    }
-
-    const project = projectsRef.current.find(
-      (currentProject) => currentProject.id === projectId,
-    );
-    const session = project?.sessions.find(
-      (currentSession) => currentSession.id === sessionId,
-    );
-
-    if (!project || !session || typeof project.apiProjectId !== "number") {
-      return;
-    }
-
-    const sessionKey = `${projectId}\u0000${sessionId}`;
-    pendingServerSessionTitlesRef.current.set(sessionKey, title);
-    const existingSyncPromise =
-      serverSessionTitleSyncPromisesRef.current.get(sessionKey);
-    if (existingSyncPromise) {
-      return existingSyncPromise;
-    }
-
-    const syncPromise = (async () => {
-      let serverSessionId = session.serverSessionId;
-      if (!serverSessionId) {
-        const creationPromise =
-          serverSessionEnsurePromisesRef.current.get(sessionKey);
-        if (!creationPromise) {
-          return;
-        }
-
-        try {
-          serverSessionId = await creationPromise;
-        } catch {
-          return;
-        }
-      }
-
-      while (true) {
-        const desiredTitle =
-          pendingServerSessionTitlesRef.current.get(sessionKey);
-        if (!desiredTitle) {
-          return;
-        }
-
-        try {
-          await fetchPaimJson<ApiChatSessionResponse>(
-            `/projects/${project.apiProjectId}/sessions/${encodeURIComponent(
-              serverSessionId,
-            )}`,
-            {
-              method: "PATCH",
-              body: JSON.stringify({ title: desiredTitle }),
-            },
-          );
-        } catch (error) {
-          if (
-            pendingServerSessionTitlesRef.current.get(sessionKey) ===
-            desiredTitle
-          ) {
-            pendingServerSessionTitlesRef.current.delete(sessionKey);
-          }
-          if (!(isPaimApiError(error) && error.status === 404)) {
-            setDemoStatus({
-              ok: false,
-              message: getErrorMessage(
-                error,
-                "채팅 세션 제목을 서버에 저장할 수 없습니다",
-              ),
-              scope: "overview",
-            });
-          }
-          return;
-        }
-
-        if (
-          pendingServerSessionTitlesRef.current.get(sessionKey) ===
-          desiredTitle
-        ) {
-          pendingServerSessionTitlesRef.current.delete(sessionKey);
-          return;
-        }
-      }
-    })();
-
-    serverSessionTitleSyncPromisesRef.current.set(sessionKey, syncPromise);
-    try {
-      await syncPromise;
-    } finally {
-      if (
-        serverSessionTitleSyncPromisesRef.current.get(sessionKey) ===
-        syncPromise
-      ) {
-        serverSessionTitleSyncPromisesRef.current.delete(sessionKey);
-      }
-
-      const pendingTitle =
-        pendingServerSessionTitlesRef.current.get(sessionKey);
-      const currentProject = projectsRef.current.find(
-        (candidate) => candidate.id === projectId,
-      );
-      const currentSession = currentProject?.sessions.find(
-        (candidate) => candidate.id === sessionId,
-      );
-      if (
-        pendingTitle &&
-        (currentSession?.serverSessionId ||
-          serverSessionEnsurePromisesRef.current.has(sessionKey))
-      ) {
-        void syncChatSessionTitle(projectId, sessionId, pendingTitle);
-      }
-    }
-  }
-
   // 서버 프로젝트가 있으면 이름 변경을 저장하고, 실패 시 로컬 이름을 되돌린다.
   async function syncProjectName(projectId: string, title: string, previousTitle: string) {
     if (serverStatus === "offline") {
@@ -5263,6 +4814,18 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         description: updated.description?.trim() || undefined,
       }));
     } catch (error) {
+      if (isPaimApiError(error) && error.status === 422) {
+        // PR18 이전 프로젝트 API는 description PATCH를 지원하지 않는다.
+        // 워크스페이스를 막지 않고 계정·서버 범위 로컬 상태로 보존한다.
+        setDemoStatus({
+          kind: "info",
+          ok: true,
+          message: "현재 서버에서는 프로젝트 설명을 이 기기에 저장합니다",
+          projectId,
+          scope: "overview",
+        });
+        return;
+      }
       updateProject(projectId, (currentProject) => ({
         ...currentProject,
         description:
@@ -5277,45 +4840,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         message: getErrorMessage(error, "프로젝트 설명을 서버에 저장할 수 없습니다"),
         scope: "overview",
       });
-    }
-  }
-
-  // 서버 세션이 있으면 삭제하고, 404는 이미 삭제된 상태로 본다.
-  async function deleteServerChatSession(project: ProjectWorkspace, session: ChatSession) {
-    if (!session.serverSessionId) {
-      return true;
-    }
-
-    if (serverStatus === "offline") {
-      setDemoStatus({
-        ok: false,
-        message: "서버에 연결되지 않아 로컬 채팅만 삭제했습니다",
-        scope: "overview",
-      });
-      return true;
-    }
-
-    if (typeof project.apiProjectId !== "number") {
-      return true;
-    }
-
-    try {
-      await fetchPaimJson<void>(
-        `/projects/${project.apiProjectId}/sessions/${encodeURIComponent(session.serverSessionId)}`,
-        { method: "DELETE" },
-      );
-      return true;
-    } catch (error) {
-      if (isPaimApiError(error) && error.status === 404) {
-        return true;
-      }
-
-      setDemoStatus({
-        ok: false,
-        message: getErrorMessage(error, "채팅 세션을 서버에서 삭제할 수 없습니다"),
-        scope: "overview",
-      });
-      return false;
     }
   }
 
@@ -7325,7 +6849,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       ...session,
       title: nextValue,
     }));
-    void syncChatSessionTitle(renameDraft.projectId, renameDraft.sessionId, nextValue);
 
     setRenameDraft(null);
     restoreRenameTriggerFocus(restoreFocus);
@@ -7398,7 +6921,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       setDemoStatus({
         kind: "warning",
         ok: false,
-        message: "한 번 더 누르면 이 채팅과 대화 기록을 삭제합니다",
+        message: "한 번 더 누르면 이 기기에 저장된 채팅과 대화 기록을 삭제합니다",
         scope: "overview",
       });
       return;
@@ -7406,19 +6929,9 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
     const targetSession = targetProject.sessions.find((session) => session.id === sessionId);
 
-    if (!targetSession || !(await deleteServerChatSession(targetProject, targetSession))) {
+    if (!targetSession) {
       return;
     }
-
-    if (targetSession.serverSessionId) {
-      const deletedServerSessionIds =
-        deletedServerSessionIdsRef.current.get(projectId) ?? new Set<string>();
-      deletedServerSessionIds.add(targetSession.serverSessionId);
-      deletedServerSessionIdsRef.current.set(projectId, deletedServerSessionIds);
-    }
-    pendingServerSessionTitlesRef.current.delete(
-      `${projectId}\u0000${sessionId}`,
-    );
     const latestProject = projectsRef.current.find((project) => project.id === projectId);
     if (!latestProject) {
       return;
@@ -7610,7 +7123,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         ok: false,
         message:
           typeof targetProject.apiProjectId === "number"
-            ? "한 번 더 누르면 서버의 문서·메모리·채팅까지 삭제됩니다"
+            ? "한 번 더 누르면 서버 프로젝트 자료와 이 기기의 채팅을 삭제합니다"
             : "한 번 더 누르면 로컬 프로젝트를 삭제합니다",
         scope: "overview",
       });
@@ -7621,13 +7134,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       return;
     }
 
-    targetProject.sessions.forEach((session) => {
-      pendingServerSessionTitlesRef.current.delete(
-        `${projectId}\u0000${session.id}`,
-      );
-    });
-    deletedServerSessionIdsRef.current.delete(projectId);
-    projectSessionSyncGenerationRef.current.delete(projectId);
     cancelGithubOperation(projectId);
     cancelProjectFileImport(projectId);
     (targetProject.files ?? []).forEach((attachment) =>
@@ -7686,6 +7192,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     const key = getSessionDraftKey(projectId, sessionId);
     if (!nextPrompt.trim() && attachments.length === 0) {
       sessionDraftsRef.current.delete(key);
+      saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
       return;
     }
 
@@ -7693,6 +7200,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       attachments: [...attachments],
       prompt: nextPrompt,
     });
+    saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
   }
 
   // 상세 composer와 각 채팅을 떠나도 작성 중인 텍스트·첨부가 남도록
@@ -7710,10 +7218,12 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     const key = getSessionDraftKey(selectedProjectId, selectedSessionId);
     if (!currentPrompt.trim() && attachments.length === 0) {
       sessionDraftsRef.current.delete(key);
+      saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
       return;
     }
 
     sessionDraftsRef.current.set(key, { attachments: [...attachments], prompt: currentPrompt });
+    saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
   }
 
   function showSessionDraft(projectId: string, sessionId: string | null) {
@@ -7727,15 +7237,21 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
   function forgetSessionDraft(projectId: string, sessionId: string | null) {
     sessionDraftsRef.current.delete(getSessionDraftKey(projectId, sessionId));
+    saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
   }
 
   function forgetProjectDrafts(projectId: string) {
     const prefix = `${projectId}\u0000`;
+    let didChange = false;
     Array.from(sessionDraftsRef.current.keys()).forEach((key) => {
       if (key.startsWith(prefix)) {
         sessionDraftsRef.current.delete(key);
+        didChange = true;
       }
     });
+    if (didChange) {
+      saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
+    }
   }
 
   function resetVisibleDraft() {
@@ -8080,28 +7596,11 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         }
       }
 
-      // 현재 main 서버 계약은 프로젝트와 채팅 세션을 각각 먼저 준비한 뒤
-      // 프로젝트 query 응답을 로컬 채팅에 연결하는 2단계 흐름이다.
+      // 프로젝트 생성은 서버 mutation이지만 개인 채팅과 history는 로컬에만 둔다.
       const apiProject = await ensureApiProject(selectedProject);
 
       if (typeof apiProject.apiProjectId !== "number") {
         throw new Error("서버 프로젝트를 준비할 수 없습니다");
-      }
-      if (controller.signal.aborted) {
-        throw new DOMException("Query cancelled", "AbortError");
-      }
-
-      const existingServerSessionId = targetSession.serverSessionId;
-      const persistedServerSessionId =
-        existingServerSessionId ??
-        (await ensureServerChatSession(
-          targetProjectId,
-          targetSession,
-          apiProject.apiProjectId,
-          nextSessionTitle,
-        ));
-      if (existingServerSessionId && nextSessionTitle !== targetSession.title) {
-        void syncChatSessionTitle(targetProjectId, targetSessionId, nextSessionTitle);
       }
       if (controller.signal.aborted) {
         throw new DOMException("Query cancelled", "AbortError");
@@ -8122,7 +7621,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
       updateSessionInProject(targetProjectId, targetSessionId, (session) => ({
         ...session,
-        serverSessionId: persistedServerSessionId,
         messages: [
           ...session.messages,
           {
