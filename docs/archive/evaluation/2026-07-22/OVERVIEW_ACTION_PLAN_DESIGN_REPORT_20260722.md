@@ -244,6 +244,6 @@ LLM 입력에 전체 액션을 제공해도 사용자 답변에 전체 액션을
 ## 근거
 
 - [Route-Balanced 상세 평가 보고서](./AGENTIC_ROUTE_BALANCED_EVAL_20260722.md)
-- [`_fetch_overview_context`](../backend/retriever/query_intent.py)
-- [`get_project_overview`](../backend/retriever/qa_tools.py)
-- [Agentic 오케스트레이터](../backend/agentic_graph.py)
+- `_fetch_overview_context` (`backend/retriever/query_intent.py`, 현재 구조에서는 제거된 과거 경로)
+- [`get_project_overview`](../../../../backend/retriever/qa_tools.py)
+- [Agentic 오케스트레이터](../../../../backend/agentic_graph.py)

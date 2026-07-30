@@ -2,8 +2,8 @@
 
 > 대상: `backend/pipeline/converters/` 멀티포맷 입력 + 출처 추적 청킹 (PR #1)
 > 환경: MySQL 8.0(docker) · ChromaDB(임베디드) · OpenAI `gpt-4.1-mini` · `PAIM_AUTH_MODE=dev`
-> 전처리 규칙은 [문서 전처리 정책서](DOCUMENT_INGESTION_POLICY.md), 응답 계약은
-> [API 명세서](API_명세서.md) 참고.
+> 전처리 규칙은 [문서 전처리 정책서](../../policies/DOCUMENT_INGESTION_POLICY.md), 응답 계약은
+> [API 명세서](../../API_명세서.md) 참고.
 
 ## 1. 검증 조건
 
@@ -273,7 +273,7 @@ PDF 변환기는 `pypdf`로 텍스트만 추출하므로 제목·목록·표 구
 | 텍스트 PDF 업로드·변환·메모리 생성 성공 | **충족** | 4건 `indexed`, memory 8~13행 |
 | 출처 메타데이터 확인 가능 | **충족** | Chroma 74청크에 block/page/heading/format, `memory_sources` 90행 |
 | 실패 파일은 명시적 오류 반환 | **충족** | 빈 파일 400 + `empty_document` |
-| 전처리 정책서 작성 완료 | 충족 | `docs/DOCUMENT_INGESTION_POLICY.md` |
+| 전처리 정책서 작성 완료 | 충족 | `docs/policies/DOCUMENT_INGESTION_POLICY.md` |
 
 **5개 전부 충족.** 단 아래 유의사항이 붙는다.
 

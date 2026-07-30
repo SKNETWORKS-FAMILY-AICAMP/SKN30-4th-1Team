@@ -2,7 +2,7 @@
 
 - 기준 브랜치: `integration/pr18-stabilized-20260729`
 - DB 계약: v9 기존 `memory.due_date`, `memory_suggestions` 재사용
-- API 정본: [API 명세서](API_명세서.md)
+- API 정본: [API 명세서](../../API_명세서.md)
 
 ## 백엔드 동작
 

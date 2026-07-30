@@ -1,7 +1,7 @@
 # 출처 인용(citation) 기능 — 프론트엔드 핸드오버
 
 - 작성: 2026-07-22 (TASK-007 반영, origin/main `5240f40` 기준)
-- 관련 API: `POST /api/v1/projects/{id}/query` — [API_명세서.md](API_명세서.md)
+- 관련 API: `POST /api/v1/projects/{id}/query` — [API_명세서.md](../../API_명세서.md)
 - 백엔드 변경은 완료·병합됨. 이 문서는 프론트가 알아야 할 계약 영향과 선택적
   UI 작업을 정리한다.
 
@@ -80,7 +80,7 @@
 
 ## 6. 참고 문서
 
-- [API_명세서.md](API_명세서.md) — `query` 응답 스키마
+- [API_명세서.md](../../API_명세서.md) — `query` 응답 스키마
 - [HANDOVER_SUPERSEDE_FRONTEND.md](HANDOVER_SUPERSEDE_FRONTEND.md) — 이력/번복 UI
-- 평가 근거: [EVAL_REPORT.md](EVAL_REPORT.md) §4(출처 추적성),
-  [EVAL_INSIGHTS_REPORT.md](EVAL_INSIGHTS_REPORT.md)
+- 과거 평가 근거: [EVAL_REPORT.md](../../archive/evaluation/golden-v1/EVAL_REPORT.md) §4(출처 추적성),
+  [EVAL_INSIGHTS_REPORT.md](../../archive/evaluation/golden-v1/EVAL_INSIGHTS_REPORT.md)

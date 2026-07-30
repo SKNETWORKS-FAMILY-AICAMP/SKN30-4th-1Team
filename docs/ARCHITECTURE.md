@@ -159,8 +159,13 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 │   └── components/                  # 메모리 카드, 타임라인 등 재사용 위젯
 │
 ├── docs/                            # 프로젝트 문서
+│   ├── README.md                    # 문서 정본·보관 자료 인덱스
 │   ├── API_명세서.md, .html         # FastAPI 엔드포인트 명세
-│   └── ARCHITECTURE.md, .html       # (본 문서) 시스템 아키텍처
+│   ├── ARCHITECTURE.md              # (본 문서) 시스템 아키텍처
+│   ├── policies/, planning/         # 현재 정책과 남은 작업
+│   ├── handovers/, reports/         # 담당자 계약과 검증 결과
+│   ├── deliverables/                # 제출 산출물 작업 공간
+│   └── archive/                     # 과거 평가·통합·핸드오버 기록
 │
 ├── docker-compose.yml                # MySQL 컨테이너 (schema.sql 자동 적용)
 ├── start-paim.bat                    # Windows 원클릭 실행 (Docker·백엔드·앱 자동 기동)

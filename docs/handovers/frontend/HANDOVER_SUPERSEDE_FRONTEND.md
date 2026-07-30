@@ -2,7 +2,7 @@
 
 - 작성: 2026-07-15, 백엔드 TASK-002·TASK-003 완료 기준 (브랜치 `develop/hyseo`, 검증 PASS)
 - 대상 독자: 데스크톱(desktop/) 작업자
-- ⚠️ 선행 문서: `docs/HANDOVER_AUTH_FRONTEND.md` — 로그인/토큰 연동이 이 문서의
+- ⚠️ 선행 문서: [HANDOVER_AUTH_FRONTEND.md](HANDOVER_AUTH_FRONTEND.md) — 로그인/토큰 연동이 이 문서의
   작업보다 우선순위가 높다(jwt 모드 전환 시 앱 전체가 401).
 - 요지: **백엔드는 끝났고 기존 데스크톱은 수정 없이도 깨지지 않는다.**
   다만 supersede 제안 UI를 붙여야 기능이 사용자에게 보인다. API 형태에 대한
@@ -101,4 +101,4 @@ GET /api/v1/projects/{id}/suggestions?kind=all         (전체 kind)
 
 - 상세 계약 변화 이력: `.agent-workflow/tasks/TASK-003/implementation-report.md`
   (라운드별 "프론트엔드 영향" 섹션) — 로컬 전용(git 미추적)이라 필요하면 요청.
-- supersede 설계 배경: `docs/PRODUCTION_ROADMAP.md` #2.
+- 과거 supersede 설계 배경: [PRODUCTION_ROADMAP.md](../../archive/planning/2026-07/PRODUCTION_ROADMAP.md) #2.

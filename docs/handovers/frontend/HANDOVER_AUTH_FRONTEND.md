@@ -97,5 +97,5 @@ DELETE /api/v1/projects/{id}/members/{member_user_id}           제거
 
 ## 9. 관련 문서
 
-- supersede 기능 계약: `docs/HANDOVER_SUPERSEDE_FRONTEND.md`
-- 백엔드 전체 변경 정리: `docs/BACKEND_CHANGES_SUMMARY.md`
+- supersede 기능 계약: [HANDOVER_SUPERSEDE_FRONTEND.md](HANDOVER_SUPERSEDE_FRONTEND.md)
+- 과거 백엔드 변경 정리: [BACKEND_CHANGES_SUMMARY.md](../../archive/integration/2026-07/BACKEND_CHANGES_SUMMARY.md)

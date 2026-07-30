@@ -22,7 +22,7 @@
 | E2 비번복 대조군 faithfulness | Modu .592 / CS-Bot .607 | 번복 서사 과장 가능성 확인 필요 |
 | citation grounding | 0.962~1.000 | 실제 근거 파일명 인용은 대체로 안정 |
 
-세부 수치와 유형별 차트는 [EVAL_INSIGHTS_REPORT.md](EVAL_INSIGHTS_REPORT.md) 및 [EVAL_INSIGHTS_REPORT.html](EVAL_INSIGHTS_REPORT.html)을 정본으로 참조한다.
+세부 수치와 유형별 차트는 [EVAL_INSIGHTS_REPORT.md](../../evaluation/golden-v1/EVAL_INSIGHTS_REPORT.md) 및 [EVAL_INSIGHTS_REPORT.html](../../evaluation/golden-v1/EVAL_INSIGHTS_REPORT.html)을 당시 정본으로 참조한다.
 
 ## 우선순위 로드맵
 
@@ -91,7 +91,7 @@
 
 ### 범위
 
-`filter_lookup`은 RAGAS 대신 기대 결과와 정확히 비교한다. 현재 [nonsearch_track_draft.json](../backend/test/golden/nonsearch_track_draft.json)에 순방향 담당자 조회 6문항 초안이 있다.
+`filter_lookup`은 RAGAS 대신 기대 결과와 정확히 비교한다. 당시 [nonsearch_track_draft.json](../../../../backend/test/golden/nonsearch_track_draft.json)에 순방향 담당자 조회 6문항 초안이 있다.
 
 ### 최소 문항군
 

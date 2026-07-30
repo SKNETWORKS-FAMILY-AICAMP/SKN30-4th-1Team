@@ -6,7 +6,7 @@
 - 설계 정본: `backend/test/golden/EVAL_DESIGN.md` / 하네스: `run_eval.py`
 - 측정 방식: **context 지표는 dev 실측 승격**, **생성·인용 지표는 final E0·E2-e2e
   증분**(faithfulness·response_relevancy·citation_grounding).
-- 엑셀 요약: `docs/EVAL_REPORT.xlsx` (`export_report.py`로 재생성).
+- 엑셀 요약: `docs/archive/evaluation/golden-v1/EVAL_REPORT.xlsx` (`export_report.py`로 재생성).
 
 ## 1. 최종 결과 (phase=final)
 
@@ -228,12 +228,12 @@ recall 우선 검색 설계의 의도된 비용이다.**
   `results/METHODS_20260719-2329.md`.
 - 추적 스냅샷(로컬 전용, gitignore): `.eval_state/contexts_*.jsonl` —
   문항별 답변·SQL/벡터 근거·인용·LLM 입력 전문.
-- 엑셀 요약: `docs/EVAL_REPORT.xlsx`.
+- 엑셀 요약: `docs/archive/evaluation/golden-v1/EVAL_REPORT.xlsx`.
 - 재현:
   ```bash
   RUNID=20260719-2329
   .venv/bin/python backend/test/golden/run_eval.py all --corpus modu  --phase dev  --runid $RUNID
   .venv/bin/python backend/test/golden/run_eval.py all --corpus csbot --phase dev  --runid $RUNID
   bash .agent-workflow/tasks/TASK-007/remeasure-task007.sh   # final 생성·인용 증분
-  .venv/bin/python backend/test/golden/export_report.py      # → docs/EVAL_REPORT.xlsx
+  .venv/bin/python backend/test/golden/export_report.py      # → docs/archive/evaluation/golden-v1/EVAL_REPORT.xlsx
   ```

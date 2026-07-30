@@ -3,7 +3,7 @@
 > PR #1(멀티포맷 입력 + 출처 추적 청킹)에서 **이번 범위로 처리하지 않기로 확정한** 항목들이다.
 > 각 항목에 왜 이번에 안 했는지와 근거를 남겼다. GitHub 이슈로도 등록돼 있다.
 >
-> 관련: [E2E 검증 보고서](DOCUMENT_INGESTION_E2E_REPORT.md) · [전처리 정책서](DOCUMENT_INGESTION_POLICY.md)
+> 관련: [E2E 검증 보고서](../reports/validation/DOCUMENT_INGESTION_E2E_REPORT.md) · [전처리 정책서](../policies/DOCUMENT_INGESTION_POLICY.md)
 
 > 기준: PR #1 `5e124a4` (`origin/main` 병합 후, validator `PASS`)
 > 작성: 2026-07-28
@@ -166,7 +166,7 @@ backend/api/query.py     첨부 루프 재배치 (base64 400·크기 413 검사 
 backend/graph.py         attachment_sources 가 sources·debug 두 역할 겸함
 backend/retriever/qa_engine.py   SYSTEM_QA의 (출처:) 인용 규칙
 docs/API_명세서.md·.html  질의 첨부 정책
-docs/HANDOVER_CITATION_FRONTEND.md  인용 대조 계약
+docs/handovers/frontend/HANDOVER_CITATION_FRONTEND.md  인용 대조 계약
 ```
 
 **담당 D(RAG·인용) 영역과 겹친다.** 단독으로 진행하면 교차 영역 리뷰가 다시 필요하다.

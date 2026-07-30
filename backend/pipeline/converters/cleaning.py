@@ -2,7 +2,7 @@
 
 포맷별 변환기가 각자 다른 기준으로 텍스트를 다듬으면 청크 품질이 포맷마다
 달라진다. 정제·중복 제거·불필요 정보 제거 기준은 전부 이 모듈에 모은다.
-각 규칙의 근거와 알려진 한계는 docs/DOCUMENT_INGESTION_POLICY.md에 기록한다.
+각 규칙의 근거와 알려진 한계는 docs/policies/DOCUMENT_INGESTION_POLICY.md에 기록한다.
 """
 from __future__ import annotations
 
