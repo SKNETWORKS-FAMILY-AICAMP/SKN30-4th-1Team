@@ -12,7 +12,11 @@
 - 외부 응답 계약(`answer`, `plan`, `sources`, `route`, `debug`)을 변경하지 않는다.
 - MySQL과 Chroma는 한 번 만든 동결 snapshot을 baseline과 candidate가 함께 사용한다.
 - LLM 모델, judge, temperature, 동시성, 재시도 설정을 한 비교 안에서 고정한다.
-- 개발셋은 반복 측정할 수 있지만 `final` split은 최종 후보에서 한 번만 연다.
+- 저장소에는 반복 측정용 `dev` 질문과 골든만 둔다.
+- `final` 질문과 골든은 구현자에게 공개하지 않고 저장소 밖의 접근 통제된 위치에
+  잠근다. 최종 후보와 구현이 동결된 뒤 독립 평가 담당자가 한 번만 실행한다.
+- `final` 실행과 채점에는 저장소 밖의 `--questions`, `--golden` 경로를 모두
+  명시해야 한다. 공개 dev 파일이나 저장소 내부 파일로 final을 실행할 수 없다.
 
 ## 역할 기반 Tool 계약
 
@@ -71,7 +75,7 @@ RAGAS와 성능은 동일 문항의 baseline 대비 paired 차이로 비교한�
 평균만 게시하지 않고 문항별 점수, 평균·중앙값, 개선/동률/악화 문항 수를 함께 남긴다.
 RAGAS 결과에 `NaN`이 하나라도 있으면 해당 실행은 무효다.
 
-## 골든 작성 분리
+## 골든 작성 분리와 잠금
 
 - 질문·평가 계약 작성자와 골든 답변 작성자를 분리한다.
 - 골든 작성자는 각 문항의 `source_scope`와 inline 첨부만 읽는다.
@@ -79,6 +83,12 @@ RAGAS 결과에 `NaN`이 하나라도 있으면 해당 실행은 무효다.
 - 골든 항목마다 참조 답변, 필수 사실, 금지 주장, 근거 파일과 근거 문장을 기록한다.
 - `answer_correctness`는 골든 항목의 `reference_answer`를 기준으로 계산한다.
 - 원문으로 확정할 수 없으면 추측하지 않고 `must_abstain`으로 표시한다.
+- 공개 JSON의 자기 선언 필드는 작성자 분리나 독립성을 증명하지 못하므로 사용하지
+  않는다. final의 작성자, 접근자, 봉인 시각과 1회 실행 기록은 저장소 밖의 감사
+  기록으로 검증한다.
+- final 질문·정답·고유 표현·예상 인자는 운영 프롬프트, Tool 설명, 정규식, 단위
+  테스트와 회귀 테스트에 복사하지 않는다. final 실행 뒤에도 결과는 구현 튜닝에
+  재사용하지 않고 다음 평가는 새 잠금셋으로 교체한다.
 
 ## 실행 파이프라인
 
@@ -104,7 +114,25 @@ uv run --python 3.13 --group eval python -m evals.agentic_v2.pipeline compare `
   --output evals/results/agentic_v2/modu-comparison.json
 ```
 
+최종 평가 담당자는 저장소 밖 잠금 경로를 명시한다. 아래 경로는 형식 예시일 뿐이며
+실제 잠금 파일 경로나 내용은 저장소와 개발자에게 공개하지 않는다.
+
+```powershell
+uv run --python 3.13 --group eval python -m evals.agentic_v2.pipeline run `
+  --state-root evals/results/agentic_v2/state --corpus modu --split final `
+  --questions X:\locked-eval\questions.json `
+  --golden X:\locked-eval\golden.json `
+  --label candidate --output evals/results/agentic_v2/modu-final.json
+
+uv run --python 3.13 --group eval python -m evals.agentic_v2.pipeline score `
+  --input evals/results/agentic_v2/modu-final.json `
+  --golden X:\locked-eval\golden.json `
+  --output evals/results/agentic_v2/modu-final-scored.json
+```
+
 `run`은 실제 query 엔드포인트 함수와 동일한 입력 모델·첨부 변환·Agentic graph를
 통과한다. 전체 검색 본문은 공개 API의 `debug`에 추가하지 않고 평가 요청의
-`ContextVar`에서만 수집한다. `score` 실패 또는 `NaN`은 결과 파일을 게시하지 않으며,
+`ContextVar`에서만 수집한다. 평가 컨텍스트에는 모델이 실제로 받은 검색 본문만
+포함하며, 원본 질문 JSON의 첨부나 Tool 응답에서 제외된 프로젝트 메모리를 별도로
+주입하지 않는다. `score` 실패 또는 `NaN`은 결과 파일을 게시하지 않으며,
 `compare`는 모든 RAGAS 대상 문항의 채점이 끝나지 않으면 실행을 거부한다.

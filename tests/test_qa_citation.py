@@ -36,7 +36,7 @@ def test_source_label_ignores_absent_repo_sentinel():
 
 def test_structured_row_line_has_source_marker():
     row = {"category": "action", "content": "채팅 개발 착수",
-           "source": "2026-03-02_회의.md", "owner": "이수진",
+           "source": "2026-03-02_회의.md", "owner": "정하늘",
            "source_info": {"repo_id": None, "path": None}}
     line = qa_engine._row_line_body(row)
     assert "(출처: 2026-03-02_회의.md)" in line

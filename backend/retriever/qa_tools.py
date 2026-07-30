@@ -16,7 +16,6 @@ from typing import Annotated, Literal, Optional
 from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 
-from ..project_memory import get_project_memory
 from . import history_context, history_intent, mysql_search, qa_engine
 from .index_scope import load_project_index_scope
 from .sql_project_state import fetch_project_overview_context
@@ -220,12 +219,9 @@ def search_project_evidence(
     # mixed into this targeted tool result; query_sql_state handles overview
     # with its own summary lifecycle.
     content = context or "프로젝트 기록에서 관련 근거를 찾지 못했습니다."
-    evaluation_contexts = list(debug.get("retrieved_contexts") or [])
-    if _EVALUATION_CONTEXTS.get() is not None:
-        project_memory = get_project_memory(project_id)
-        if project_memory:
-            evaluation_contexts.insert(0, f"[프로젝트 메모리]\n{project_memory}")
-    _capture_evaluation_contexts(evaluation_contexts)
+    # 평가기도 모델이 실제로 받은 검색 컨텍스트만 사용한다. 평가 요청에서만
+    # 별도 메모리나 정답 요약을 보태면 운영 답변과 다른 근거를 채점하게 된다.
+    _capture_evaluation_contexts(list(debug.get("retrieved_contexts") or []))
     return content, _with_latency(started, {
         "tool": "search_hybrid_vector_rag",
         "status": "ok" if context else "empty",
@@ -287,7 +283,7 @@ def query_structured_memory(
 ) -> tuple[str, dict]:
     """프로젝트의 구조화 상태를 목록·개수·전반 조망 형태로 조회합니다.
 
-    예: "critical 버그는 몇 건"은 count·issue·text_query="critical 버그"로 조회합니다.
+    목록·개수 질문이 구조화 분류보다 좁은 대상을 지정하면 그 표현을 text_query로 전달합니다.
     프로젝트 브리핑·전반 현황·전체 위험과 다음 할 일은 overview·all·빈 text_query로 조회해
     저장된 요약과 유효한 Action Plan을 반환합니다.
     completion_status가 unknown이면 완료 여부 미확인으로 유지하고

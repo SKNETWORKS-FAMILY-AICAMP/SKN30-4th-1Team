@@ -218,7 +218,7 @@ def test_attachment_evidence_is_not_used_as_the_followup_topic(
         1,
         "그 전에는?",
         history=[{"role": "user", "content": "인증 방식을 어떻게 결정했어?"}],
-        attachment_context=f"{attachment_marker}\n릴리즈명은 Bluefin",
+        attachment_context=f"{attachment_marker}\n릴리즈명은 Nebula",
         model=fake,
     )
 

@@ -18,7 +18,7 @@ def _project_conn():
 
 
 def test_query_attachment_becomes_temporary_agentic_evidence():
-    encoded = base64.b64encode("첨부 전용 사실: 릴리즈명은 Bluefin".encode()).decode()
+    encoded = base64.b64encode("첨부 전용 사실: 릴리즈명은 Nebula".encode()).decode()
 
     def fake_run_agentic_qa(**kwargs):
         assert kwargs["attachment_sources"] == ["note.txt"]
@@ -30,9 +30,9 @@ def test_query_attachment_becomes_temporary_agentic_evidence():
             "truncated": False,
         }]
         assert "[첨부 자료]" in kwargs["attachment_context"]
-        assert "릴리즈명은 Bluefin" in kwargs["attachment_context"]
+        assert "릴리즈명은 Nebula" in kwargs["attachment_context"]
         return {
-            "answer": "Bluefin",
+            "answer": "Nebula",
             "sources": kwargs["attachment_sources"],
             "route": "semantic",
             "debug": {"attachments": kwargs["attachment_sources"]},
@@ -51,7 +51,7 @@ def test_query_attachment_becomes_temporary_agentic_evidence():
 
     assert response.status_code == 200
     body = response.json()
-    assert body["answer"] == "Bluefin"
+    assert body["answer"] == "Nebula"
     assert body["sources"] == ["note.txt"]
     assert body["route"] == "semantic"
     assert body["debug"]["router_stage"] == "tool_agent"

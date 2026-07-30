@@ -51,11 +51,11 @@ ORCHESTRATOR_SYSTEM_PROMPT = qa_engine.SYSTEM_QA + """
   회의 간 변화와 충돌, 기록에 값이 있는지 확인하는 질문에 사용합니다.
 - query_sql_state: 질문에 이미 주어진 담당자·상태·분류 조건으로 목록이나 개수를
   구할 때만 사용합니다. 사용자가 담당자를 묻는 경우 owner에 답을 추측해 넣지 말고,
-  text_query에 작업명을 넣거나 search_hybrid_vector_rag를 사용하세요. 예를 들어
-  "critical 버그는 몇 건"은 operation=count, category=issue, text_query="critical 버그"입니다.
+  text_query에 작업명을 넣거나 search_hybrid_vector_rag를 사용하세요. 질문이 구조화
+  분류보다 좁은 대상을 지정하면 그 대상 표현을 text_query로 보존하고 분류 전체를 조회하지 마세요.
 - 프로젝트 전반의 현황·브리핑·요약 요청은 query_sql_state를 operation=overview,
   category=all, text_query=""로 호출합니다. 현재 overview 요약과 유효한 Action Plan 전체를 근거로 제공합니다.
-  "전체 정답률"처럼 특정 지표를 묻는 질문은 overview가 아니며, 보조 도구로 먼저 호출하지 않습니다.
+  특정 지표 값을 묻는 질문은 overview가 아니며, 보조 도구로 먼저 호출하지 않습니다.
 
 중요 규칙:
 - 한 질문에 구조화 상태와 배경 설명이 함께 필요하면 여러 도구를 호출할 수 있습니다.

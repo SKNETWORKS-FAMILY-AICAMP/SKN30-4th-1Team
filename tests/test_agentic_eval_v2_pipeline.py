@@ -1,10 +1,15 @@
 import importlib
 from copy import deepcopy
 
+import pytest
 from langchain_core.messages import HumanMessage
 
 from evals.agentic_v2.pipeline import (
+    PUBLIC_DEV_GOLDEN,
+    PUBLIC_DEV_QUESTIONS,
     _evaluation_request,
+    _resolve_run_dataset_paths,
+    _resolve_score_golden_path,
     compare_runs,
     score_contract,
 )
@@ -97,7 +102,7 @@ def test_score_contract_accepts_attachment_only_zero_tool_trace():
     record = {
         "http_status": 200,
         "error": None,
-        "answer": "Bluefin입니다.",
+        "answer": "Orchid입니다.",
         "sources": ["note.txt"],
         "debug": {
             "tool_calls": [],
@@ -113,6 +118,47 @@ def test_score_contract_accepts_attachment_only_zero_tool_trace():
     }
 
     assert score_contract(question, golden, record)["passed"] is True
+
+
+def test_final_run_requires_explicit_external_locked_datasets(tmp_path):
+    """final은 공개 기본 파일이나 저장소 내부 파일로 실행할 수 없다."""
+    with pytest.raises(RuntimeError, match="explicit external"):
+        _resolve_run_dataset_paths("final", None, None)
+
+    with pytest.raises(RuntimeError, match="outside the repository"):
+        _resolve_run_dataset_paths(
+            "final",
+            PUBLIC_DEV_QUESTIONS,
+            PUBLIC_DEV_GOLDEN,
+        )
+
+    questions = tmp_path / "locked-questions.json"
+    golden = tmp_path / "locked-golden.json"
+    assert _resolve_run_dataset_paths("final", questions, golden) == (
+        questions,
+        golden,
+    )
+
+
+def test_final_score_requires_explicit_external_locked_golden(tmp_path):
+    """final 결과도 공개 dev 골든으로 채점할 수 없다."""
+    with pytest.raises(RuntimeError, match="explicit external"):
+        _resolve_score_golden_path("final", None)
+
+    with pytest.raises(RuntimeError, match="outside the repository"):
+        _resolve_score_golden_path("final", PUBLIC_DEV_GOLDEN)
+
+    locked_golden = tmp_path / "locked-golden.json"
+    assert _resolve_score_golden_path("final", locked_golden) == locked_golden
+
+
+def test_dev_keeps_public_dataset_defaults():
+    """반복 개발용 dev 실행은 기존 공개 기본 경로를 유지한다."""
+    assert _resolve_run_dataset_paths("dev", None, None) == (
+        PUBLIC_DEV_QUESTIONS,
+        PUBLIC_DEV_GOLDEN,
+    )
+    assert _resolve_score_golden_path("dev", None) == PUBLIC_DEV_GOLDEN
 
 
 def test_score_contract_rejects_duplicate_calls_and_more_than_five_rounds():
@@ -180,9 +226,8 @@ def test_compare_runs_applies_contract_ragas_and_performance_gates():
     assert result["performance"]["llm_tokens_mean_candidate"] == 100
 
 
-def test_search_tool_captures_full_context_only_for_evaluation(monkeypatch):
-    """검색 Tool이 공개 debug와 분리해 평가용 전체 근거를 전달하는지 확인한다."""
-    monkeypatch.setattr(qa_tools, "get_project_memory", lambda project_id: "프로젝트 요약")
+def test_search_tool_scores_only_context_returned_to_the_model(monkeypatch):
+    """평가기가 검색 Tool이 모델에 반환한 원문만 채점하는지 확인한다."""
     monkeypatch.setattr(
         qa_tools.qa_engine,
         "_build_context",
@@ -204,7 +249,7 @@ def test_search_tool_captures_full_context_only_for_evaluation(monkeypatch):
             current_question="질문",
         )
 
-    assert contexts == ["[프로젝트 메모리]\n프로젝트 요약", "전체 검색 본문"]
+    assert contexts == ["전체 검색 본문"]
     assert "retrieved_contexts" not in artifact["debug"]
 
 

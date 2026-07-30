@@ -12,17 +12,19 @@ def _load_json(filename: str) -> dict:
 
 
 def test_questions_have_frozen_small_set_and_valid_sources():
-    """질문셋의 고정 분할과 참조 문서가 유효한지 확인한다."""
+    """공개 질문셋에는 반복 개발용 dev 문항만 있는지 확인한다."""
     data = _load_json("questions.json")
     questions = data["questions"]
 
-    assert len(questions) == 24
-    assert data["splits"] == {"dev": 16, "final": 8}
+    assert data["dataset_id"] == "paim-agentic-v2-dev-20260730"
+    assert len(questions) == 16
+    assert data["splits"] == {"dev": 16}
+    assert all(item["split"] == "dev" for item in questions)
     assert len({item["id"] for item in questions}) == len(questions)
-    assert sum(item["corpus"] == "modu" for item in questions) == 12
-    assert sum(item["corpus"] == "csbot" for item in questions) == 12
+    assert sum(item["corpus"] == "modu" for item in questions) == 8
+    assert sum(item["corpus"] == "csbot" for item in questions) == 8
     ragas_questions = [item for item in questions if item["ragas_metrics"]]
-    assert len(ragas_questions) == 16
+    assert len(ragas_questions) == 11
     assert all(
         "answer_correctness" in item["ragas_metrics"]
         for item in ragas_questions
@@ -48,17 +50,15 @@ def test_explicit_change_reason_question_expects_history_mode():
 
 
 def test_golden_matches_questions_and_uses_only_allowed_sources():
-    """독립 골든셋이 질문과 일대일 대응하고 허용된 근거만 쓰는지 확인한다."""
+    """공개 dev 골든이 질문과 일대일 대응하고 허용된 근거만 쓰는지 확인한다."""
     questions = _load_json("questions.json")
     golden = _load_json("golden.json")
     question_by_id = {item["id"]: item for item in questions["questions"]}
     golden_by_id = {item["id"]: item for item in golden["items"]}
 
     assert golden["dataset_id"] == questions["dataset_id"]
-    assert golden["authoring_policy"] == {
-        "independent_from_question_author": True,
-        "allowed_sources_only": True,
-    }
+    assert golden["authoring_policy"] == {"allowed_sources_only": True}
+    assert "independent_from_question_author" not in golden["authoring_policy"]
     assert list(golden_by_id) == list(question_by_id)
 
     for item_id, answer in golden_by_id.items():

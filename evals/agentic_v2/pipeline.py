@@ -23,6 +23,8 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
+PUBLIC_DEV_QUESTIONS = HERE / "questions.json"
+PUBLIC_DEV_GOLDEN = HERE / "golden.json"
 CAPABILITY_TO_TOOL = {
     "hybrid_search": "search_hybrid_vector_rag",
     "structured_state": "query_sql_state",
@@ -36,6 +38,46 @@ RAGAS_METRICS = {
     "response_relevancy",
 }
 ABSTENTION_MARKERS = ("확인할 수 없", "확인되지 않", "알 수 없", "근거가 없")
+
+
+def _is_repository_path(path: Path) -> bool:
+    """경로가 공개 저장소 내부를 가리키는지 확인한다."""
+    try:
+        path.resolve().relative_to(REPO.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _resolve_run_dataset_paths(
+    split: str,
+    questions: Path | None,
+    golden: Path | None,
+) -> tuple[Path, Path]:
+    """개발셋 기본값을 적용하고 final은 외부 잠금 파일만 허용한다."""
+    questions_path = questions or PUBLIC_DEV_QUESTIONS
+    golden_path = golden or PUBLIC_DEV_GOLDEN
+    if split == "final":
+        if questions is None or golden is None:
+            raise RuntimeError(
+                "final split requires explicit external --questions and --golden"
+            )
+        if _is_repository_path(questions_path) or _is_repository_path(golden_path):
+            raise RuntimeError(
+                "final questions and golden must be locked outside the repository"
+            )
+    return questions_path, golden_path
+
+
+def _resolve_score_golden_path(split: str, golden: Path | None) -> Path:
+    """final 실행 결과는 외부 잠금 골든을 명시해야만 채점한다."""
+    golden_path = golden or PUBLIC_DEV_GOLDEN
+    if split == "final":
+        if golden is None:
+            raise RuntimeError("final split requires explicit external --golden")
+        if _is_repository_path(golden_path):
+            raise RuntimeError("final golden must be locked outside the repository")
+    return golden_path
 
 
 def _read_json(path: Path) -> dict:
@@ -281,9 +323,15 @@ def _evaluation_request(project_id: int):
 
 def run_questions(args: argparse.Namespace) -> dict:
     """동결 상태에서 실제 query 엔드포인트 함수를 문항당 한 번 성공시킨다."""
-    manifest = _configure_runtime(args)
-    questions_data = _read_json(args.questions)
-    golden_data = _read_json(args.golden)
+    questions_path, golden_path = _resolve_run_dataset_paths(
+        args.split,
+        args.questions,
+        args.golden,
+    )
+    questions_data = _read_json(questions_path)
+    golden_data = _read_json(golden_path)
+    if questions_data["dataset_id"] != golden_data["dataset_id"]:
+        raise RuntimeError("questions and golden dataset_id do not match")
     golden_by_id = {item["id"]: item for item in golden_data["items"]}
     questions = [
         item for item in questions_data["questions"]
@@ -291,6 +339,13 @@ def run_questions(args: argparse.Namespace) -> dict:
     ]
     if not questions:
         raise RuntimeError("selected question set is empty")
+    missing_golden = [
+        item["id"] for item in questions if item["id"] not in golden_by_id
+    ]
+    if missing_golden:
+        raise RuntimeError(f"golden entries missing: {missing_golden}")
+
+    manifest = _configure_runtime(args)
 
     from fastapi import HTTPException
     from backend.api.query import QueryRequest, query
@@ -318,9 +373,7 @@ def run_questions(args: argparse.Namespace) -> dict:
                             attachments=_attachment_models(item["attachments"]),
                         ),
                     )
-                contexts = list(captured) + [
-                    attachment["content_text"] for attachment in item["attachments"]
-                ]
+                contexts = list(captured)
                 status = 200
                 error = None
                 break
@@ -488,7 +541,7 @@ def score_ragas(args: argparse.Namespace) -> dict:
 
     load_dotenv(REPO / ".env")
     run = _read_json(args.input)
-    golden = _read_json(args.golden)
+    golden = _read_json(_resolve_score_golden_path(run["split"], args.golden))
     if run["dataset_id"] != golden["dataset_id"]:
         raise RuntimeError("run and golden dataset_id do not match")
     golden_by_id = {item["id"]: item for item in golden["items"]}
@@ -645,8 +698,16 @@ def parse_args() -> argparse.Namespace:
     run.add_argument("--split", default="dev", choices=("dev", "final"))
     run.add_argument("--label", required=True)
     run.add_argument("--output", required=True, type=Path)
-    run.add_argument("--questions", type=Path, default=HERE / "questions.json")
-    run.add_argument("--golden", type=Path, default=HERE / "golden.json")
+    run.add_argument(
+        "--questions",
+        type=Path,
+        help="질문셋 경로. dev는 공개 기본값, final은 저장소 밖 잠금 파일 필수",
+    )
+    run.add_argument(
+        "--golden",
+        type=Path,
+        help="골든셋 경로. dev는 공개 기본값, final은 저장소 밖 잠금 파일 필수",
+    )
     run.add_argument("--db-host", default="127.0.0.1")
     run.add_argument("--db-port", type=int, default=3316)
     run.add_argument("--db-user", default="root")
@@ -657,7 +718,11 @@ def parse_args() -> argparse.Namespace:
     score = subcommands.add_parser("score", help="저장된 실행 결과 RAGAS 채점")
     score.add_argument("--input", required=True, type=Path)
     score.add_argument("--output", required=True, type=Path)
-    score.add_argument("--golden", type=Path, default=HERE / "golden.json")
+    score.add_argument(
+        "--golden",
+        type=Path,
+        help="골든셋 경로. dev는 공개 기본값, final은 저장소 밖 잠금 파일 필수",
+    )
     score.add_argument("--judge", default="gpt-4.1-mini")
     score.add_argument("--embedding-model", default="text-embedding-3-small")
     score.add_argument("--workers", type=int, default=4)

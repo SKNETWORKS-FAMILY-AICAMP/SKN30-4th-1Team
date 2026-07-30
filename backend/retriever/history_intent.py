@@ -34,17 +34,29 @@ _HISTORY_TRIGGER_RES = [
     re.compile(r"번복"),
 ]
 
-# 지시어 화이트리스트: 직전 질문의 주제를 가리키는 표현.
-_DEICTIC_RE = re.compile(
-    r"(그거|그것|그건|그게|이거|이건|이게|저거"
-    r"|그\s*전(?:에는|엔|은|는)?|전에는|전엔"
-    r"|그\s*(뒤|후)(?:에는|엔|는)?"
-    r"|그\s*(결정|계획|건|부분|항목|얘기|이야기)"
-    r"|이\s*(결정|계획|결과)"
-    r"|나중에"
-    r"|최종\s*결과(?:에서는|는|엔)?"
-    r"|방금\s*(그|말한)|아까\s*(그|말한))"
+# 직전 대상을 직접 가리키는 지시 표현. 특정 평가 문장을 통째로 열거하지 않고
+# 지시사 + 일반 참조 명사의 조합으로 판정한다.
+_DIRECT_REFERENCE_RE = re.compile(
+    r"((그|이|저)\s*(거|것|건|게|결정|계획|방침|내용|부분|항목|얘기|이야기)"
+    r"(?:야|요|은|는|이|가|을|를|에|에서|엔)?"
+    r"|방금\s*(그|말한)|아까\s*(그|말한)"
+    r"|그\s*전(?:에는|엔|은|는)?|전에는|전엔)"
 )
+
+# 시간상 후속 단계와 변화·결과 의미가 함께 있을 때만 앞선 맥락을 가리킨다.
+# "나중에 할 일", "최종 보고서"처럼 시간 표현만 있는 일반 요청은 제외한다.
+_SEQUENCE_REFERENCE_RE = re.compile(
+    r"(그\s*(뒤|이후|다음)|그\s*후(?!속)|이후|나중|훗날|결국|끝내"
+    r"|최종(?:적)?|마지막)"
+)
+_FOLLOWUP_STATE_RE = re.compile(
+    r"(바뀌|바꾸|달라"
+    r"|(?:변경|수정|번복|전환|철회|취소|보류|유지|결정|확정|도입|채택|적용|시행)"
+    r"\s*(?:되|돼|됐|되어|되었|하|해|했|한)"
+    r"|(?:결과|결론|상태|여부)[^?\n]{0,12}?(?:어떻|어찌|됐|되었|돼|났|나왔)"
+    r"|어떻게\s*(되|됐|돼))"
+)
+_DEICTIC_STRIP_RES = [_DIRECT_REFERENCE_RE, _SEQUENCE_REFERENCE_RE]
 
 # 주제 토큰 추출 전 제거할 표현: 이력 트리거 어휘 + 요청형 표현.
 # 이걸 안 지우면 "왜 바뀌었어?"에서 Kiwi가 '바뀌'(VV)를 내용어로 뽑아
@@ -75,17 +87,23 @@ _kiwi = None
 
 
 def detect_history_intent(question: str) -> bool:
-    """질문이 결정 변경 이력을 묻는지 보수적 정규식으로 판정한다."""
+    """질문이 결정 변경 이력을 묻는지 보수적 의미 조합으로 판정한다."""
     if not question:
         return False
-    return any(p.search(question) for p in _HISTORY_TRIGGER_RES)
+    return any(p.search(question) for p in _HISTORY_TRIGGER_RES) or (
+        bool(_SEQUENCE_REFERENCE_RE.search(question))
+        and bool(_FOLLOWUP_STATE_RE.search(question))
+    )
 
 
 def is_deictic(question: str) -> bool:
     """질문이 지시어로 직전 주제를 가리키는지 판정한다."""
     if not question:
         return False
-    return bool(_DEICTIC_RE.search(question))
+    return bool(_DIRECT_REFERENCE_RE.search(question)) or (
+        bool(_SEQUENCE_REFERENCE_RE.search(question))
+        and bool(_FOLLOWUP_STATE_RE.search(question))
+    )
 
 
 def content_tokens(text: str, *, nouns_only: bool = False) -> Set[str]:
@@ -132,5 +150,6 @@ def extract_content_tokens(question: str) -> Set[str]:
     stripped = question
     for pattern in _TRIGGER_STRIP_RES:
         stripped = pattern.sub(" ", stripped)
-    stripped = _DEICTIC_RE.sub(" ", stripped)
+    for pattern in _DEICTIC_STRIP_RES:
+        stripped = pattern.sub(" ", stripped)
     return content_tokens(stripped, nouns_only=True)

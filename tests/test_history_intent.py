@@ -30,6 +30,10 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
     "JWT로 바꾼 이유가 뭐야?",   # round-3 R-008: 능동 관형형 + 이유
     "수정한 이유가 뭐지?",
     "왜 JWT로 바꿨어?",          # round-3 R-008: 왜 + 능동 변화 동사
+    "그 이후 캐시 정책은 어떻게 달라졌어?",
+    "훗날 인증 방침이 철회됐나요?",
+    "결국 어떤 결론이 났어?",
+    "마지막 결과는 어떻게 됐어?",
 ])
 def test_detects_history_questions(question):
     assert history_intent.detect_history_intent(question)
@@ -44,20 +48,40 @@ def test_detects_history_questions(question):
     "완료된 액션 몇 개야?",
     "마감 지난 거 있어?",
     "기존 보안 이슈 목록 보여줘",      # round-2 R-005: '보안' 내부 '안' 오매칭 금지
+    "나중에 처리할 작업을 보여줘",
+    "최종 보고서를 보여줘",
+    "최종 결과 파일을 다운로드해줘",
+    "그 후속 작업 상태는?",
+    "다음 배포 상태는?",
     "",
 ])
 def test_does_not_detect_regular_questions(question):
     assert not history_intent.detect_history_intent(question)
 
 
-def test_is_deictic_whitelist():
-    assert history_intent.is_deictic("그건 왜 바뀌었어?")
-    assert history_intent.is_deictic("그 결정 말이야, 원래 뭐였어?")
-    assert history_intent.is_deictic("그 뒤에는 어떻게 바뀌었어?")
-    assert history_intent.is_deictic("나중에 이 계획이 바뀌었어?")
-    assert history_intent.is_deictic("최종 결과에서는 어떻게 달라졌어?")
-    assert not history_intent.is_deictic("배포 주기가 왜 바뀌었어?")
-    assert not history_intent.is_deictic("")
+@pytest.mark.parametrize("question", [
+    "그건 왜 바뀌었어?",
+    "그 방침 말이야, 원래 뭐였어?",
+    "그 이후에는 어떤 결론이 났어?",
+    "훗날 실제로 채택됐나요?",
+    "결국 상태가 어떻게 됐어?",
+    "마지막 결과는 어떻게 됐어?",
+])
+def test_is_deictic_by_reference_and_followup_meaning(question):
+    assert history_intent.is_deictic(question)
+
+
+@pytest.mark.parametrize("question", [
+    "배포 주기가 왜 바뀌었어?",
+    "나중에 처리할 작업을 보여줘",
+    "최종 보고서를 보여줘",
+    "최종 결과 파일을 다운로드해줘",
+    "그 후속 작업 상태는?",
+    "다음 배포 상태는?",
+    "",
+])
+def test_is_not_deictic_without_a_reference_or_followup_meaning(question):
+    assert not history_intent.is_deictic(question)
 
 
 @pytest.mark.parametrize("question", [
@@ -87,7 +111,7 @@ def test_topical_predicate_keeps_content_tokens():
     assert history_intent.extract_content_tokens("JWT로 바꾼 이유가 뭐야?") == {"jwt"}
     # 결합 질문(지시어 승계 시나리오): 요청 표현·용언 잔재 없이 주제 명사만 남는다
     assert history_intent.extract_content_tokens(
-        "배포 주기 어떻게 하기로 했어? 그건 왜 바뀌었어?"
+        "배포 주기에 관해 물었어. 그건 왜 바뀌었어?"
     ) == {"배포", "주기"}
 
 
