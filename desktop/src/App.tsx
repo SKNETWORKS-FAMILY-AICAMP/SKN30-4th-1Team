@@ -1528,8 +1528,9 @@ function saveSessionDrafts(storageKey: string, drafts: Map<string, SessionDraft>
   );
   try {
     window.localStorage.setItem(storageKey, JSON.stringify(saved));
+    return true;
   } catch {
-    // Project messages remain intact even when draft storage is full.
+    return false;
   }
 }
 
@@ -2129,6 +2130,12 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   const ignoredProjectDeltaRef = useRef<Record<string, string>>({});
   const githubLoginSessionsRef = useRef(githubLoginSessions);
   const sessionDraftsRef = useRef(initialSessionDrafts);
+  const attachmentsRef = useRef(attachments);
+  attachmentsRef.current = attachments;
+  const localPersistenceFailureLatchRef = useRef({
+    conversation: false,
+    draft: false,
+  });
   const projectSetupDescriptionBeforeEditRef = useRef<string | null>(null);
   const projectSetupNameBeforeEditRef = useRef<string | null>(null);
   const zoomScaleRef = useRef(zoomScale);
@@ -2653,6 +2660,31 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
             : 3200,
       );
     }
+  }
+
+  function reportLocalPersistenceResult(
+    storage: "conversation" | "draft",
+    didSave: boolean,
+  ) {
+    if (didSave) {
+      localPersistenceFailureLatchRef.current[storage] = false;
+      return;
+    }
+
+    if (localPersistenceFailureLatchRef.current[storage]) {
+      return;
+    }
+
+    localPersistenceFailureLatchRef.current[storage] = true;
+    setDemoStatus({
+      kind: "warning",
+      ok: false,
+      message:
+        storage === "conversation"
+          ? "로컬 저장 공간이 부족해 최신 대화를 저장하지 못했습니다"
+          : "로컬 저장 공간이 부족해 최신 초안을 저장하지 못했습니다",
+      scope: "overview",
+    });
   }
 
   function setGithubRepositoryQueryForProject(projectId: string, query: string) {
@@ -3461,10 +3493,17 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   ]);
 
   useEffect(() => {
-    window.localStorage.setItem(
-      projectStorageKey,
-      JSON.stringify(createStoredProjectState(projects, selectedProjectId, selectedSessionId)),
-    );
+    let didSave = false;
+    try {
+      window.localStorage.setItem(
+        projectStorageKey,
+        JSON.stringify(createStoredProjectState(projects, selectedProjectId, selectedSessionId)),
+      );
+      didSave = true;
+    } catch {
+      // Keep the in-memory conversation intact and let the user copy it elsewhere.
+    }
+    reportLocalPersistenceResult("conversation", didSave);
   }, [projectStorageKey, projects, selectedProjectId, selectedSessionId]);
 
   useEffect(() => {
@@ -8083,50 +8122,75 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     return `${projectId}\u0000${sessionId ?? "__project_detail__"}`;
   }
 
+  function persistSessionDrafts() {
+    const didSave = saveSessionDrafts(
+      sessionDraftStorageKey,
+      sessionDraftsRef.current,
+    );
+    reportLocalPersistenceResult("draft", didSave);
+    return didSave;
+  }
+
+  function persistDraft(
+    projectId: string,
+    sessionId: string | null,
+    nextPrompt: string,
+    nextAttachments: Attachment[],
+    allowProjectDetail: boolean,
+  ) {
+    if (!projectId || (!sessionId && !allowProjectDetail)) {
+      return;
+    }
+
+    const key = getSessionDraftKey(projectId, sessionId);
+    if (!nextPrompt.trim() && nextAttachments.length === 0) {
+      sessionDraftsRef.current.delete(key);
+    } else {
+      sessionDraftsRef.current.set(key, {
+        attachments: [...nextAttachments],
+        prompt: nextPrompt,
+      });
+    }
+    persistSessionDrafts();
+  }
+
   function handlePromptChange(nextPrompt: string) {
     setPrompt(nextPrompt);
 
     const projectId = selectedProjectIdRef.current;
     const sessionId = selectedSessionIdRef.current;
-    if (!projectId || (!sessionId && mainViewRef.current !== "project-detail")) {
-      return;
-    }
-
-    const key = getSessionDraftKey(projectId, sessionId);
-    if (!nextPrompt.trim() && attachments.length === 0) {
-      sessionDraftsRef.current.delete(key);
-      saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
-      return;
-    }
-
-    sessionDraftsRef.current.set(key, {
-      attachments: [...attachments],
-      prompt: nextPrompt,
-    });
-    saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
+    persistDraft(
+      projectId ?? "",
+      sessionId,
+      nextPrompt,
+      attachmentsRef.current,
+      mainViewRef.current === "project-detail",
+    );
   }
 
   // 상세 composer와 각 채팅을 떠나도 작성 중인 텍스트·첨부가 남도록
   // 프로젝트/세션별 초안을 메모리에 보관한다.
   function rememberCurrentDraft() {
+    const isVisibleChatDraft =
+      mainViewRef.current === "chat" && Boolean(selectedSessionId);
+    const isVisibleProjectDetailDraft =
+      mainViewRef.current === "project-detail" && !selectedSessionId;
     if (
       !selectedProjectId ||
-      (!selectedSessionId && mainViewRef.current !== "project-detail")
+      (!isVisibleChatDraft && !isVisibleProjectDetailDraft)
     ) {
       return;
     }
 
     // 세션 전환 클릭은 React state commit보다 먼저 들어올 수 있으므로 현재 DOM 값을 우선한다.
     const currentPrompt = promptTextareaRef.current?.value ?? prompt;
-    const key = getSessionDraftKey(selectedProjectId, selectedSessionId);
-    if (!currentPrompt.trim() && attachments.length === 0) {
-      sessionDraftsRef.current.delete(key);
-      saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
-      return;
-    }
-
-    sessionDraftsRef.current.set(key, { attachments: [...attachments], prompt: currentPrompt });
-    saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
+    persistDraft(
+      selectedProjectId,
+      selectedSessionId,
+      currentPrompt,
+      attachmentsRef.current,
+      mainViewRef.current === "project-detail",
+    );
   }
 
   function showSessionDraft(projectId: string, sessionId: string | null) {
@@ -8134,13 +8198,15 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       ? sessionDraftsRef.current.get(getSessionDraftKey(projectId, sessionId))
       : undefined;
 
+    const nextAttachments = draft ? [...draft.attachments] : [];
+    attachmentsRef.current = nextAttachments;
     setPrompt(draft?.prompt ?? "");
-    setAttachments(draft ? [...draft.attachments] : []);
+    setAttachments(nextAttachments);
   }
 
   function forgetSessionDraft(projectId: string, sessionId: string | null) {
     sessionDraftsRef.current.delete(getSessionDraftKey(projectId, sessionId));
-    saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
+    persistSessionDrafts();
   }
 
   function forgetProjectDrafts(projectId: string) {
@@ -8153,11 +8219,12 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       }
     });
     if (didChange) {
-      saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
+      persistSessionDrafts();
     }
   }
 
   function resetVisibleDraft() {
+    attachmentsRef.current = [];
     setPrompt("");
     setAttachments([]);
   }
@@ -8265,9 +8332,60 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       return;
     }
 
+    const targetProjectId = selectedProject.id;
+    const targetSessionId = selectedSession?.id ?? null;
+    const targetView = mainView === "project-detail" ? "project-detail" : "chat";
+    const targetDraftKey = getSessionDraftKey(targetProjectId, targetSessionId);
+    const targetDraftWasPresent = sessionDraftsRef.current.has(targetDraftKey);
+    const targetDraftSnapshot: SessionDraft = {
+      attachments: [...attachmentsRef.current],
+      prompt: promptTextareaRef.current?.value ?? prompt,
+    };
     const nextAttachments = await Promise.all(supportedPaths.map(createAttachment));
 
-    setAttachments((currentAttachments) => [...currentAttachments, ...nextAttachments]);
+    const targetProject = projectsRef.current.find(
+      (project) => project.id === targetProjectId,
+    );
+    if (
+      !targetProject ||
+      (targetSessionId !== null &&
+        !targetProject.sessions.some((session) => session.id === targetSessionId))
+    ) {
+      return;
+    }
+
+    const isTargetContextVisible =
+      selectedProjectIdRef.current === targetProjectId &&
+      selectedSessionIdRef.current === targetSessionId &&
+      mainViewRef.current === targetView;
+
+    if (isTargetContextVisible) {
+      const updatedAttachments = [...attachmentsRef.current, ...nextAttachments];
+      attachmentsRef.current = updatedAttachments;
+      setAttachments(updatedAttachments);
+      persistDraft(
+        targetProjectId,
+        targetSessionId,
+        promptTextareaRef.current?.value ?? prompt,
+        updatedAttachments,
+        targetView === "project-detail",
+      );
+      return;
+    }
+
+    const latestTargetDraft = sessionDraftsRef.current.get(targetDraftKey);
+    const targetDraftBase =
+      latestTargetDraft ??
+      (targetDraftWasPresent
+        ? { attachments: [], prompt: "" }
+        : targetDraftSnapshot);
+    persistDraft(
+      targetProjectId,
+      targetSessionId,
+      targetDraftBase.prompt,
+      [...targetDraftBase.attachments, ...nextAttachments],
+      targetView === "project-detail",
+    );
   }
 
   // 로컬 이미지 파일이면 프론트 표시용 미리보기 URL을 만든다.
@@ -8349,8 +8467,17 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   }
 
   function removeAttachment(attachmentId: string) {
-    setAttachments((currentAttachments) =>
-      currentAttachments.filter((attachment) => attachment.id !== attachmentId),
+    const updatedAttachments = attachmentsRef.current.filter(
+      (attachment) => attachment.id !== attachmentId,
+    );
+    attachmentsRef.current = updatedAttachments;
+    setAttachments(updatedAttachments);
+    persistDraft(
+      selectedProjectIdRef.current ?? "",
+      selectedSessionIdRef.current,
+      promptTextareaRef.current?.value ?? prompt,
+      updatedAttachments,
+      mainViewRef.current === "project-detail",
     );
   }
 

@@ -30,6 +30,7 @@ const AUTH_SESSION = {
 const PROJECT_STORAGE_KEY = `paim.projects.v8.account.${encodeURIComponent(
   `${API_SERVER_A}|${SMOKE_USER.id}|${SMOKE_USER.email}`,
 )}`;
+const PROJECT_DRAFT_STORAGE_KEY = `${PROJECT_STORAGE_KEY}.drafts`;
 const SIDEBAR_STORAGE_KEY = "paim.sidebarCollapsed.v1";
 const SIDEBAR_WIDTH_STORAGE_KEY = "paim.sidebarWidth.v1";
 const PROJECT_PANEL_COLLAPSED_STORAGE_KEY = "paim.projectPanelCollapsed.v2";
@@ -1046,10 +1047,14 @@ function createPaimTauriMockScript() {
       window.__paimLayoutTauriMockInstalled = true;
       const callbacks = new Map();
       const listeners = new Map();
+      let attachmentPreviewDelayMs = 0;
       let nextCallbackId = 1;
       let nextDialogSelection = null;
       let nextEventId = 1;
 
+      window.__paimLayoutConfigureAttachmentPreview = ({ delayMs = 0 } = {}) => {
+        attachmentPreviewDelayMs = Math.max(0, Number(delayMs) || 0);
+      };
       window.__paimLayoutSelectDialogPath = (path) => {
         nextDialogSelection = typeof path === "string" ? path : null;
       };
@@ -1111,6 +1116,14 @@ function createPaimTauriMockScript() {
             const selection = nextDialogSelection;
             nextDialogSelection = null;
             return selection;
+          }
+          if (cmd === "create_attachment_preview") {
+            if (attachmentPreviewDelayMs > 0) {
+              await new Promise((resolve) =>
+                window.setTimeout(resolve, attachmentPreviewDelayMs),
+              );
+            }
+            return null;
           }
           if (cmd === "path_kind") {
             return "file";
@@ -14437,6 +14450,688 @@ async function verifyProjectScopedDetailAndChatDrafts(send) {
   return { value, failures };
 }
 
+// local-only 대화와 초안은 reload를 견디고, 첨부-only 변경과 저장 실패를 사용자에게 드러내야 한다.
+async function verifyLocalChatStorageSafety(send) {
+  const tauriMockScript = await installPaimTauriMock(send);
+  const failures = [];
+  const value = {};
+  const chatDraftKey = "project-smoke\u0000session-smoke";
+  const detailDraftKey = "project-smoke\u0000__project_detail__";
+
+  await send("Emulation.setDeviceMetricsOverride", {
+    width: 960,
+    height: 680,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+
+  async function seedChat(
+    language = "ko",
+    projectState = createDefaultSmokeProjectStorage(),
+  ) {
+    await setAuthScenario(send, "owner");
+    await setSmokeServerUrl(send, API_SERVER_A);
+    await evaluateAndNavigateToSelector(
+      send,
+      `(() => {
+        let settings = {};
+        try {
+          settings = JSON.parse(
+            localStorage.getItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}) || '{}',
+          );
+        } catch {
+          settings = {};
+        }
+        settings.language = ${JSON.stringify(language)};
+        settings.serverUrl = ${JSON.stringify(API_SERVER_A)};
+        localStorage.setItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}, JSON.stringify(settings));
+        localStorage.removeItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)});
+        localStorage.setItem(
+          ${JSON.stringify(PROJECT_STORAGE_KEY)},
+          ${JSON.stringify(projectState)},
+        );
+      })()`,
+      APP_URL,
+      ".portfolio-page",
+    );
+    await openProjectChatFromPortfolio(send);
+    await waitForSelector(send, ".prompt textarea:not(:disabled)");
+  }
+
+  async function setTextareaValue(selector, nextValue) {
+    await send("Runtime.evaluate", {
+      expression: `(() => {
+        const input = document.querySelector(${JSON.stringify(selector)});
+        const setter = Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          'value',
+        )?.set;
+        setter?.call(input, ${JSON.stringify(nextValue)});
+        input?.dispatchEvent(new Event('input', { bubbles: true }));
+      })()`,
+    });
+    await sleep(120);
+  }
+
+  async function blockStorageKey(storageKey) {
+    await send("Runtime.evaluate", {
+      expression: `(() => {
+        window.__paimStorageOriginalSetItem ||= Storage.prototype.setItem;
+        window.__paimStorageBlockedKey = ${JSON.stringify(storageKey)};
+        window.__paimStorageFailureCount = 0;
+        Storage.prototype.setItem = function(key, storedValue) {
+          if (String(key) === window.__paimStorageBlockedKey) {
+            window.__paimStorageFailureCount += 1;
+            throw new DOMException('Smoke quota exceeded', 'QuotaExceededError');
+          }
+          return window.__paimStorageOriginalSetItem.call(this, key, storedValue);
+        };
+      })()`,
+    });
+  }
+
+  async function restoreStorageWrites() {
+    await send("Runtime.evaluate", {
+      expression: `(() => {
+        if (window.__paimStorageOriginalSetItem) {
+          Storage.prototype.setItem = window.__paimStorageOriginalSetItem;
+        }
+        window.__paimStorageBlockedKey = null;
+      })()`,
+    });
+  }
+
+  async function observeWarningClearTimers() {
+    await send("Runtime.evaluate", {
+      expression: `(() => {
+        window.__paimWarningTimerOriginalSetTimeout ||= window.setTimeout;
+        window.__paimWarningClearTimerReservations = 0;
+        window.setTimeout = function(handler, delay, ...args) {
+          if (Number(delay) === 6000) {
+            window.__paimWarningClearTimerReservations += 1;
+          }
+          return window.__paimWarningTimerOriginalSetTimeout.call(
+            window,
+            handler,
+            delay,
+            ...args,
+          );
+        };
+      })()`,
+    });
+  }
+
+  await seedChat("ko");
+  await setTextareaValue(".prompt textarea", "재시작 후에도 남는 초안");
+  await send("Runtime.evaluate", {
+    expression: `window.__paimLayoutSelectDialogPath?.('/mock/chat-attachment.md');
+      document.querySelector('.prompt-actions button[aria-label="파일 추가"]')?.click()`,
+  });
+  await waitForSelector(send, ".draft-attachments .attachment-chip");
+  await sleep(120);
+
+  const chatDraftBeforeReloadResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const drafts = JSON.parse(
+        localStorage.getItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}) || '{}',
+      );
+      return {
+        attachmentNames: (drafts[${JSON.stringify(chatDraftKey)}]?.attachments || [])
+          .map((attachment) => attachment.name),
+        prompt: document.querySelector('.prompt textarea')?.value || '',
+        storedPrompt: drafts[${JSON.stringify(chatDraftKey)}]?.prompt || '',
+      };
+    })()`,
+  });
+  value.chatDraftBeforeReload = chatDraftBeforeReloadResult.result.value;
+
+  await navigateAndWaitForSelector(send, APP_URL, ".portfolio-page");
+  await openProjectChatFromPortfolio(send);
+  await waitForSelector(send, ".prompt textarea");
+  const chatDraftAfterReloadResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => ({
+      attachmentNames: Array.from(
+        document.querySelectorAll('.draft-attachments .attachment-name'),
+      ).map((item) => item.textContent.trim()),
+      prompt: document.querySelector('.prompt textarea')?.value || '',
+    }))()`,
+  });
+  value.chatDraftAfterReload = chatDraftAfterReloadResult.result.value;
+
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector(
+      '.draft-attachments .remove-attachment-button',
+    )?.click()`,
+  });
+  await sleep(120);
+  const chatAttachmentRemovedResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const drafts = JSON.parse(
+        localStorage.getItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}) || '{}',
+      );
+      return {
+        attachmentCount: drafts[${JSON.stringify(chatDraftKey)}]?.attachments?.length ?? -1,
+        prompt: drafts[${JSON.stringify(chatDraftKey)}]?.prompt || '',
+      };
+    })()`,
+  });
+  value.chatAttachmentRemoved = chatAttachmentRemovedResult.result.value;
+
+  await navigateAndWaitForSelector(send, APP_URL, ".portfolio-page");
+  await openProjectChatFromPortfolio(send);
+  await waitForSelector(send, ".prompt textarea");
+  const chatAfterRemovalReloadResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => ({
+      attachmentCount: document.querySelectorAll(
+        '.draft-attachments .attachment-chip',
+      ).length,
+      prompt: document.querySelector('.prompt textarea')?.value || '',
+    }))()`,
+  });
+  value.chatAfterRemovalReload = chatAfterRemovalReloadResult.result.value;
+
+  await setTextareaValue(".prompt textarea", "");
+  const clearedDraftResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const drafts = JSON.parse(
+        localStorage.getItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}) || '{}',
+      );
+      return drafts[${JSON.stringify(chatDraftKey)}] ?? null;
+    })()`,
+  });
+  value.clearedDraft = clearedDraftResult.result.value;
+
+  await send("Runtime.evaluate", {
+    expression: `window.__paimLayoutConfigureQuery({ delayMs: 0 })`,
+  });
+  await setTextareaValue(".prompt textarea", "배포 주기는 2주야");
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector('button[aria-label="메시지 보내기"]')?.click()`,
+  });
+  await sleep(900);
+  const conversationBeforeReloadResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const saved = JSON.parse(
+        localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}',
+      );
+      const project = saved.projects?.find(
+        (candidate) => candidate.id === saved.selectedProjectId,
+      );
+      const session = project?.sessions?.find(
+        (candidate) => candidate.id === saved.selectedSessionId,
+      );
+      return {
+        messages: (session?.messages || []).map(({ role, content }) => ({ role, content })),
+        sessionApiCalls: (window.__paimLayoutApiCalls || []).filter(
+          (call) => /\\/sessions(?:\\/|$)/.test(call),
+        ),
+      };
+    })()`,
+  });
+  value.conversationBeforeReload = conversationBeforeReloadResult.result.value;
+
+  await navigateAndWaitForSelector(send, APP_URL, ".portfolio-page");
+  await openProjectChatFromPortfolio(send);
+  await waitForSelector(send, ".prompt textarea");
+  await sleep(250);
+  const conversationAfterReloadResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const saved = JSON.parse(
+        localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}',
+      );
+      const project = saved.projects?.find(
+        (candidate) => candidate.id === saved.selectedProjectId,
+      );
+      const session = project?.sessions?.find(
+        (candidate) => candidate.id === saved.selectedSessionId,
+      );
+      return {
+        conversation: document.querySelector('.conversation')?.textContent || '',
+        messages: (session?.messages || []).map(({ role, content }) => ({ role, content })),
+        title: document.querySelector('.history-row[data-active="true"] .history-title')
+          ?.textContent.trim() || '',
+      };
+    })()`,
+  });
+  value.conversationAfterReload = conversationAfterReloadResult.result.value;
+
+  await send("Runtime.evaluate", {
+    expression: `window.__paimLayoutConfigureQuery({ delayMs: 0 })`,
+  });
+  await setTextareaValue(".prompt textarea", "그건 왜 바뀌었어?");
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector('button[aria-label="메시지 보내기"]')?.click()`,
+  });
+  await sleep(900);
+  const followupResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const query = window.__paimLayoutReadQueryControl?.() || {};
+      return {
+        history: query.lastRequest?.history || [],
+        question: query.lastRequest?.question || '',
+        sessionApiCalls: (window.__paimLayoutApiCalls || []).filter(
+          (call) => /\\/sessions(?:\\/|$)/.test(call),
+        ),
+      };
+    })()`,
+  });
+  value.followup = followupResult.result.value;
+
+  await seedChat("ko");
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector('.project-item[data-active="true"]')?.click()`,
+  });
+  await waitForSelector(send, '[data-testid="project-detail-chat-composer"] textarea');
+  await send("Runtime.evaluate", {
+    expression: `window.__paimLayoutSelectDialogPath?.('/mock/detail-attachment.md');
+      document.querySelector('.project-detail-composer-add')?.click()`,
+  });
+  await waitForSelector(send, ".project-detail-composer-attachment");
+  await sleep(120);
+  const detailAttachmentBeforeReloadResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const drafts = JSON.parse(
+        localStorage.getItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}) || '{}',
+      );
+      return (drafts[${JSON.stringify(detailDraftKey)}]?.attachments || [])
+        .map((attachment) => attachment.name);
+    })()`,
+  });
+  value.detailAttachmentBeforeReload = detailAttachmentBeforeReloadResult.result.value;
+
+  await navigateAndWaitForSelector(send, APP_URL, ".portfolio-page");
+  await openProjectDetailFromPortfolio(send);
+  await waitForSelector(send, ".project-detail-composer-attachment");
+  const detailAttachmentAfterReloadResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `Array.from(
+      document.querySelectorAll('.project-detail-composer-attachment > span'),
+    ).map((item) => item.textContent.trim())`,
+  });
+  value.detailAttachmentAfterReload = detailAttachmentAfterReloadResult.result.value;
+
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector(
+      '.project-detail-composer-attachment button',
+    )?.click()`,
+  });
+  await sleep(120);
+  const detailAttachmentRemovedResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const drafts = JSON.parse(
+        localStorage.getItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}) || '{}',
+      );
+      return drafts[${JSON.stringify(detailDraftKey)}] ?? null;
+    })()`,
+  });
+  value.detailAttachmentRemoved = detailAttachmentRemovedResult.result.value;
+
+  const attachmentRaceProjectState = createProjectStorage(
+    "project-attachment-race",
+    "Attachment Race",
+    [
+      {
+        id: "session-attachment-race-a",
+        title: "Attachment Race A",
+        createdAt: Date.now(),
+        messages: [
+          {
+            id: "assistant-attachment-race-a",
+            role: "assistant",
+            content: "A 응답",
+          },
+        ],
+      },
+      {
+        id: "session-attachment-race-b",
+        title: "Attachment Race B",
+        createdAt: Date.now() - 1,
+        messages: [
+          {
+            id: "assistant-attachment-race-b",
+            role: "assistant",
+            content: "B 응답",
+          },
+        ],
+      },
+    ],
+    "session-attachment-race-a",
+    [],
+    {
+      apiProjectId: 1,
+      setupCompletedAt: Date.now(),
+      setupMode: "existing",
+    },
+  );
+  const attachmentRaceDraftA =
+    "project-attachment-race\u0000session-attachment-race-a";
+  const attachmentRaceDraftB =
+    "project-attachment-race\u0000session-attachment-race-b";
+  await seedChat("ko", attachmentRaceProjectState);
+  await setTextareaValue(".prompt textarea", "A에서 작성 중인 최신 초안");
+  await send("Runtime.evaluate", {
+    expression: `window.__paimLayoutConfigureAttachmentPreview?.({ delayMs: 650 });
+      window.__paimLayoutSelectDialogPath?.('/mock/race-a.md');
+      document.querySelector('.prompt-actions button[aria-label="파일 추가"]')?.click()`,
+  });
+  await sleep(80);
+  await send("Runtime.evaluate", {
+    expression: `Array.from(document.querySelectorAll('.history-item'))
+      .find((item) => item.textContent.includes('Attachment Race B'))?.click()`,
+  });
+  await sleep(120);
+  await setTextareaValue(".prompt textarea", "B에서 작성 중인 초안");
+  await sleep(650);
+  const attachmentContextRaceResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const drafts = JSON.parse(
+        localStorage.getItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}) || '{}',
+      );
+      return {
+        activeTitle: document.querySelector(
+          '.history-row[data-active="true"] .history-title',
+        )?.textContent.trim() || '',
+        draftA: drafts[${JSON.stringify(attachmentRaceDraftA)}] || null,
+        draftB: drafts[${JSON.stringify(attachmentRaceDraftB)}] || null,
+        visibleAttachments: Array.from(
+          document.querySelectorAll('.draft-attachments .attachment-name'),
+        ).map((item) => item.textContent.trim()),
+        visiblePrompt: document.querySelector('.prompt textarea')?.value || '',
+      };
+    })()`,
+  });
+  value.attachmentContextRace = attachmentContextRaceResult.result.value;
+
+  await send("Runtime.evaluate", {
+    expression: `Array.from(document.querySelectorAll('.history-item'))
+      .find((item) => item.textContent.includes('Attachment Race A'))?.click()`,
+  });
+  await sleep(120);
+  await send("Runtime.evaluate", {
+    expression: `window.__paimLayoutConfigureAttachmentPreview?.({ delayMs: 650 });
+      window.__paimLayoutSelectDialogPath?.('/mock/deleted-session.md');
+      document.querySelector('.prompt-actions button[aria-label="파일 추가"]')?.click()`,
+  });
+  await sleep(80);
+  await send("Runtime.evaluate", {
+    expression: `Array.from(document.querySelectorAll('.history-row'))
+      .find((item) => item.textContent.includes('Attachment Race A'))
+      ?.querySelector('.history-action-menu-button')?.click()`,
+  });
+  await sleep(80);
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector(
+      '.item-action-menu [data-action="delete-session"]',
+    )?.click()`,
+  });
+  await sleep(80);
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector(
+      '.item-action-menu [data-action="delete-session"]',
+    )?.click()`,
+  });
+  await sleep(750);
+  const deletedAttachmentContextResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const drafts = JSON.parse(
+        localStorage.getItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}) || '{}',
+      );
+      const state = JSON.parse(
+        localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}',
+      );
+      const project = state.projects?.find(
+        (candidate) => candidate.id === 'project-attachment-race',
+      );
+      return {
+        deletedDraft: drafts[${JSON.stringify(attachmentRaceDraftA)}] || null,
+        hasDeletedAttachment: Object.values(drafts).some((draft) =>
+          (draft?.attachments || []).some(
+            (attachment) => attachment.name === 'deleted-session.md',
+          ),
+        ),
+        remainingSessionIds: (project?.sessions || []).map((session) => session.id),
+      };
+    })()`,
+  });
+  value.deletedAttachmentContext = deletedAttachmentContextResult.result.value;
+  await send("Runtime.evaluate", {
+    expression: `window.__paimLayoutConfigureAttachmentPreview?.({ delayMs: 0 })`,
+  });
+
+  await seedChat("ko");
+  await blockStorageKey(PROJECT_DRAFT_STORAGE_KEY);
+  await observeWarningClearTimers();
+  await setTextareaValue(".prompt textarea", "저장 실패 뒤에도 화면에 남는 초안");
+  await setTextareaValue(".prompt textarea", "저장 실패 뒤에도 화면에 남는 초안 2");
+  const koreanDraftFailureResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      if (window.__paimWarningTimerOriginalSetTimeout) {
+        window.setTimeout = window.__paimWarningTimerOriginalSetTimeout;
+      }
+      return {
+        failureCount: window.__paimStorageFailureCount || 0,
+        prompt: document.querySelector('.prompt textarea')?.value || '',
+        warningClearTimerReservations:
+          window.__paimWarningClearTimerReservations || 0,
+        warning: document.querySelector('.runtime-status')?.textContent.trim() || '',
+      };
+    })()`,
+  });
+  value.koreanDraftFailure = koreanDraftFailureResult.result.value;
+  await restoreStorageWrites();
+
+  await seedChat("en");
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector(
+      '.history-row .history-action-menu-button',
+    )?.click()`,
+  });
+  await sleep(80);
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector(
+      '.item-action-menu [data-action="delete-session"]',
+    )?.click()`,
+  });
+  await sleep(80);
+  const englishDeleteWarningResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => ({
+      deleteLabel: document.querySelector(
+        '.item-action-menu [data-action="delete-session"]',
+      )?.textContent.trim() || '',
+      warning: document.querySelector('.runtime-status')?.textContent.trim() || '',
+    }))()`,
+  });
+  value.englishDeleteWarning = englishDeleteWarningResult.result.value;
+
+  await blockStorageKey(PROJECT_DRAFT_STORAGE_KEY);
+  await setTextareaValue(".prompt textarea", "English draft remains visible");
+  const englishDraftFailureResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => ({
+      prompt: document.querySelector('.prompt textarea')?.value || '',
+      warning: document.querySelector('.runtime-status')?.textContent.trim() || '',
+    }))()`,
+  });
+  value.englishDraftFailure = englishDraftFailureResult.result.value;
+  await restoreStorageWrites();
+  await setTextareaValue(".prompt textarea", "English draft save recovered");
+
+  await blockStorageKey(PROJECT_STORAGE_KEY);
+  await send("Runtime.evaluate", {
+    expression: `window.__paimLayoutConfigureQuery({ delayMs: 450 })`,
+  });
+  await observeWarningClearTimers();
+  await setTextareaValue(".prompt textarea", "Conversation stays in memory");
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector('button[aria-label="Send message"]')?.click()`,
+  });
+  await sleep(160);
+  await sleep(650);
+  const englishConversationFailureResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      if (window.__paimWarningTimerOriginalSetTimeout) {
+        window.setTimeout = window.__paimWarningTimerOriginalSetTimeout;
+      }
+      return {
+        conversation: document.querySelector('.conversation')?.textContent || '',
+        failureCount: window.__paimStorageFailureCount || 0,
+        sessionApiCalls: (window.__paimLayoutApiCalls || []).filter(
+          (call) => /\\/sessions(?:\\/|$)/.test(call),
+        ),
+        warningClearTimerReservations:
+          window.__paimWarningClearTimerReservations || 0,
+        warning: document.querySelector('.runtime-status')?.textContent.trim() || '',
+      };
+    })()`,
+  });
+  value.englishConversationFailure = englishConversationFailureResult.result.value;
+  await restoreStorageWrites();
+
+  if (
+    value.chatDraftBeforeReload.prompt !== "재시작 후에도 남는 초안" ||
+    value.chatDraftBeforeReload.storedPrompt !== "재시작 후에도 남는 초안" ||
+    !value.chatDraftBeforeReload.attachmentNames.includes("chat-attachment.md") ||
+    value.chatDraftAfterReload.prompt !== "재시작 후에도 남는 초안" ||
+    !value.chatDraftAfterReload.attachmentNames.includes("chat-attachment.md")
+  ) {
+    failures.push("chat text and attachment-only changes should persist immediately and survive reload");
+  }
+
+  if (
+    value.chatAttachmentRemoved.attachmentCount !== 0 ||
+    value.chatAttachmentRemoved.prompt !== "재시작 후에도 남는 초안" ||
+    value.chatAfterRemovalReload.attachmentCount !== 0 ||
+    value.chatAfterRemovalReload.prompt !== "재시작 후에도 남는 초안" ||
+    value.clearedDraft !== null
+  ) {
+    failures.push("attachment removal and clearing the final draft value should persist immediately");
+  }
+
+  const restoredAnswer = "좋아요. 이 내용을 프로젝트 메모로 정리할 수 있습니다.";
+  if (
+    value.conversationBeforeReload.messages.length !== 3 ||
+    value.conversationBeforeReload.sessionApiCalls.length !== 0 ||
+    value.conversationAfterReload.messages.length !== 3 ||
+    !value.conversationAfterReload.messages.some(
+      (message) => message.content === restoredAnswer,
+    ) ||
+    !value.conversationAfterReload.conversation.includes("배포 주기는 2주야") ||
+    value.conversationAfterReload.title !== "Smoke Chat"
+  ) {
+    failures.push("local conversation title, question, and answer should survive reload without session API calls");
+  }
+
+  if (
+    value.followup.question !== "그건 왜 바뀌었어?" ||
+    value.followup.history.length !== 3 ||
+    value.followup.history[1]?.content !== "배포 주기는 2주야" ||
+    value.followup.history[2]?.content !== restoredAnswer ||
+    value.followup.sessionApiCalls.length !== 0
+  ) {
+    failures.push("a follow-up after reload should send only restored prior messages to the stateless query");
+  }
+
+  if (
+    !value.detailAttachmentBeforeReload.includes("detail-attachment.md") ||
+    !value.detailAttachmentAfterReload.includes("detail-attachment.md") ||
+    value.detailAttachmentRemoved !== null
+  ) {
+    failures.push("project-detail attachment-only drafts should persist, restore, and clear immediately");
+  }
+
+  if (
+    value.attachmentContextRace.activeTitle !== "Attachment Race B" ||
+    value.attachmentContextRace.visiblePrompt !== "B에서 작성 중인 초안" ||
+    value.attachmentContextRace.visibleAttachments.length !== 0 ||
+    value.attachmentContextRace.draftA?.prompt !== "A에서 작성 중인 최신 초안" ||
+    !value.attachmentContextRace.draftA?.attachments?.some(
+      (attachment) => attachment.name === "race-a.md",
+    ) ||
+    value.attachmentContextRace.draftB?.prompt !== "B에서 작성 중인 초안" ||
+    value.attachmentContextRace.draftB?.attachments?.length !== 0
+  ) {
+    failures.push("a delayed attachment should merge into its original draft without mutating the new composer");
+  }
+
+  if (
+    value.deletedAttachmentContext.deletedDraft !== null ||
+    value.deletedAttachmentContext.hasDeletedAttachment ||
+    value.deletedAttachmentContext.remainingSessionIds.includes(
+      "session-attachment-race-a",
+    )
+  ) {
+    failures.push("a delayed attachment should be discarded when its original session is deleted");
+  }
+
+  if (
+    !value.koreanDraftFailure.warning.includes(
+      "로컬 저장 공간이 부족해 최신 초안을 저장하지 못했습니다",
+    ) ||
+    value.koreanDraftFailure.prompt !== "저장 실패 뒤에도 화면에 남는 초안 2" ||
+    value.koreanDraftFailure.failureCount < 2 ||
+    value.koreanDraftFailure.warningClearTimerReservations !== 1
+  ) {
+    failures.push("Korean draft quota failures should warn once while preserving the live draft");
+  }
+
+  if (
+    value.englishDeleteWarning.deleteLabel !== "Delete again" ||
+    !value.englishDeleteWarning.warning.includes(
+      "Press again to delete this chat and its conversation history from this device",
+    ) ||
+    !value.englishDraftFailure.warning.includes(
+      "Local storage is full, so the latest draft could not be saved",
+    ) ||
+    value.englishDraftFailure.prompt !== "English draft remains visible"
+  ) {
+    failures.push("English mode should translate the device-only delete and draft persistence warnings");
+  }
+
+  if (
+    !value.englishConversationFailure.warning.includes(
+      "Local storage is full, so the latest conversation could not be saved",
+    ) ||
+    !value.englishConversationFailure.conversation.includes("Conversation stays in memory") ||
+    !value.englishConversationFailure.conversation.includes(restoredAnswer) ||
+    value.englishConversationFailure.failureCount < 2 ||
+    value.englishConversationFailure.warningClearTimerReservations !== 1 ||
+    value.englishConversationFailure.sessionApiCalls.length !== 0
+  ) {
+    failures.push("conversation quota failures should stay deduplicated and preserve in-memory chat");
+  }
+
+  debugLayout("local chat storage safety", value);
+  await send("Runtime.evaluate", {
+    expression: `(() => {
+      const settings = JSON.parse(
+        localStorage.getItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}) || '{}',
+      );
+      settings.language = 'ko';
+      localStorage.setItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}, JSON.stringify(settings));
+    })()`,
+  });
+  await send("Page.removeScriptToEvaluateOnNewDocument", {
+    identifier: tauriMockScript.identifier,
+  });
+  await navigateAndWaitForSelector(send, APP_URL, ".app-shell");
+  return { value, failures };
+}
+
 // 초안은 다른 세션으로 새지 않되 원래 세션으로 돌아오면 복원되는지 확인한다.
 async function verifyDraftScopingOnSessionChange(send) {
   const seededSessions = [
@@ -14863,6 +15558,15 @@ try {
       result.failures.forEach((failure) => console.log(`  - ${failure}`));
     } else {
       console.log("PASS meeting audio uploads, polls, and remains non-previewable");
+    }
+  } else if (process.env.PAIM_LAYOUT_FOCUS === "local-chat-storage") {
+    const result = await verifyLocalChatStorageSafety(send);
+    if (result.failures.length > 0) {
+      hasFailures = true;
+      console.log("FAIL local chat storage safety");
+      result.failures.forEach((failure) => console.log(`  - ${failure}`));
+    } else {
+      console.log("PASS local chat reload, attachment drafts, and storage failure warnings");
     }
   } else if (process.env.PAIM_LAYOUT_FOCUS === "project-regressions") {
     const focusedChecks = [
@@ -15344,6 +16048,16 @@ try {
     chatQuestionResult.failures.forEach((failure) => console.log(`  - ${failure}`));
   } else {
     console.log("PASS project chat question uses the demo response flow");
+  }
+
+  const localChatStorageSafetyResult = await verifyLocalChatStorageSafety(send);
+
+  if (localChatStorageSafetyResult.failures.length > 0) {
+    hasFailures = true;
+    console.log("FAIL local chat storage safety");
+    localChatStorageSafetyResult.failures.forEach((failure) => console.log(`  - ${failure}`));
+  } else {
+    console.log("PASS local chat reload, attachment drafts, and storage failure warnings");
   }
 
   const meetingAudioResult = await verifyMeetingAudioFlow(send);
