@@ -41,7 +41,7 @@ def _semantic_record() -> dict:
         "sources": ["meeting.md"],
         "debug": {
             "tool_calls": [{
-                "name": "search_project_evidence",
+                "name": "search_hybrid_vector_rag",
                 "args": {
                     "query": "출시일이 왜 바뀌었어?",
                     "alternate_queries": ["출시 일정 변경 이유"],
@@ -82,6 +82,52 @@ def test_score_contract_accepts_valid_search_trace_and_rejects_duplicate_query()
     )["passed"] is False
 
 
+def test_score_contract_accepts_attachment_only_zero_tool_trace():
+    """첨부 전용 골든은 Tool 0회와 첨부 provenance를 요구한다."""
+    question = {
+        "user_input": "첨부의 릴리즈명은?",
+        "family": "attachment_only",
+        "required_capabilities": [],
+        "allowed_capabilities": [],
+        "max_tool_rounds": 0,
+        "expected_arguments": {},
+        "expected_history_mode": None,
+        "required_evidence_kinds": ["attachment"],
+    }
+    record = {
+        "http_status": 200,
+        "error": None,
+        "answer": "Bluefin입니다.",
+        "sources": ["note.txt"],
+        "debug": {
+            "tool_calls": [],
+            "tool_rounds": 0,
+            "tool_sources": [],
+            "attachments": ["note.txt"],
+        },
+    }
+    golden = {
+        "expected_sources": ["note.txt"],
+        "answer_contract": {"forbidden_claims": []},
+        "deterministic_answer": None,
+    }
+
+    assert score_contract(question, golden, record)["passed"] is True
+
+
+def test_score_contract_rejects_duplicate_calls_and_more_than_five_rounds():
+    """평가 계약도 중복 호출과 전역 5회 상한을 독립적으로 차단한다."""
+    record = _semantic_record()
+    record["debug"]["tool_calls"].append(deepcopy(record["debug"]["tool_calls"][0]))
+    record["debug"]["tool_rounds"] = 6
+    result = score_contract(_semantic_question(), _golden(), record)
+
+    failed = {
+        check["name"] for check in result["checks"] if not check["passed"]
+    }
+    assert {"duplicate_tool_calls", "global_tool_rounds"} <= failed
+
+
 def test_compare_runs_applies_contract_ragas_and_performance_gates():
     """동일 문항의 개선량과 성능 상한을 합쳐 최종 판정하는지 확인한다."""
     baseline_record = {
@@ -89,7 +135,7 @@ def test_compare_runs_applies_contract_ragas_and_performance_gates():
         "family": "semantic",
         "latency_ms": 1000.0,
         "contract": {"passed": False},
-        "performance": {"tool_calls": 1},
+        "performance": {"tool_calls": 1, "llm_calls": 2, "llm_tokens": 100},
         "ragas_metrics": [
             "context_precision",
             "context_recall",
@@ -130,6 +176,8 @@ def test_compare_runs_applies_contract_ragas_and_performance_gates():
     assert result["passed"] is True
     assert result["ragas"]["context_precision"]["mean_delta"] == 0.04
     assert result["performance"]["semantic_p95_passed"] is True
+    assert result["performance"]["llm_calls_mean_candidate"] == 2
+    assert result["performance"]["llm_tokens_mean_candidate"] == 100
 
 
 def test_search_tool_captures_full_context_only_for_evaluation(monkeypatch):

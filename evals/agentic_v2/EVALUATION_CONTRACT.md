@@ -20,9 +20,9 @@
 
 | capability | 현재 Tool |
 |---|---|
-| `hybrid_search` | `search_project_evidence` |
-| `structured_state` | `query_structured_memory` |
-| `overview` | `get_project_overview` |
+| `hybrid_search` | `search_hybrid_vector_rag` |
+| `structured_state` | `query_sql_state` |
+| `overview` | `query_sql_state`의 `operation=overview` |
 
 `attachment_evidence`는 Tool이 아니라 현재 요청에만 존재하는 입력 근거다.
 
@@ -45,7 +45,8 @@
 - `faithfulness`, `answer_correctness`, `response_relevancy`: 참조 답변이 있는 생성 문항만 RAGAS 평가
 - 구조화 count/list, Tool 선택·인자, history, 검색어 상한, 첨부 0-Tool, 기권은
   결정론 검사로 평가
-- 전체 문항에서 latency, Tool 라운드, Tool 호출 수, LLM 호출 수를 직접 집계
+- 전체 문항에서 latency, Tool 라운드, Tool 호출 수, LLM 호출 수와 비용 대용치인
+  입력·출력 token 수를 직접 집계
 
 ## 합격 기준
 

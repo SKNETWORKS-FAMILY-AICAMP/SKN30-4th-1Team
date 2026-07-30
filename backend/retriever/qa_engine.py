@@ -6,6 +6,7 @@
 # - 생성은 LangChain ChatPromptTemplate + ChatOpenAI 체인(LCEL).
 import hashlib
 import os
+import unicodedata
 from datetime import date, datetime
 from typing import List, Dict, Optional, Set, Tuple
 
@@ -237,6 +238,24 @@ def _rrf_fuse(rank_lists: List[list], weights: List[float], n_docs: int) -> List
     return scores
 
 
+def _normalize_multi_queries(question: str, candidates: list[str]) -> list[str]:
+    """원 질문을 먼저 보존하고 검색어를 정규화·중복 제거해 최대 4개로 제한한다."""
+    queries = []
+    seen = set()
+    for candidate in [question, *candidates]:
+        cleaned = " ".join(
+            unicodedata.normalize("NFKC", str(candidate or "")).split()
+        )
+        key = cleaned.casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        queries.append(cleaned)
+        if len(queries) >= 4:
+            break
+    return queries
+
+
 def _generate_multi_queries(question: str) -> List[str]:
     """LLM으로 2~3개 재표현을 만들고, 실패하면 원 질문만 반환한다."""
     prompt = ChatPromptTemplate.from_messages([
@@ -247,16 +266,9 @@ def _generate_multi_queries(question: str) -> List[str]:
         result = (prompt | get_chat_model(tier=MULTI_QUERY_MODEL_TIER, temperature=0.3)
                   .with_structured_output(MultiQueryResult)).invoke({"question": question})
     except Exception:
-        return [question]
+        return _normalize_multi_queries(question, [])
 
-    queries = [question]
-    for query in result.queries:
-        cleaned = query.strip()
-        if cleaned and cleaned not in queries:
-            queries.append(cleaned)
-        if len(queries) >= 4:
-            break
-    return queries
+    return _normalize_multi_queries(question, result.queries)
 
 
 def _memory_vector_rank_lists(
@@ -661,13 +673,7 @@ def _build_context(
     else:
         # Tool-calling 오케스트레이터는 첫 LLM 호출에서 검색어 변형까지 함께 만든다.
         # 이 경우 검색 내부에서 LLM을 다시 호출하지 않고 원 질문을 첫 검색어로 보존한다.
-        multi_queries = [question]
-        for candidate in query_variants:
-            cleaned = str(candidate).strip()
-            if cleaned and cleaned not in multi_queries:
-                multi_queries.append(cleaned)
-            if len(multi_queries) >= 4:
-                break
+        multi_queries = _normalize_multi_queries(question, query_variants)
         multi_query_source = "tool_agent"
     debug["multi_queries"] = multi_queries
     debug["multi_query_model_tier"] = (

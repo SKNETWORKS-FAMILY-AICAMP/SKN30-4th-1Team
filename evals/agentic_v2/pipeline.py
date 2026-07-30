@@ -24,9 +24,9 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 CAPABILITY_TO_TOOL = {
-    "hybrid_search": "search_project_evidence",
-    "structured_state": "query_structured_memory",
-    "overview": "get_project_overview",
+    "hybrid_search": "search_hybrid_vector_rag",
+    "structured_state": "query_sql_state",
+    "overview": "query_sql_state",
 }
 RAGAS_METRICS = {
     "context_precision",
@@ -210,7 +210,8 @@ def performance_metrics(record: dict) -> dict:
         "latency_ms": record.get("latency_ms"),
         "tool_calls": len(calls),
         "tool_rounds": rounds,
-        "llm_calls": rounds + 1 + int(limited),
+        "llm_calls": debug.get("llm_calls", rounds + 1 + int(limited)),
+        "llm_tokens": (debug.get("llm_usage") or {}).get("total_tokens", 0),
     }
 
 
@@ -581,6 +582,18 @@ def compare_runs(baseline: dict, candidate: dict) -> dict:
     after_tool_mean = statistics.mean(
         record["performance"]["tool_calls"] for record in candidate["records"]
     )
+    before_llm_mean = statistics.mean(
+        record["performance"].get("llm_calls", 0) for record in baseline["records"]
+    )
+    after_llm_mean = statistics.mean(
+        record["performance"].get("llm_calls", 0) for record in candidate["records"]
+    )
+    before_token_mean = statistics.mean(
+        record["performance"].get("llm_tokens", 0) for record in baseline["records"]
+    )
+    after_token_mean = statistics.mean(
+        record["performance"].get("llm_tokens", 0) for record in candidate["records"]
+    )
     split = candidate["split"]
     ragas_pass = all(
         value["mean_delta"] >= (
@@ -596,6 +609,10 @@ def compare_runs(baseline: dict, candidate: dict) -> dict:
         "tool_calls_mean_baseline": round(before_tool_mean, 6),
         "tool_calls_mean_candidate": round(after_tool_mean, 6),
         "tool_calls_passed": after_tool_mean <= before_tool_mean + 0.25,
+        "llm_calls_mean_baseline": round(before_llm_mean, 6),
+        "llm_calls_mean_candidate": round(after_llm_mean, 6),
+        "llm_tokens_mean_baseline": round(before_token_mean, 6),
+        "llm_tokens_mean_candidate": round(after_token_mean, 6),
     }
     contract_pass = all(pair["contract_passed"] for pair in pairs)
     return {

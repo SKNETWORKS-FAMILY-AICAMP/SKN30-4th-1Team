@@ -1328,7 +1328,7 @@ OpenAPI operation에는 `x-paim-chat-persistence: none`이 표시된다.
   "route": "semantic",
   "debug": {
     "router_stage": "tool_agent",
-    "tools_used": ["search_project_evidence"],
+    "tools_used": ["search_hybrid_vector_rag"],
     "tool_rounds": 1,
     "filters": { "category": null },
     "mysql_rows": [
@@ -1342,8 +1342,9 @@ OpenAPI operation에는 `x-paim-chat-persistence: none`이 표시된다.
 ```
 
 > **`route`**: 기존 클라이언트 호환을 위해 이 엔드포인트는 항상 `semantic`을 반환한다.
-> 질문 유형은 Agentic 오케스트레이터가 `search_project_evidence`,
-> `query_structured_memory`, `get_project_overview`를 필요에 따라 조합해 처리한다.
+> 질문 유형은 Agentic 오케스트레이터가 `search_hybrid_vector_rag`,
+> `query_sql_state`를 필요에 따라 조합해 처리한다. 프로젝트 조망은
+> `query_sql_state(operation=overview)`를 사용한다.
 > 사용한 도구와 라운드는 `debug.tools_used`/`debug.tool_rounds`에서 확인할 수 있으며,
 > 검색 도구에 따라 `debug.mysql_rows`/`debug.chroma_chunks`가 포함될 수 있다.
 >
