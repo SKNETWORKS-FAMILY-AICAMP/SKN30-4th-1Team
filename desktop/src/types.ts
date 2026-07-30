@@ -7,10 +7,16 @@ export type Attachment = {
   children?: Attachment[];
   childrenLoaded?: boolean;
   docId?: number;
+  documentType?: string | null;
   documentStatus?: ProjectDocumentStatus;
+  diarization?: boolean;
+  extracted?: Partial<Record<"action" | "decision" | "issue" | "risk", number>>;
   isExpanded?: boolean;
   lastError?: string | null;
+  processingProgressDone?: number | null;
+  processingProgressTotal?: number | null;
   serverOnly?: boolean;
+  transcriptionProvider?: string;
   uploadedAt?: number;
   previewUrl?: string;
 };

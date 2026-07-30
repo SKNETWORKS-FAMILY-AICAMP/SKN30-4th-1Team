@@ -1,5 +1,6 @@
 use base64::{engine::general_purpose, Engine as _};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 #[cfg(target_os = "macos")]
@@ -115,14 +116,33 @@ fn read_text_file(path: String) -> Result<String, String> {
 
 // 선택한 문서를 multipart 업로드할 수 있도록 base64 문자열로 읽는다.
 #[tauri::command]
-fn read_file_base64(path: String) -> Result<String, String> {
+fn read_file_base64(path: String, max_bytes: Option<u64>) -> Result<String, String> {
     let file = PathBuf::from(path);
 
     if !file.is_file() {
         return Err("파일 경로가 아닙니다".to_string());
     }
 
-    let bytes = std::fs::read(&file).map_err(|_| "파일을 읽을 수 없습니다".to_string())?;
+    let metadata = std::fs::metadata(&file).map_err(|_| "파일을 읽을 수 없습니다".to_string())?;
+    if max_bytes.is_some_and(|limit| metadata.len() > limit) {
+        return Err("FILE_TOO_LARGE".to_string());
+    }
+
+    let bytes = if let Some(limit) = max_bytes {
+        let source = std::fs::File::open(&file)
+            .map_err(|_| "파일을 읽을 수 없습니다".to_string())?;
+        let mut bytes = Vec::new();
+        source
+            .take(limit.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|_| "파일을 읽을 수 없습니다".to_string())?;
+        if bytes.len() as u64 > limit {
+            return Err("FILE_TOO_LARGE".to_string());
+        }
+        bytes
+    } else {
+        std::fs::read(&file).map_err(|_| "파일을 읽을 수 없습니다".to_string())?
+    };
 
     Ok(general_purpose::STANDARD.encode(bytes))
 }
@@ -394,10 +414,22 @@ mod tests {
         let path = temp_path("upload.md");
 
         fs::write(&path, "# upload").expect("test file should be writable");
-        let encoded = read_file_base64(path.to_string_lossy().into_owned())
+        let encoded = read_file_base64(path.to_string_lossy().into_owned(), None)
             .expect("file bytes should be readable");
         fs::remove_file(path).expect("test file should be removable");
 
         assert_eq!(encoded, "IyB1cGxvYWQ=");
+    }
+
+    #[test]
+    fn read_file_base64_rejects_file_over_limit() {
+        let path = temp_path("oversized-upload.bin");
+
+        fs::write(&path, b"12345").expect("test file should be writable");
+        let error = read_file_base64(path.to_string_lossy().into_owned(), Some(4))
+            .expect_err("oversized file should be rejected before reading");
+        fs::remove_file(path).expect("test file should be removable");
+
+        assert_eq!(error, "FILE_TOO_LARGE");
     }
 }

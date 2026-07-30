@@ -1,6 +1,7 @@
 import {
   Activity,
   AlertTriangle,
+  AudioLines,
   ArrowLeft,
   ArrowRight,
   ArrowUp,
@@ -48,7 +49,9 @@ import {
   fetchProjectOverviews,
   type ProjectOverview,
 } from "./projectOverview";
+import { translate } from "./i18n";
 import type { LanguageSetting } from "./settings";
+import { isMeetingDocument } from "./stt";
 import type {
   Attachment,
   ProjectMemoryItem,
@@ -63,6 +66,7 @@ export type ProjectDetailPageProps = {
   isComposerSending?: boolean;
   language: LanguageSetting;
   memoryItems: ProjectMemoryItem[];
+  onAddProjectAudio?: () => void;
   onAddProjectFiles?: () => void;
   onAddProjectFolder?: () => void;
   onBack: () => void;
@@ -76,6 +80,7 @@ export type ProjectDetailPageProps = {
   onOpenManagement?: (trigger?: HTMLElement) => void;
   onOpenProjectFile?: (file: Attachment) => void;
   onOpenProjectFilesManager?: () => void;
+  onRefreshProjectFileStatus?: (file: Attachment) => void;
   onTabChange: (tab: ProjectDetailTab) => void;
   project: ProjectWorkspace;
   projectRole?: ProjectRole | null;
@@ -300,9 +305,28 @@ function projectFileStatus(
     };
   }
 
-  if (file.documentStatus === "failed" || file.documentStatus === "delayed") {
+  if (file.documentStatus === "delayed") {
     return {
-      label: language === "ko" ? "처리 실패" : "Failed",
+      label: isMeetingDocument(file.documentType)
+        ? language === "ko"
+          ? "음성 전사 지연"
+          : "Transcription delayed"
+        : language === "ko"
+          ? "처리 지연"
+          : "Delayed",
+      tone: "processing",
+    };
+  }
+
+  if (file.documentStatus === "failed") {
+    return {
+      label: isMeetingDocument(file.documentType)
+        ? language === "ko"
+          ? "음성 전사 실패"
+          : "Transcription failed"
+        : language === "ko"
+          ? "처리 실패"
+          : "Failed",
       tone: "failed",
     };
   }
@@ -313,14 +337,26 @@ function projectFileStatus(
     file.documentStatus === "processing"
   ) {
     return {
-      label: language === "ko" ? "처리 중" : "Processing",
+      label: isMeetingDocument(file.documentType)
+        ? language === "ko"
+          ? "음성 전사 중"
+          : "Transcribing"
+        : language === "ko"
+          ? "처리 중"
+          : "Processing",
       tone: "processing",
     };
   }
 
   if (file.documentStatus === "indexed") {
     return {
-      label: language === "ko" ? "분석 완료" : "Indexed",
+      label: isMeetingDocument(file.documentType)
+        ? language === "ko"
+          ? "회의 분석 완료"
+          : "Meeting analyzed"
+        : language === "ko"
+          ? "분석 완료"
+          : "Indexed",
       tone: "ready",
     };
   }
@@ -382,6 +418,7 @@ export function ProjectDetailPage({
   isComposerSending = false,
   language,
   memoryItems,
+  onAddProjectAudio,
   onAddProjectFiles,
   onAddProjectFolder,
   onBack,
@@ -395,6 +432,7 @@ export function ProjectDetailPage({
   onOpenManagement,
   onOpenProjectFile,
   onOpenProjectFilesManager,
+  onRefreshProjectFileStatus,
   onTabChange,
   project,
   projectRole,
@@ -813,6 +851,14 @@ export function ProjectDetailPage({
               size="sm"
               variant="ghost"
             />
+            <Button
+              icon={<AudioLines size={14} />}
+              isDisabled={!onAddProjectAudio}
+              label={isKorean ? "회의 음성" : "Meeting audio"}
+              onClick={onAddProjectAudio}
+              size="sm"
+              variant="ghost"
+            />
           </div>
         </header>
 
@@ -825,10 +871,21 @@ export function ProjectDetailPage({
           >
             {projectFiles.map((file) => {
               const status = projectFileStatus(file, language);
+              const statusDetail =
+                isMeetingDocument(file.documentType) &&
+                (file.documentStatus === "failed" ||
+                  file.documentStatus === "delayed") &&
+                file.lastError
+                  ? translate(language, file.lastError)
+                  : "";
               const isConfirmingDelete = pendingDeleteFileId === file.id;
               const isDirectory = file.kind === "directory";
               const canOpen = Boolean(
-                isDirectory ? onOpenProjectFilesManager : onOpenProjectFile,
+                isMeetingDocument(file.documentType)
+                  ? false
+                  : isDirectory
+                    ? onOpenProjectFilesManager
+                    : onOpenProjectFile,
               );
 
               return (
@@ -840,6 +897,9 @@ export function ProjectDetailPage({
                 >
                   <button
                     className="project-detail-file-open"
+                    data-meeting={
+                      isMeetingDocument(file.documentType) ? "true" : undefined
+                    }
                     disabled={!canOpen}
                     onClick={() => {
                       if (isDirectory) onOpenProjectFilesManager?.();
@@ -848,19 +908,40 @@ export function ProjectDetailPage({
                     type="button"
                   >
                     <span className="project-detail-file-icon" aria-hidden="true">
-                      {isDirectory ? <Folder size={15} /> : <File size={15} />}
+                      {isDirectory ? (
+                        <Folder size={15} />
+                      ) : isMeetingDocument(file.documentType) ? (
+                        <AudioLines size={15} />
+                      ) : (
+                        <File size={15} />
+                      )}
                     </span>
                     <span className="project-detail-file-copy">
                       <strong>{file.name}</strong>
                       <small data-tone={status.tone}>
                         <i aria-hidden="true" />
                         {status.label}
+                        {statusDetail ? ` · ${statusDetail}` : ""}
                         {file.uploadedAt
                           ? ` · ${formatRelativeAge(file.uploadedAt, language)}`
                           : ""}
                       </small>
                     </span>
                   </button>
+                  {isMeetingDocument(file.documentType) &&
+                  (file.documentStatus === "processing" ||
+                    file.documentStatus === "delayed") ? (
+                    <button
+                      aria-label={isKorean ? "상태 새로고침" : "Refresh status"}
+                      className="project-detail-file-delete"
+                      disabled={!onRefreshProjectFileStatus}
+                      onClick={() => onRefreshProjectFileStatus?.(file)}
+                      title={isKorean ? "상태 새로고침" : "Refresh status"}
+                      type="button"
+                    >
+                      <RefreshCw aria-hidden="true" size={13} />
+                    </button>
+                  ) : null}
                   {isConfirmingDelete ? (
                     <span
                       aria-label={
