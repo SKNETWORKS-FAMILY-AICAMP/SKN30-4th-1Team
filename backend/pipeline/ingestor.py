@@ -306,6 +306,7 @@ def ingest(
     source_metadata: Optional[dict] = None,
     converted: Optional[ConvertedDocument] = None,
     processing_token: Optional[str] = None,
+    repo_sync_run_id: Optional[str] = None,
 ):
     """추출 결과를 두 DB에 순서대로 저장.
     1단계: MySQL — items 각각을 memory + memory_sources 테이블에 INSERT (같은 트랜잭션)
@@ -350,17 +351,16 @@ def ingest(
                     f"""
                     INSERT INTO memory
                         (project_id, doc_id, repo_id, category, content,
-                         reason, topic, owner, date, due_date, source, completed_at,
+                         reason, topic, owner, date, due_date, source, repo_sync_run_id, completed_at,
                          completion_status, completion_status_source)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                             {completed_sql}, %s, %s)
                     """,
                     [
-                        project_id, doc_id, repo_id,
-                        item.category, item.content,
+                        project_id, doc_id, repo_id, item.category, item.content,
                         item.reason, item.topic,
                         item.owner, item_date, due_date,
-                        source,
+                        source, repo_sync_run_id,
                     ] + completed_params + [completion_status, completion_source],
                 )
                 memory_id = cursor.lastrowid
@@ -378,6 +378,7 @@ def ingest(
                     "project_id": project_id,
                     "doc_id": doc_id,
                     "repo_id": repo_id,
+                    "repo_sync_run_id": repo_sync_run_id,
                     "category": item.category,
                     "content": item.content,
                     "reason": item.reason,
@@ -409,7 +410,8 @@ def ingest(
             import hashlib
             src_hash = hashlib.md5(source.encode()).hexdigest()[:6]
             if repo_id is not None:
-                chunk_prefix = f"repo{repo_id}_{src_hash}"
+                run_prefix = f"_{repo_sync_run_id}" if repo_sync_run_id else ""
+                chunk_prefix = f"repo{repo_id}{run_prefix}_{src_hash}"
             elif doc_id is not None:
                 chunk_prefix = f"doc{doc_id}"
             else:
@@ -424,6 +426,8 @@ def ingest(
                     "project_id": project_id,
                     "doc_id": doc_id if doc_id is not None else _NO_ID,
                     "repo_id": repo_id if repo_id is not None else _NO_ID,
+                    "repo_sync_run_id": repo_sync_run_id or "",
+                    "repo_sync_staging": bool(repo_id is not None and repo_sync_run_id),
                     "source": source,
                     "item_type": "document",
                     "date": date or "",
@@ -472,7 +476,9 @@ def ingest(
         for r in memory_rows
         if r["category"] == "decision"
     ]
-    if new_decisions:
+    # Repository rows are invisible while staged. Supersede detection is
+    # deferred until the repository generation is atomically published.
+    if new_decisions and repo_sync_run_id is None:
         try:
             from ..reconciler.supersede import detect_supersede
             detect_supersede(project_id, new_decisions)

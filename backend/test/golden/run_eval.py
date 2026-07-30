@@ -738,23 +738,12 @@ def collect_e0(project_id: int, question: str) -> tuple[list[str], dict]:
 
 
 def collect_e2_e2e(project_id: int, question: str) -> tuple[list[str], dict]:
-    """Agentic evidence retrieval: history context → hybrid search → summary."""
-    from backend.project_memory import get_project_memory
+    """Agentic evidence retrieval: history context → generation-scoped hybrid search."""
     from backend.retriever.history_context import resolve_history_context
     mode, scope, tokens, effective = resolve_history_context(question)
     contexts, debug = _build_context_configured(
         project_id, effective, history_mode=mode,
         history_scope=scope, history_topic_tokens=tokens)
-    # Agentic search_project_evidence도 프로젝트 메모리 요약을 근거 앞에 얹는다.
-    # 프로젝트 메모리는 파일 출처가 없는 요약이라 source_labels(인용 근거 집합)는
-    # 바꾸지 않고 생성 컨텍스트에만 영향을 준다.
-    parts = []
-    mem = get_project_memory(project_id)
-    if mem:
-        parts.append(f"[프로젝트 메모리]\n{mem}")
-    if debug.get("rendered_context"):
-        parts.append(debug["rendered_context"])
-    debug["rendered_context"] = "\n\n".join(parts)
     debug["route"] = "semantic"
     debug["router_stage"] = "agentic_evidence_tool"
     return contexts, debug
@@ -964,9 +953,8 @@ def cmd_ingest(args) -> None:
     finally:
         supersede_mod.detect_supersede = original_detect
 
-    # 실서비스는 적재 후 프로젝트 메모리 요약을 만들어 QA 컨텍스트 최상단에
-    # 얹는다(project_memory). E2-e2e가 그 경로를 충실히 재현하도록 eval도 동일
-    # 생성한다(리뷰 R-005). checkpoint(mysqldump)에 포함돼 final restore 시 복원.
+    # 프로젝트 조망 도구가 사용하는 요약을 생성한다. Targeted evidence 검색은
+    # generation이 없는 이 요약을 근거에 섞지 않는다.
     from backend.project_memory import regenerate_project_memory
     regenerate_project_memory(project_id)
 
@@ -1124,8 +1112,7 @@ def cmd_pairs(args) -> None:
                  "--runid", args.runid, "--coverage-only"])
             if cov_run.returncode != 0:
                 sys.exit(f"[중단] post 상태 coverage 복구 실패({cov_path.name})")
-        # 재개 시에도 post 상태 프로젝트 메모리를 보장(C-001) — pairs 이전 캐시가
-        # 남아 있으면 대체된 결정이 요약에 계속 노출된다.
+        # 재개 시에도 조망 도구용 post 상태 프로젝트 메모리를 보장한다.
         run_step(["pmem", "--corpus", corpus])
         print(f"[건너뜀] pairs {corpus} — 이미 E1(post) 상태(coverage 확인 완료)")
         return
@@ -1165,9 +1152,7 @@ def cmd_pairs(args) -> None:
 
     # 4. post-state 검증
     run_step(["_state-check", "--corpus", corpus, "--expect", "post"])
-    # 5. supersede 반영 후 프로젝트 메모리 재생성(C-001) — 실서비스의
-    #    refresh_project_memory_after_delete와 동일 취지. E2-e2e가 대체된 결정이
-    #    빠진 최신 요약을 컨텍스트로 쓰도록 한다(active_memory 기준 재생성).
+    # 5. supersede 반영 후 조망 도구용 프로젝트 메모리를 재생성한다.
     run_step(["pmem", "--corpus", corpus])
     print(f"[완료] pairs {corpus} (E1 상태 전환 + post 검증 + 프로젝트 메모리 갱신)")
 

@@ -2,6 +2,7 @@
 from unittest.mock import patch, MagicMock
 
 from backend.startup import (
+    cleanup_stale_repository_generations,
     ensure_runtime_schema,
     ensure_schema_v8,
     recover_stale_tasks,
@@ -211,4 +212,21 @@ def test_sync_start_is_recorded_when_sync_begins():
         c[0][0] for c in cursor.execute.call_args_list
         if "status='syncing'" in c[0][0]
     )
-    assert "sync_started_at=NOW()" in syncing_sql
+    assert "sync_started_at=UTC_TIMESTAMP(6)" in syncing_sql
+
+
+def test_generation_cleanup_keeps_chroma_when_mysql_commit_fails():
+    """MySQL 정리가 커밋되지 않으면 Chroma만 앞서 지우지 않는다."""
+    conn, cursor = _make_conn()
+    cursor.fetchall.return_value = [
+        {"id": 7, "active_sync_run_id": "published-run"}
+    ]
+    conn.commit.side_effect = RuntimeError("commit failed")
+
+    with patch("backend.startup.get_connection", return_value=conn), patch(
+        "backend.db.chroma.get_existing_collection"
+    ) as get_existing:
+        cleanup_stale_repository_generations()
+
+    conn.rollback.assert_called_once()
+    get_existing.assert_not_called()

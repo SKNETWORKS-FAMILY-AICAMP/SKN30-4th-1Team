@@ -35,7 +35,6 @@ def test_history_followup_reaches_retrieval_with_previous_topic(monkeypatch, que
     ])
     build_context = MagicMock(return_value=("이력 근거", ["decision.md"], {}))
     monkeypatch.setattr(qa_tools.qa_engine, "_build_context", build_context)
-    monkeypatch.setattr(qa_tools, "get_project_memory", lambda project_id: "")
 
     result = run_agentic_qa(
         1,
@@ -63,7 +62,6 @@ def test_non_history_question_keeps_tool_query_unchanged(monkeypatch):
     ])
     build_context = MagicMock(return_value=("현재 근거", ["action.md"], {}))
     monkeypatch.setattr(qa_tools.qa_engine, "_build_context", build_context)
-    monkeypatch.setattr(qa_tools, "get_project_memory", lambda project_id: "")
 
     run_agentic_qa(
         1,
@@ -89,7 +87,6 @@ def test_attachment_evidence_is_not_used_as_the_followup_topic(
     ])
     build_context = MagicMock(return_value=("이력 근거", ["decision.md"], {}))
     monkeypatch.setattr(qa_tools.qa_engine, "_build_context", build_context)
-    monkeypatch.setattr(qa_tools, "get_project_memory", lambda project_id: "")
 
     run_agentic_qa(
         1,

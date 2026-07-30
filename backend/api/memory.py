@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from ..db.mysql import get_connection
 from ..project_memory import refresh_project_memory_after_delete
+from ..retriever.index_scope import mysql_visibility_condition
 from ..retriever.memory_vector import delete_memory_vector, upsert_memory_vector
 from .auth import get_current_user_id, require_project_access
 
@@ -168,7 +169,7 @@ def update_memory(project_id: int, memory_id: int, body: MemoryUpdate):
         with conn.cursor() as cursor:
             if has_completed_update and "category" not in fields:
                 cursor.execute(
-                    "SELECT category FROM memory"
+                    "SELECT category FROM active_memory"
                     " WHERE id = %s AND project_id = %s FOR UPDATE",
                     (memory_id, project_id),
                 )
@@ -182,7 +183,8 @@ def update_memory(project_id: int, memory_id: int, body: MemoryUpdate):
                     )
             if fields.get("category") not in (None, "decision"):
                 cursor.execute(
-                    "SELECT 1 FROM memory WHERE superseded_by = %s AND project_id = %s LIMIT 1",
+                    "SELECT 1 FROM active_memory WHERE superseded_by = %s"
+                    " AND project_id = %s LIMIT 1",
                     (memory_id, project_id),
                 )
                 if cursor.fetchone():
@@ -191,7 +193,8 @@ def update_memory(project_id: int, memory_id: int, body: MemoryUpdate):
                         detail="Cannot change category: this decision supersedes another decision",
                     )
                 cursor.execute(
-                    "SELECT superseded_by FROM memory WHERE id = %s AND project_id = %s",
+                    "SELECT superseded_by FROM active_memory"
+                    " WHERE id = %s AND project_id = %s",
                     (memory_id, project_id),
                 )
                 current = cursor.fetchone()
@@ -222,15 +225,17 @@ def update_memory(project_id: int, memory_id: int, body: MemoryUpdate):
                     " AND kind = 'set_due_date' AND status = 'pending'",
                     (get_current_user_id(), project_id, memory_id),
                 )
+            visible_sql, visible_params = mysql_visibility_condition("memory")
             cursor.execute(
-                f"UPDATE memory SET {set_clause} WHERE id = %s AND project_id = %s",
-                values,
+                f"UPDATE memory SET {set_clause} WHERE id = %s AND project_id = %s"
+                f" AND {visible_sql}",
+                [*values, *visible_params],
             )
             if cursor.rowcount == 0:
                 raise HTTPException(status_code=404, detail="Memory item not found")
         conn.commit()
         with conn.cursor() as cursor:
-            cursor.execute("SELECT * FROM memory WHERE id = %s", (memory_id,))
+            cursor.execute("SELECT * FROM active_memory WHERE id = %s", (memory_id,))
             row = cursor.fetchone()
         if row and row.get("superseded_by") is not None:
             _delete_memory_vector_best_effort(memory_id)
@@ -247,9 +252,11 @@ def delete_memory(project_id: int, memory_id: int):
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
+            visible_sql, visible_params = mysql_visibility_condition("memory")
             cursor.execute(
-                "DELETE FROM memory WHERE id = %s AND project_id = %s",
-                (memory_id, project_id),
+                "DELETE FROM memory WHERE id = %s AND project_id = %s"
+                f" AND {visible_sql}",
+                [memory_id, project_id, *visible_params],
             )
             if cursor.rowcount == 0:
                 raise HTTPException(status_code=404, detail="Memory item not found")

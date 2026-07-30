@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from backend.main import app
 from backend.github import router as github_api
 from backend.api.documents import _infer_doc_type
+from backend.retriever.index_scope import ProjectIndexScope
 
 _client = TestClient(app, raise_server_exceptions=False)
 
@@ -173,6 +174,8 @@ def test_memory_get_includes_todo_fields_and_sort_order():
     ]
     conn, cur = _conn_for_memory_rows(rows)
     with patch("backend.api.memory.require_project_access"), \
+         patch("backend.retriever.mysql_search.load_project_index_scope",
+               return_value=ProjectIndexScope(project_id=1)), \
          patch("backend.retriever.mysql_search.get_connection", return_value=conn):
         resp = _client.get("/api/v1/projects/1/memory")
 
@@ -524,7 +527,10 @@ def test_memory_patch_due_date_sets_value_and_marks_verified():
 
     assert resp.status_code == 200
     assert resp.json()["due_date"] == "2026-07-10"
-    update_call = cur.execute.call_args_list[0]
+    update_call = next(
+        call for call in cur.execute.call_args_list
+        if "UPDATE memory SET" in call.args[0]
+    )
     assert "due_date = %s" in update_call.args[0]
     assert "is_user_verified = %s" in update_call.args[0]
     assert update_call.args[1][0] == "2026-07-10"
@@ -544,7 +550,10 @@ def test_memory_patch_due_date_null_clears_without_verifying():
 
     assert resp.status_code == 200
     assert resp.json()["due_date"] is None
-    update_call = cur.execute.call_args_list[0]
+    update_call = next(
+        call for call in cur.execute.call_args_list
+        if "UPDATE memory SET" in call.args[0]
+    )
     assert "due_date = %s" in update_call.args[0]
     assert "is_user_verified" not in update_call.args[0]
     assert update_call.args[1][0] is None

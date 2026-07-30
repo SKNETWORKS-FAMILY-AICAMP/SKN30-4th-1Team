@@ -100,9 +100,17 @@ def _load_delta(cursor, project_id: int, since_sql: str, due_within_days: int = 
     # 띄우고 빈 인박스를 여는 유령 카운트 방지. 전체는 pending_suggestions_by_kind로 제공
     # (신규 필드 추가라 구 클라이언트에 무해).
     cursor.execute(
-        "SELECT kind, COUNT(*) AS cnt FROM memory_suggestions"
-        " WHERE project_id = %s AND status = 'pending' AND created_at > %s"
-        " GROUP BY kind",
+        "SELECT s.kind,COUNT(*) AS cnt FROM memory_suggestions s"
+        " JOIN active_memory target"
+        " ON target.id=s.memory_id AND target.project_id=s.project_id"
+        " LEFT JOIN active_memory superseding"
+        " ON s.kind='supersede'"
+        " AND superseding.project_id=s.project_id"
+        " AND superseding.id=CAST(JSON_UNQUOTE(JSON_EXTRACT("
+        "s.evidence,'$.superseding_memory_id')) AS UNSIGNED)"
+        " WHERE s.project_id=%s AND s.status='pending' AND s.created_at>%s"
+        " AND (s.kind<>'supersede' OR superseding.id IS NOT NULL)"
+        " GROUP BY s.kind",
         (project_id, since_sql),
     )
     pending_by_kind = {row["kind"]: int(row["cnt"]) for row in cursor.fetchall()}

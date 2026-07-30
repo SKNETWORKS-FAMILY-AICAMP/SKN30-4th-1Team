@@ -27,14 +27,23 @@ def _silent_conn():
     return conn
 
 
-def test_clear_repo_indexed_data_uses_key_free_delete():
-    """저장소 재동기화 전 정리가 임베딩 클라이언트를 만들지 않는다."""
+def test_cleanup_repo_generation_uses_key_free_delete():
+    """실패한 세대 정리가 임베딩 클라이언트를 만들지 않는다."""
+    collection = MagicMock()
+    collection.get.return_value = {
+        "ids": ["repo:7:old:1", "repo:7:new:1"],
+        "metadatas": [
+            {"repo_id": 7, "repo_sync_run_id": "old"},
+            {"repo_id": 7, "repo_sync_run_id": "new"},
+        ],
+    }
     with patch.object(repository_module, "get_connection", return_value=_silent_conn()), \
-         patch("backend.db.chroma.delete_from_existing_collection") as key_free, \
+         patch("backend.db.chroma.get_existing_collection", return_value=collection) as key_free, \
          patch("backend.db.chroma.get_collection") as needs_key:
-        repository_module._clear_repo_indexed_data(repo_id=7)
+        repository_module._cleanup_repo_generation(repo_id=7, run_id="new")
 
-    key_free.assert_called_once_with(where={"repo_id": 7})
+    key_free.assert_called_once_with()
+    collection.delete.assert_called_once_with(ids=["repo:7:new:1"])
     needs_key.assert_not_called()
 
 

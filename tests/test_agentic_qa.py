@@ -10,6 +10,7 @@ from backend.agentic_graph import (
     run_agentic_qa,
 )
 from backend.retriever import qa_tools
+from backend.retriever.index_scope import ProjectIndexScope
 from backend.retriever.qa_tools import QA_TOOLS, query_structured_memory
 
 
@@ -26,6 +27,15 @@ class _ToolCallingFake:
     def invoke(self, messages):
         self.invocations.append(list(messages))
         return next(self.responses)
+
+
+@pytest.fixture(autouse=True)
+def _stable_index_scope(monkeypatch):
+    monkeypatch.setattr(
+        qa_tools,
+        "load_project_index_scope",
+        lambda project_id: ProjectIndexScope(project_id),
+    )
 
 
 def test_prepared_context_keeps_session_roles_and_appends_question_once():
@@ -206,7 +216,10 @@ def test_memory_tool_caps_rows_and_preserves_total(monkeypatch):
     monkeypatch.setattr(
         qa_tools.qa_engine,
         "_rank_mysql_rows",
-        lambda project_id, candidates, queries, limit: (candidates[:limit], []),
+        lambda project_id, candidates, queries, limit, index_scope=None: (
+            candidates[:limit],
+            [],
+        ),
     )
 
     content, artifact = query_structured_memory.func(
@@ -289,6 +302,30 @@ def test_memory_count_applies_target_phrase_to_structured_search(monkeypatch):
     assert json.loads(content)["count"] == 1
     assert artifact["total_rows"] == 1
     assert search.call_args.kwargs["text_query"] == "SDK 연동"
+    assert search.call_args.kwargs["index_scope"].project_id == 1
+
+
+def test_evidence_tool_returns_only_generation_scoped_context(monkeypatch):
+    monkeypatch.setattr(
+        qa_tools.qa_engine,
+        "_build_context",
+        lambda *args, **kwargs: (
+            "[원문 맥락]\n새 generation 근거",
+            ["new.md"],
+            {"mysql_rows": [], "chroma_chunks": []},
+        ),
+    )
+
+    content, artifact = qa_tools.search_project_evidence.func(
+        query="최신 변경은?",
+        project_id=1,
+        messages=[],
+        current_question="최신 변경은?",
+    )
+
+    assert content == "[원문 맥락]\n새 generation 근거"
+    assert "[프로젝트 메모리]" not in content
+    assert artifact["sources"] == ["new.md"]
 
 
 def test_agent_calls_evidence_tool_then_synthesizes_one_answer(monkeypatch):
@@ -305,7 +342,6 @@ def test_agent_calls_evidence_tool_then_synthesizes_one_answer(monkeypatch):
         }]),
         AIMessage(content="**SDK 연동은 박현우가 담당했습니다.**"),
     ])
-    monkeypatch.setattr(qa_tools, "get_project_memory", lambda project_id: "Modu 프로젝트")
     monkeypatch.setattr(
         qa_tools.qa_engine,
         "_build_context",
@@ -372,9 +408,11 @@ def test_agent_can_combine_multiple_tools(monkeypatch):
     monkeypatch.setattr(
         qa_tools.qa_engine,
         "_rank_mysql_rows",
-        lambda project_id, rows, queries, limit: (rows[:limit], []),
+        lambda project_id, rows, queries, limit, index_scope=None: (
+            rows[:limit],
+            [],
+        ),
     )
-    monkeypatch.setattr(qa_tools, "get_project_memory", lambda project_id: "")
     monkeypatch.setattr(
         qa_tools.qa_engine,
         "_build_context",
@@ -403,7 +441,6 @@ def test_attachment_is_temporary_agentic_evidence_and_a_returned_source(monkeypa
         }]),
         AIMessage(content="릴리즈명은 Bluefin입니다."),
     ])
-    monkeypatch.setattr(qa_tools, "get_project_memory", lambda project_id: "")
     monkeypatch.setattr(
         qa_tools.qa_engine,
         "_build_context",
@@ -441,7 +478,6 @@ def test_tool_exception_fails_closed_instead_of_synthesizing_answer(monkeypatch)
         }]),
         AIMessage(content="근거 없이 생성하면 안 되는 답변"),
     ])
-    monkeypatch.setattr(qa_tools, "get_project_memory", lambda project_id: "")
     monkeypatch.setattr(
         qa_tools.qa_engine,
         "_build_context",
@@ -464,7 +500,6 @@ def test_zero_hit_search_is_a_valid_evidence_result(monkeypatch):
         }]),
         AIMessage(content="프로젝트 기록에서 확인되지 않습니다."),
     ])
-    monkeypatch.setattr(qa_tools, "get_project_memory", lambda project_id: "")
     monkeypatch.setattr(
         qa_tools.qa_engine,
         "_build_context",
@@ -490,7 +525,6 @@ def test_attachment_sources_do_not_evict_project_tool_sources(monkeypatch):
         }]),
         AIMessage(content="첨부와 프로젝트 기록을 함께 확인했습니다."),
     ])
-    monkeypatch.setattr(qa_tools, "get_project_memory", lambda project_id: "")
     monkeypatch.setattr(
         qa_tools.qa_engine,
         "_build_context",

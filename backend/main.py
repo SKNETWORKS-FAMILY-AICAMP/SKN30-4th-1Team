@@ -109,7 +109,16 @@ async def lifespan(app: FastAPI):
     from concurrent.futures import ThreadPoolExecutor
     from .api.auth import _auth_mode, validate_jwt_config
     from .config import validate_runtime_config
-    from .startup import ensure_runtime_schema, ensure_schema_v8, ensure_schema_v9, recover_quota_tasks, recover_stale_tasks, backfill_dev_user_membership, stale_watchdog
+    from .startup import (
+        backfill_dev_user_membership,
+        cleanup_stale_repository_generations,
+        ensure_runtime_schema,
+        ensure_schema_v8,
+        ensure_schema_v9,
+        recover_quota_tasks,
+        recover_stale_tasks,
+        stale_watchdog,
+    )
     from .retriever.memory_vector import backfill_memory_vectors
     from .storage import ensure_upload_root_safe
     if _auth_mode() == "dev":
@@ -129,6 +138,7 @@ async def lifespan(app: FastAPI):
     ensure_schema_v9()
     recover_quota_tasks()
     recover_stale_tasks()
+    cleanup_stale_repository_generations()
     backfill_dev_user_membership()
     try:
         backfill_memory_vectors()

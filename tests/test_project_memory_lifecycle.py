@@ -74,7 +74,9 @@ def test_regenerate_project_memory_summarizes_remaining_memory(monkeypatch):
 def test_cleanup_orphan_memory_vectors_removes_missing_project_or_memory(monkeypatch):
     """존재하지 않는 project_id/memory_id를 가리키는 memory 벡터를 삭제한다."""
     cursor = MagicMock()
-    cursor.fetchall.side_effect = [[{"id": 2}], [{"id": 20, "superseded_by": None}]]
+    cursor.fetchall.return_value = [
+        {"id": 20, "project_id": 2, "superseded_by": None}
+    ]
     collection = MagicMock()
     collection.get.return_value = {
         "ids": ["memory:10", "memory:20", "doc:1"],
@@ -98,9 +100,9 @@ def test_cleanup_removes_superseded_memory_vectors(monkeypatch):
     accept 시점의 delete_memory_vector가 실패했거나 과거 백필이 되살린 비활성 벡터가
     후보 top-N 슬롯을 차지하지 못하도록, MySQL superseded_by 상태로 수렴시킨다."""
     cursor = MagicMock()
-    cursor.fetchall.side_effect = [
-        [{"id": 1}],
-        [{"id": 10, "superseded_by": 42}, {"id": 42, "superseded_by": None}],
+    # active_memory 스냅샷은 superseded row를 이미 제외한다.
+    cursor.fetchall.return_value = [
+        {"id": 42, "project_id": 1, "superseded_by": None}
     ]
     collection = MagicMock()
     collection.get.return_value = {
@@ -137,5 +139,5 @@ def test_backfill_skips_superseded_rows(monkeypatch):
     memory_vector.backfill_memory_vectors()
 
     select_sql = cursor.execute.call_args_list[0].args[0]
-    assert "superseded_by IS NULL" in select_sql
+    assert "FROM active_memory" in select_sql
     assert upserted == [live_row]
