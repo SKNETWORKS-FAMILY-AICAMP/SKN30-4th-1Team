@@ -87,10 +87,11 @@ def test_structured_row_preserves_all_unique_document_sources():
 
 
 def test_system_qa_has_citation_rule():
-    assert "출처 인용" in qa_engine.SYSTEM_QA
-    # 유형 라벨을 출처로 쓰지 말라는 지시가 있어야 한다.
-    assert "유형 이름을" in qa_engine.SYSTEM_QA
-    assert "컨텍스트에 없는 출처를 지어내지 마라" in qa_engine.SYSTEM_QA
+    # 69d0b4f("프롬프트 간략화")가 문구를 바꿨다. 출처 라벨은 화면에 별도로 표시되므로
+    # 규칙의 요지는 "본문에 인용 표기를 넣지 마라"로 유지된다.
+    prompt = " ".join(qa_engine.SYSTEM_QA.split())
+    assert "출처 표시" in prompt
+    assert "인용 표기를 넣지 마라" in prompt
 
 
 # ── 원문 청크 컨텍스트에 출처 마커가 실리는지 (_build_context 수준) ────────────
