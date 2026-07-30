@@ -272,8 +272,8 @@ npm run app:build --prefix desktop
         <img src="https://github.com/robinlee3803-ai.png" width="100" height="100" alt="이승민"/><br/>
         <b>이승민</b>
       </a><br/>
-      <sub>Developer</sub><br/>
-      <sub>RAG 검증 데이터 수집<br/>합성 평가 데이터 구성</sub>
+      <sub>Team Support</sub><br/>
+      <sub>팀 운영 지원<br/>식사 및 현장 지원</sub>
     </td>
   </tr>
 </table>
