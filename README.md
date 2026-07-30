@@ -147,16 +147,23 @@ flowchart TB
         direction TB
         QUESTION["사용자 질문<br/>+ 임시 첨부"]
         AGENT["LangGraph<br/>Agentic 오케스트레이터"]
-        SQL_TOOL["Structured Memory<br/>정확한 목록 · 상태 · 개수"]
-        SEARCH_TOOL["Hybrid Evidence Search<br/>BM25 + Vector RRF"]
-        OVERVIEW_TOOL["Project Overview<br/>요약 · Action Plan"]
         ANSWER["근거와 출처가 있는 답변"]
 
+        subgraph ToolLayer["Read-only Tool Layer · 질문에 필요한 도구만 선택"]
+            direction LR
+            SQL_TOOL(["TOOL 01<br/>Structured Memory<br/>목록 · 상태 · 개수"])
+            SEARCH_TOOL(["TOOL 02<br/>Hybrid Evidence Search<br/>BM25 + Vector RRF"])
+            OVERVIEW_TOOL(["TOOL 03<br/>Project Overview<br/>요약 · Action Plan"])
+        end
+
         QUESTION --> AGENT
-        AGENT --> SQL_TOOL & SEARCH_TOOL & OVERVIEW_TOOL
-        SQL_TOOL --> ANSWER
-        SEARCH_TOOL --> ANSWER
-        OVERVIEW_TOOL --> ANSWER
+        AGENT -->|"tool_call"| SQL_TOOL
+        AGENT -->|"tool_call"| SEARCH_TOOL
+        AGENT -->|"tool_call"| OVERVIEW_TOOL
+        SQL_TOOL -. "observation" .-> AGENT
+        SEARCH_TOOL -. "observation" .-> AGENT
+        OVERVIEW_TOOL -. "observation" .-> AGENT
+        AGENT -->|"근거 종합"| ANSWER
     end
 
     MYSQL --> SQL_TOOL & SEARCH_TOOL & OVERVIEW_TOOL
@@ -196,11 +203,12 @@ flowchart TB
     class APPROVAL approval
     class KEEP reject
 
-    style Inputs fill:#F8FAFC,stroke:#CBD5E1,stroke-width:1px
-    style Ingestion fill:#F8FAFC,stroke:#CBD5E1,stroke-width:1px
-    style Storage fill:#F5F3FF,stroke:#8B5CF6,stroke-width:2px
-    style QAFlow fill:#F0FDFA,stroke:#5EEAD4,stroke-width:2px
-    style ReconcileFlow fill:#FFFBEB,stroke:#FCD34D,stroke-width:2px
+    style Inputs fill:#F8FAFC,stroke:#CBD5E1,color:#172A3A,stroke-width:1px
+    style Ingestion fill:#F8FAFC,stroke:#CBD5E1,color:#172A3A,stroke-width:1px
+    style Storage fill:#F5F3FF,stroke:#8B5CF6,color:#3B1768,stroke-width:2px
+    style QAFlow fill:#F0FDFA,stroke:#5EEAD4,color:#075E54,stroke-width:2px
+    style ToolLayer fill:#FFFFFF,stroke:#8B5CF6,color:#3B1768,stroke-width:2px,stroke-dasharray:5 5
+    style ReconcileFlow fill:#FFFBEB,stroke:#FCD34D,color:#78350F,stroke-width:2px
     linkStyle default stroke:#94A3B8,stroke-width:2px
 ```
 
