@@ -113,8 +113,8 @@ def test_topical_relevance_prefers_matching_component(monkeypatch):
 
     assert "[decision #1]" in context and "[decision #3]" in context  # jwt 컴포넌트
     assert "#4" not in context and "#5" not in context               # 배포 컴포넌트 생략
-    assert "[이력 일부 생략됨]" in context
-    assert debug["history_truncated"] is True
+    assert "[이력 일부 생략됨]" not in context
+    assert debug["history_truncated"] is False
     assert debug["chains_added"] == 1
 
 
@@ -222,7 +222,11 @@ def test_slot_rows_not_double_counted_or_duplicated(monkeypatch):
         _row(2, "신버전 결정", date="2026-02-01"),
     ]
     context, _, debug = _build(
-        "왜 바뀌었어?", [chain[1]], chain, scope="global", monkeypatch=monkeypatch,
+        "신버전 결정은 왜 바뀌었어?",
+        [chain[1]],
+        chain,
+        scope="global",
+        monkeypatch=monkeypatch,
     )
 
     assert context.count("신버전 결정") == 1                    # 중복 출력 없음
@@ -307,9 +311,13 @@ def test_no_annotation_outside_history_mode_and_for_nonparticipants(monkeypatch)
     컨텍스트가 비이력 모드와 문자열 수준으로 동일하다."""
     rows = [_row(1, "일반 결정", date="2026-01-01"), _row(2, "일반 액션", category="action")]
 
-    ctx_history, _, _ = _build("왜 바뀌었어?", rows, [], scope="global", monkeypatch=monkeypatch)
-    ctx_plain, _, plain_debug = _build("현재 상태는?", rows, [], monkeypatch=monkeypatch,
-                                       history_mode=False)
+    question = "일반 결정과 일반 액션"
+    ctx_history, _, _ = _build(
+        question, rows, [], scope="global", monkeypatch=monkeypatch
+    )
+    ctx_plain, _, plain_debug = _build(
+        question, rows, [], monkeypatch=monkeypatch, history_mode=False
+    )
 
     assert ctx_history == ctx_plain
     assert "[decision #" not in ctx_history
@@ -318,20 +326,19 @@ def test_no_annotation_outside_history_mode_and_for_nonparticipants(monkeypatch)
     assert plain_debug["history_mode"] is False
 
 
-def test_skipped_component_slot_rows_keep_annotation(monkeypatch):
-    """round-1 R-002: 예산으로 생략된 컴포넌트라도 일반 슬롯에 있는 관계 참여 행은
-    주석 포맷을 유지한다 — 주석은 예산 소비 0(라인 포맷 교체)이기 때문."""
+def test_zero_relevance_component_slot_rows_keep_annotation(monkeypatch):
+    """현재 질의로 선택된 슬롯은 topical 추가 대상이 아니어도 관계 주석을 유지한다."""
     monkeypatch.setenv("HISTORY_CHAIN_LIMIT", "1")  # jwt 체인만 포함, 배포 체인 생략
     deploy_terminal = _COMP_DEPLOY[1]  # id=5, [← #4 대체] 대상
 
     context, _, debug = _build(
-        "JWT로 왜 바뀌었어?", [deploy_terminal], _COMP_JWT + _COMP_DEPLOY,
+        "JWT 이력과 배포 주기 2주", [deploy_terminal], _COMP_JWT + _COMP_DEPLOY,
         scope="topical", tokens=("jwt",), monkeypatch=monkeypatch,
     )
 
-    assert debug["history_truncated"] is True
-    assert "[decision #4]" not in context                       # 체인 행은 생략
-    assert "[decision #5][최신][← #4 대체] 배포 주기 2주" in context  # 슬롯 주석 유지
+    assert debug["history_truncated"] is False
+    assert "[decision #4]" not in context                          # 과거 행은 주제 무관
+    assert "[decision #5][최신][← #4 대체] 배포 주기 2주" in context
     assert "[decision] 배포 주기 2주" not in context
 
 
@@ -466,8 +473,9 @@ _CHUNKS = [
 
 def test_axis_weights_invariant_to_multi_query_count(monkeypatch):
     """축별 정규화: 동일 dense 결과를 내는 쿼리가 1개든 4개든 융합 점수·순서가 같다."""
-    q = "무관한 질의어"  # BM25 전부 0점 → 게이트로 BM25 축 제거
+    q = "회의록"
     dense = [c[0] for c in _CHUNKS]
+    monkeypatch.setattr(qa_engine, "_bm25_scores", lambda query, texts: [0.0] * len(texts))
 
     _, _, debug1 = _build_chunks(q, [q], _CHUNKS, {q: dense}, monkeypatch)
     queries4 = [q, f"{q} 2", f"{q} 3", f"{q} 4"]
@@ -482,7 +490,8 @@ def test_axis_weights_invariant_to_multi_query_count(monkeypatch):
 def test_bm25_zero_score_gate(monkeypatch):
     """질문과 전혀 안 겹치는 문서는 BM25 순위에 못 들어온다(0점 게이트) —
     dense 축만으로 후보가 유지되고 bm25_rank는 전부 None."""
-    q = "무관한 질의어"
+    q = "회의록"
+    monkeypatch.setattr(qa_engine, "_bm25_scores", lambda query, texts: [0.0] * len(texts))
     _, _, debug = _build_chunks(q, [q], _CHUNKS, {q: [c[0] for c in _CHUNKS]}, monkeypatch)
 
     chunks = debug["chroma_chunks"]
@@ -493,7 +502,8 @@ def test_bm25_zero_score_gate(monkeypatch):
 def test_recency_axis_ranks_by_date_and_excludes_malformed(monkeypatch):
     """recency 축: 유효 날짜 내림차순 dense-rank(1-based), 무효 날짜는 recency 제외
     (다른 축 점수는 유지)."""
-    q = "무관한 질의어"
+    q = "회의록"
+    monkeypatch.setattr(qa_engine, "_bm25_scores", lambda query, texts: [0.0] * len(texts))
     chunks = [
         ("알파 내용 회의록", "2026-01-10", "doc1_chunk0"),
         ("베타 내용 회의록", "2026-03-10", "doc1_chunk1"),
@@ -511,7 +521,8 @@ def test_recency_axis_ranks_by_date_and_excludes_malformed(monkeypatch):
 def test_recency_candidates_limited_to_gated_union(monkeypatch):
     """recency 후보 제한: dense·BM25 어느 축에도 없는 문서는 최신 날짜여도
     recency 축만으로 컨텍스트에 진입할 수 없다."""
-    q = "무관한 질의어"
+    q = "회의록"
+    monkeypatch.setattr(qa_engine, "_bm25_scores", lambda query, texts: [0.0] * len(texts))
     chunks = [
         ("알파 내용 회의록", "2026-01-10", "doc1_chunk0"),
         ("베타 내용 회의록", "2026-03-10", "doc1_chunk1"),
@@ -534,8 +545,10 @@ def test_tie_break_by_chroma_id_input_order_invariant(monkeypatch):
     ]
     dense_map = {q1: ["베타 내용 회의록"], q2: ["알파 내용 회의록"]}
 
-    _, _, debug_fwd = _build_chunks("무관", [q1, q2], chunks, dense_map, monkeypatch)
-    _, _, debug_rev = _build_chunks("무관", [q1, q2], list(reversed(chunks)), dense_map, monkeypatch)
+    _, _, debug_fwd = _build_chunks("회의록", [q1, q2], chunks, dense_map, monkeypatch)
+    _, _, debug_rev = _build_chunks(
+        "회의록", [q1, q2], list(reversed(chunks)), dense_map, monkeypatch
+    )
 
     order_fwd = [c["text"] for c in debug_fwd["chroma_chunks"]]
     order_rev = [c["text"] for c in debug_rev["chroma_chunks"]]
@@ -551,8 +564,10 @@ def test_tie_candidates_exceeding_top_n_input_order_invariant(monkeypatch):
     queries = [f"질의 {i}" for i in range(6)]
     dense_map = {q: [chunks[i][0]] for i, q in enumerate(queries)}
 
-    _, _, debug_fwd = _build_chunks("무관", queries, chunks, dense_map, monkeypatch)
-    _, _, debug_rev = _build_chunks("무관", queries, list(reversed(chunks)), dense_map, monkeypatch)
+    _, _, debug_fwd = _build_chunks("회의록", queries, chunks, dense_map, monkeypatch)
+    _, _, debug_rev = _build_chunks(
+        "회의록", queries, list(reversed(chunks)), dense_map, monkeypatch
+    )
 
     order_fwd = [c["text"] for c in debug_fwd["chroma_chunks"]]
     order_rev = [c["text"] for c in debug_rev["chroma_chunks"]]
@@ -571,7 +586,7 @@ def test_chunk_tie_key_sha256_fallback_fixed_value():
 
 def test_duplicate_chunks_deduped_before_ranking(monkeypatch):
     """동일 source·text 완전 중복(ID 없는 fixture)은 사전 제거 — 입력 순서 반전 불변."""
-    q = "무관한 질의어"
+    q = "회의록"
     chunks = [
         ("알파 내용 회의록", "2026-01-10", ""),
         ("알파 내용 회의록", "2026-01-10", ""),   # 완전 중복

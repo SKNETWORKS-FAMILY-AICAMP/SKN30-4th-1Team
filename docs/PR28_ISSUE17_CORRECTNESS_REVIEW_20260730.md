@@ -1,16 +1,17 @@
 # PR #28 코드 단독 전수검사 보고서
 
 - 기준 브랜치: `origin/main`
-- 검사 브랜치: `codex/review-pr28-on-main`
+- 검사·수정 브랜치: `codex/pr21-agentic-eval-3commits-v2` (PR #28 head)
 - 검사 기준: `origin/main...HEAD`의 추적 코드와 그 호출 경로
 - 검사일: 2026-07-30
-- 결론: **현재 상태로는 병합 보류**
+- 결론: **수정 후 코드 정확성 조건 충족** — 성능 개선은 이번 범위에서 판정하지 않음
 
 ## 1. 검사 원칙
 
-이번 검사는 구현 코드만 보고 다시 수행했다.
+이번 검사는 구현 코드만 보고 다시 수행했다. 2~8장은 수정 전 결함을 보존한
+감사 기록이고, 9장은 PR #28에 직접 반영한 수정 및 재검증 결과다.
 
-- 질문셋, 골든셋, 정답 fixture, 기존 리뷰 문서는 열거나 실행하지 않았다.
+- 질문셋·골든셋·정답은 수정 판단, 재현, 회귀 테스트의 입력으로 사용하지 않았다.
 - `backend/test/golden/`, 평가 JSON, 기존 리뷰 문서 및 작업 중 생긴 untracked 평가 파일·디렉터리는 검사 입력에서 제외했다.
 - 재현은 코드에서 독립적으로 만든 `Alpha`, `Beta`, 임의 파일명과 임의 문장만 사용했다.
 - 성능, 호출 비용, 지연 시간 개선은 이번 판정에서 제외했다.
@@ -25,7 +26,8 @@
 
 ## 2. 요약
 
-코드만 보아도 제거 또는 재설계가 필요한 과적합·하드코딩 경로가 확인됐다.
+최초 코드 검사에서 제거 또는 재설계가 필요한 과적합·하드코딩 경로가 확인됐다.
+아래는 발견 당시 상태이며, 최종 조치 결과는 9장에 정리했다.
 
 1. 평가 `run`이 실행 전에 골든을 직접 읽고 같은 프로세스에서 문항별 정오 피드백을 낸다.
 2. 이력 판정은 고정 문구 목록, 정규식, 8·12·16자 창에 의존한다.
@@ -199,12 +201,70 @@
 6. **이력 판정**: 정규식 문구 추가를 중단하고 구조화 intent + 불확실성 시 dual retrieval로 교체한다.
 7. **평가 오합격 제거**: source identity, operation-aware capability, 구조화 답 계약, 동일 metric coverage를 강제한다.
 
-## 8. 병합 판정
+## 8. 최초 병합 판정 (수정 전)
 
-성능 개선을 제외해도 현재 브랜치는 병합 조건을 충족하지 않는다.
+성능 개선을 제외해도 수정 전 브랜치는 병합 조건을 충족하지 않았다.
 
 - OH-01~OH-07은 평가 과적합 방지 목표와 직접 충돌한다.
 - R-01, R-03~R-07, R-11~R-12, R-16은 실제 답변의 근거·범위·입력 안전성을 깨뜨린다.
 - E-01~E-06은 실패한 구현을 통과시키거나 정상 구현을 실패시키므로 평가 결과를 신뢰할 수 없게 한다.
 
 위 최우선 항목을 수정한 뒤에도 같은 질문·골든을 재사용한 튜닝으로 확인하지 말고, 코드 불변식 테스트와 새 블라인드 입력으로 검증해야 한다.
+
+## 9. 수정 적용 및 재검증
+
+### 9.1 과적합·하드코딩 제거
+
+| 대상 | 수정 전 오류 | 적용한 수정 | 최종 상태 |
+|---|---|---|---|
+| OH-01~02 | 평가 실행기가 골든을 읽고 문항별 정오 피드백을 반환함 | `run`은 질문과 원시 실행 결과만 처리하고, `score`만 별도 골든을 읽도록 분리했다. 입력·결과 해시와 봉인 정보를 저장한다. | 제거 |
+| OH-03, OH-09, R-16 | 정규식·한국어 문구 사전이 이력 및 category 범위를 결정함 | 요청당 한 번 생성하는 strict `QuestionScope`와 Unicode canonical token 경계로 교체했다. 운영 검색에서 문구 정규식과 category 키워드 사전을 제거했다. | 제거 |
+| OH-04, R-11~15 | 자연어 substring과 암묵적 형변환으로 SQL 범위를 만들거나 뒤집음 | SQL Tool은 스키마 필드만 허용하고, bool/int/text를 strict 검증한다. 복수·제외·모순·지원 불가능 조건은 축소하지 않고 `invalid_query`로 거부한다. | 제거 |
+| OH-05, E-04 | 숫자·기권 문구·필수 문자열 포함만으로 정답 판정 | 고정 문구·숫자 정규식을 삭제하고 구조화 judge 결과를 strict schema로 검증한다. judge 실패·불완전 결과는 fail-closed 처리한다. | 제거 |
+| OH-06 | 특정 SDK/OAuth 역할 사례가 운영 프롬프트에 삽입됨 | 질문 대상과 보조 역할을 섞지 않는 일반 근거 규칙으로 교체했다. 검색 재표현의 특정 고객 유지 사례도 삭제했다. | 제거 |
+| OH-07~08 | 골든 조각·해시를 아는 테스트와 평가 전용 운영 상태가 존재함 | 데이터 결합 테스트·fixture를 삭제하고 import/CLI/trace 경계를 검증하는 구조 테스트로 교체했다. 운영 Tool artifact를 공통 trace로 사용한다. | 제거 |
+
+`critical` 같은 평가 문구나 임의 도메인 사례를 새 스키마·분기·프롬프트로
+옮기지 않았다. 남아 있는 category/status 값은 DB와 Tool 계약의 enum뿐이며
+질문별 정답을 선택하지 않는다.
+
+### 9.2 성능과 무관한 오류 수정
+
+| 영역 | 수정 전 발생 오류 | 적용한 수정 |
+|---|---|---|
+| Tool 실행 | 중복 호출과 신규 호출이 한 batch에 있으면 신규 호출까지 유실됨 | schema 기본값을 적용한 canonical 호출 단위로 분리하고, 중복 호출만 거부한다. |
+| 구조화 0건 fallback | 구조화 스코프가 서버의 raw hybrid fallback까지 거부해 항상 503이 됨 | 그래프가 생성한 단일 marker·call ID·현재 질문이 모두 일치할 때만 raw fallback을 허용한다. 모델이 만든 같은 호출은 계속 거부한다. |
+| 최종 근거 guard | 빈 검색, `invalid_query`, 실패한 프로젝트 검색, context 없는 `ok`, 무관한 성공 Tool 또는 첨부가 근거 없는 최종 답변을 가림 | `error`·`invalid_query`·context 없는 `ok`는 항상 실패시키고, 미해결 `empty`는 다른 결과로 상쇄하지 못하게 했다. 정상 project `empty`와 유효 첨부만 있는 경우에는 검증된 첨부 답을 보존한다. |
+| 대화 이력 | 클라이언트가 보낸 이전 assistant 문장이 현재 최종 답으로 선택될 수 있음 | 현재 실행의 ToolMessage 뒤에 생성된 assistant 답만 최종 후보로 인정한다. |
+| 검색 범위 | 모델 재표현이 사용자 질문과 무관한 MySQL/Chroma 근거를 유입함 | 현재 질문과 서버가 만든 첫 이력 결합 질의만 근거 입장 토큰을 제공한다. 모델 재표현은 입장한 근거의 순위에만 사용한다. |
+| 이력 체인 | topical 관련도 0인 supersede 컴포넌트가 추가되고, 이전 주제 상속 시 직전 질문 전체가 섞임 | 관련도 0 컴포넌트의 과거 행은 제외한다. 누락된 history scope와 빈 topical token은 거부하고, 상속 검색어에는 구조화된 `history_topic`만 결합한다. |
+| 구조화 범위 | 복수 category/owner/status 또는 제외 조건을 하나로 축소하거나 전체 범위로 넓히고, global 이력 count도 현재 행만 셈 | 모든 명시 조건을 `QuestionScope`에 보존한다. global 이력 list/count만 `include_superseded=True`로 정확히 실행하고, topical 이력·history overview·그 밖의 미지원 조합은 fail-closed 한다. |
+| 타입 검증 | `1`, `1.9`, `"false"` 등이 bool/int로 암묵 변환되고, 문자열 `sources`/`model_contexts`가 문자 배열처럼 근거에 들어갈 수 있음 | 입력·trace·Tool artifact에 정확한 Python 타입과 Pydantic strict schema를 요구한다. |
+| 다국어 토큰 | Kiwi가 빈 결과를 내는 문자권에서 주제 토큰이 사라지고 CJK 무공백 문장의 부분 주제가 일치하지 않음 | NFKC Unicode category fallback과 wide/fullwidth 2·3글자 canonical n-gram으로 빈 토큰과 무공백 부분 주제를 보완한다. |
+| 첨부 | 문자 budget 뒤 파일의 검증이 생략되고 실패·빈 파일도 근거 출처로 노출됨 | 모든 첨부를 먼저 검증한 뒤 budget을 적용하고, 성공한 비어 있지 않은 첨부만 근거로 사용한다. 실패·생략은 diagnostics에 분리한다. |
+| 출처 식별 | 같은 파일명, 같은 본문, JOIN 복수 출처가 합쳐지거나 첫 출처로 오매핑됨 | 첨부는 `attachment:`, 업로드 문서는 `doc#`, 저장소 파일은 `repo#` namespace를 사용한다. dense 결과는 ID/metadata로 매핑하고 모호하면 제외하며, JOIN의 모든 출처를 보존한다. |
+| 평가기 | endpoint rate limit, 공개 `sources` 자기인증, project/attachment 출처 교차 대체, operation 미구분, 서로 다른 실행 비교, 빈·임의 metric 교집합이 오합격·오실패를 만듦 | 순수 query service, 서버 소유 project source trace, evidence 종류별 출처 결합, operation-aware capability를 적용했다. compare는 질문·골든 hash, snapshot, model/judge 설정과 record identity가 같을 때만 허용하고 알려진 5개 RAGAS coverage를 강제한다. |
+| 평가 봉인 | 중복 질문 ID가 마지막 항목으로 덮이고 questions/golden이 같은 파일이어도 run/score 분리가 성립한 것처럼 보임 | 질문·raw record·골든 ID 중복을 거부하고, 동일 path·symlink·hardlink인 questions/golden을 거부한다. |
+| 첨부 평가 | 텍스트를 PDF/DOCX 확장자로 위장한 bytes가 실제 변환 검증을 통과함 | inline text는 text 확장자만 허용하고 binary 형식은 실제 bytes만 받는다. |
+
+### 9.3 검증 결과
+
+실제 질문·골든 데이터는 실행하지 않았다. 코드에서 독립적으로 만든 임의
+프로젝트명·문장·파일명과 fake model/DB/Chroma만으로 아래를 확인했다.
+
+- 범위·이력·Tool·근거 guard 집중 회귀: `103 passed`
+- 검색·출처·supersede 집중 회귀: `89 passed`
+- 평가 경계·첨부 집중 회귀: `114 passed`
+- 저장소 일반 회귀: `1059 passed, 3 skipped`
+- 변경 Python 모듈 `py_compile`: 통과
+- `git diff --check`: 통과
+
+일반 회귀에서는 실제 평가 데이터 테스트를 의도적으로 제외했다. 또한 로컬 DB
+설정이 필요한 MySQL integration과 현재 macOS Bash 버전에 의존하는 배포
+preflight/stack/harness 테스트는 이번 코드 정확성 회귀에서 제외했다.
+
+### 9.4 최종 병합 판정
+
+이 문서에서 식별한 과적합 경로와 성능 외 정확성 오류는 PR #28 head에서
+수정됐다. 따라서 **오류 수정 범위에서는 병합 가능**으로 판정한다. 검색 속도,
+호출 비용, 지연 시간, 랭킹 품질 최적화는 의도적으로 수행하거나 주장하지 않는다.

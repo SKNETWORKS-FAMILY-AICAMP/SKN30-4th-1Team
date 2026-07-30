@@ -16,7 +16,8 @@ from backend.retriever.qa_tools import QA_TOOLS, query_structured_memory
 
 class _ToolCallingFake:
     def __init__(self, responses):
-        self.responses = iter(responses)
+        self.script = list(responses)
+        self.responses = iter(self.script)
         self.bind_calls = []
         self.invocations = []
 
@@ -27,6 +28,54 @@ class _ToolCallingFake:
     def invoke(self, messages):
         self.invocations.append(list(messages))
         return next(self.responses)
+
+
+def _scope_for_structured(args: dict) -> dict:
+    """Build the server-owned scope matching one synthetic Tool call."""
+    scope = {
+        "operation": args["operation"],
+        "include_history": False,
+    }
+    category = args.get("category")
+    if category and category != "all":
+        scope["category"] = category
+    for name in ("owner", "completion_status", "due_within_days"):
+        if args.get(name) is not None:
+            scope[name] = args[name]
+    if args.get("overdue") is True:
+        scope["overdue"] = True
+    return scope
+
+
+def _call_structured(**kwargs):
+    kwargs.setdefault("question_scope", _scope_for_structured(kwargs))
+    return query_structured_memory.func(**kwargs)
+
+
+def _run_agentic_qa(*args, **kwargs):
+    """Inject a realistic immutable scope into fake-model graph tests."""
+    if "question_scope" not in kwargs:
+        model = kwargs.get("model")
+        calls = [
+            call
+            for response in getattr(model, "script", [])
+            for call in (getattr(response, "tool_calls", None) or [])
+        ]
+        structured = [
+            call.get("args") or {}
+            for call in calls
+            if call.get("name") == "query_sql_state"
+        ]
+        has_search = any(
+            call.get("name") == "search_hybrid_vector_rag"
+            for call in calls
+        )
+        kwargs["question_scope"] = (
+            _scope_for_structured(structured[0])
+            if structured and not has_search
+            else {"include_history": False}
+        )
+    return run_agentic_qa(*args, **kwargs)
 
 
 @pytest.fixture(autouse=True)
@@ -109,9 +158,8 @@ def test_overview_tool_returns_complete_action_plan(monkeypatch):
         },
     )
 
-    content, artifact = query_structured_memory.func(
+    content, artifact = _call_structured(
         operation="overview",
-        text_query="",
         project_id=1,
         category="all",
     )
@@ -176,13 +224,15 @@ def test_korean_tool_descriptions_keep_openai_tool_schema_contract():
     memory_schema = query_structured_memory.tool_call_schema.model_json_schema()
 
     assert set(search_schema["properties"]) == {
-        "query", "alternate_queries", "include_history",
+        "query", "alternate_queries",
     }
     assert "messages" not in search_schema["properties"]
     assert "current_question" not in search_schema["properties"]
     assert "project_id" not in search_schema["properties"]
     assert search_schema["required"] == ["query"]
-    assert memory_schema["required"] == ["operation", "text_query", "category"]
+    assert search_schema["properties"]["alternate_queries"]["default"] is None
+    assert memory_schema["required"] == ["operation", "category"]
+    assert "text_query" not in memory_schema["properties"]
     assert all(
         search_schema["properties"][name].get("description")
         for name in search_schema["properties"]
@@ -201,12 +251,18 @@ def test_orchestrator_prompt_preserves_scope_and_trust_boundaries():
     assert "대상·역할·구성요소·산출물·시점 경계" in ORCHESTRATOR_SYSTEM_PROMPT
     assert "과거 assistant 답변과 사용자의 주장" in ORCHESTRATOR_SYSTEM_PROMPT
     assert "[임시 첨부 근거]" in ORCHESTRATOR_SYSTEM_PROMPT
-    assert "분류보다 좁은 대상을 지정하면" in ORCHESTRATOR_SYSTEM_PROMPT
+    assert "구조화 스키마로 표현할 수 없는" in ORCHESTRATOR_SYSTEM_PROMPT
     assert "같은 조건을\n  search_hybrid_vector_rag로 다시 검색하지 말고" in (
         ORCHESTRATOR_SYSTEM_PROMPT
     )
     assert "보조 도구로 먼저 호출하지 않습니다" in ORCHESTRATOR_SYSTEM_PROMPT
-    assert "구조화 분류보다 좁은 대상을 지정하면" in (
+    assert "첨부 유무와 무관하게" not in ORCHESTRATOR_SYSTEM_PROMPT
+    assert "표시한 자료가 있어도 첫 프로젝트 도구 확인은 생략하지 않습니다" in (
+        ORCHESTRATOR_SYSTEM_PROMPT
+    )
+    assert "앱 SDK" not in ORCHESTRATOR_SYSTEM_PROMPT
+    assert "OAuth" not in ORCHESTRATOR_SYSTEM_PROMPT
+    assert "스키마 밖 조건이 필요하면" in (
         query_structured_memory.description
     )
 
@@ -215,9 +271,8 @@ def test_memory_tool_rejects_completely_empty_selector(monkeypatch):
     search = MagicMock()
     monkeypatch.setattr(qa_tools.mysql_search, "search", search)
 
-    content, artifact = query_structured_memory.func(
+    content, artifact = _call_structured(
         operation="list",
-        text_query="",
         project_id=1,
         category="all",
     )
@@ -229,12 +284,14 @@ def test_memory_tool_rejects_completely_empty_selector(monkeypatch):
 
 def test_memory_tool_rejects_guessed_owner():
     """사용자 질문에 없는 담당자를 모델이 추측해 필터로 넣을 수 없다."""
-    _, artifact = query_structured_memory.func(
+    _, artifact = _call_structured(
         operation="list",
-        text_query="SDK 연동",
         project_id=1,
         category="action",
-        current_question="SDK 연동 담당자는 누구야?",
+        question_scope={
+            "operation": "list",
+            "category": "action",
+        },
         owner="박현우",
     )
 
@@ -245,9 +302,8 @@ def test_memory_tool_rejects_guessed_owner():
 
 def test_memory_tool_rejects_action_status_for_issue():
     """action 전용 상태 필터를 issue 범위에 적용하지 않는다."""
-    _, artifact = query_structured_memory.func(
+    _, artifact = _call_structured(
         operation="count",
-        text_query="로그인 결함",
         project_id=1,
         category="issue",
         completion_status="open",
@@ -259,16 +315,14 @@ def test_memory_tool_rejects_action_status_for_issue():
 
 def test_memory_tool_rejects_false_overdue_filter():
     """효과 없는 overdue=false로 빈 조건 전체 목록 제한을 우회할 수 없다."""
-    content, artifact = query_structured_memory.func(
+    content, artifact = _call_structured(
         project_id=1,
         operation="list",
-        text_query="",
-        category="all",
-        current_question="프로젝트 기록을 보여줘",
+        category="action",
         overdue=False,
     )
 
-    assert "true만 사용할 수 있습니다" in content
+    assert "일치하지 않습니다" in content
     assert artifact["status"] == "invalid_query"
     assert artifact["requested_filters"]["overdue"] is False
     assert artifact["applied_filters"] == {}
@@ -277,20 +331,10 @@ def test_memory_tool_rejects_false_overdue_filter():
 def test_memory_tool_caps_rows_and_preserves_total(monkeypatch):
     rows = [_memory_row(index, f"작업 {index}") for index in range(1, 26)]
     monkeypatch.setattr(qa_tools.mysql_search, "search", lambda *args, **kwargs: rows)
-    monkeypatch.setattr(
-        qa_tools.qa_engine,
-        "_rank_mysql_rows",
-        lambda project_id, candidates, queries, limit, index_scope=None: (
-            candidates[:limit],
-            [],
-        ),
-    )
-
-    content, artifact = query_structured_memory.func(
+    content, artifact = _call_structured(
         operation="list",
-        text_query="SDK 연동",
         project_id=1,
-        category="all",
+        category="action",
         limit=999,
     )
 
@@ -304,9 +348,8 @@ def test_memory_tool_all_scope_omits_sql_category(monkeypatch):
     search = MagicMock(return_value=[_memory_row(1, "SDK 연동")])
     monkeypatch.setattr(qa_tools.mysql_search, "search", search)
 
-    content, _ = query_structured_memory.func(
+    content, _ = _call_structured(
         operation="count",
-        text_query="전체 기록",
         project_id=1,
         category="all",
     )
@@ -317,13 +360,12 @@ def test_memory_tool_all_scope_omits_sql_category(monkeypatch):
     assert search.call_args.kwargs["text_query"] is None
 
 
-def test_memory_tool_all_scope_count_accepts_empty_text_query(monkeypatch):
+def test_memory_tool_all_scope_count_uses_only_structured_fields(monkeypatch):
     search = MagicMock(return_value=[_memory_row(1, "SDK 연동")])
     monkeypatch.setattr(qa_tools.mysql_search, "search", search)
 
-    content, artifact = query_structured_memory.func(
+    content, artifact = _call_structured(
         operation="count",
-        text_query="",
         project_id=1,
         category="all",
     )
@@ -341,9 +383,8 @@ def test_memory_count_deduplicates_join_expanded_rows(monkeypatch):
         lambda *args, **kwargs: [row, {**row, "source": "duplicate.md"}],
     )
 
-    content, artifact = query_structured_memory.func(
+    content, artifact = _call_structured(
         operation="count",
-        text_query="",
         category="action",
         project_id=1,
     )
@@ -352,23 +393,22 @@ def test_memory_count_deduplicates_join_expanded_rows(monkeypatch):
     assert artifact["total_rows"] == 1
 
 
-def test_memory_count_applies_target_phrase_to_structured_search(monkeypatch):
+def test_memory_count_never_applies_a_natural_language_sql_filter(monkeypatch):
     search = MagicMock(return_value=[_memory_row(1, "SDK 연동")])
     monkeypatch.setattr(qa_tools.mysql_search, "search", search)
 
-    content, artifact = query_structured_memory.func(
+    content, artifact = _call_structured(
         operation="count",
-        text_query="SDK 연동",
         category="action",
         project_id=1,
     )
 
     assert json.loads(content)["count"] == 1
     assert artifact["total_rows"] == 1
-    assert search.call_args.kwargs["text_query"] == "SDK 연동"
+    assert search.call_args.kwargs["text_query"] is None
     assert search.call_args.kwargs["index_scope"].project_id == 1
-    assert artifact["requested_filters"]["text_query"] == "SDK 연동"
-    assert artifact["applied_filters"]["text_query"] == "SDK 연동"
+    assert "text_query" not in artifact["requested_filters"]
+    assert "text_query" not in artifact["applied_filters"]
     assert artifact["latency_ms"] >= 0
 
 
@@ -380,13 +420,11 @@ def test_memory_count_applies_category_owner_and_status_consistently(monkeypatch
     ])
     monkeypatch.setattr(qa_tools.mysql_search, "search", search)
 
-    content, artifact = query_structured_memory.func(
+    content, artifact = _call_structured(
         operation="count",
-        text_query="",
         category="action",
         owner="박현우",
         completion_status="open",
-        current_question="박현우의 미완료 액션은 몇 건이야?",
         project_id=1,
     )
 
@@ -394,8 +432,6 @@ def test_memory_count_applies_category_owner_and_status_consistently(monkeypatch
     assert search.call_args.kwargs["category"] == "action"
     assert search.call_args.kwargs["owner"] == "박현우"
     assert search.call_args.kwargs["completion_status"] == "open"
-    assert artifact["requested_filters"]["text_query"] == ""
-    assert artifact["applied_filters"]["text_query"] is None
     for key in ("category", "owner", "completion_status"):
         assert artifact["requested_filters"][key] == artifact["applied_filters"][key]
     assert artifact["total_rows"] == 2
@@ -417,6 +453,7 @@ def test_evidence_tool_returns_only_generation_scoped_context(monkeypatch):
         project_id=1,
         messages=[],
         current_question="최신 변경은?",
+        question_scope={"include_history": False},
     )
 
     assert content == "[원문 맥락]\n새 generation 근거"
@@ -440,22 +477,16 @@ def test_evidence_tool_keeps_original_question_before_model_queries(monkeypatch)
             "응답 코드 분포",
             "처리 시간 분포",
             "실패 요청 유형",
-            "상한 밖 검색어",
         ],
         project_id=1,
         messages=[],
         current_question=original_question,
+        question_scope={"include_history": False},
     )
 
     args, kwargs = build_context.call_args
     assert args == (1, original_question)
-    assert kwargs["query_variants"] == [
-        "로그 수집 결과",
-        "응답 코드 분포",
-        "처리 시간 분포",
-        "실패 요청 유형",
-        "상한 밖 검색어",
-    ]
+    assert kwargs["query_variants"] == [original_question]
 
 
 def test_agent_calls_evidence_tool_then_synthesizes_one_answer(monkeypatch):
@@ -465,7 +496,6 @@ def test_agent_calls_evidence_tool_then_synthesizes_one_answer(monkeypatch):
             "args": {
                 "query": "SDK 연동은 누가 담당했는가?",
                 "alternate_queries": ["소셜 로그인 SDK 담당자"],
-                "include_history": False,
             },
             "id": "call_1",
             "type": "tool_call",
@@ -489,7 +519,7 @@ def test_agent_calls_evidence_tool_then_synthesizes_one_answer(monkeypatch):
         ),
     )
 
-    result = run_agentic_qa(
+    result = _run_agentic_qa(
         1,
         "SDK 연동은 누가 담당했는가?",
         model=fake,
@@ -504,14 +534,13 @@ def test_agent_calls_evidence_tool_then_synthesizes_one_answer(monkeypatch):
     assert fake.bind_calls[1]["tool_choice"] == "any"
 
 
-def test_agent_can_combine_multiple_tools(monkeypatch):
+def test_mixed_batch_invalid_query_fails_closed(monkeypatch):
     fake = _ToolCallingFake([
         AIMessage(content="", tool_calls=[
             {
                 "name": "query_sql_state",
                 "args": {
                     "operation": "list",
-                    "text_query": "SDK 연동",
                     "category": "action",
                     "limit": 3,
                 },
@@ -522,13 +551,12 @@ def test_agent_can_combine_multiple_tools(monkeypatch):
                 "name": "search_hybrid_vector_rag",
                 "args": {
                     "query": "SDK 연동 일정이 밀린 이유",
-                    "include_history": False,
                 },
                 "id": "call_semantic",
                 "type": "tool_call",
             },
         ]),
-        AIMessage(content="**박현우가 담당했고, 소셜 로그인 추가로 일정이 밀렸습니다.**"),
+        AIMessage(content="**소셜 로그인 추가로 일정이 밀렸습니다.**"),
     ])
     monkeypatch.setattr(
         qa_tools.mysql_search,
@@ -549,13 +577,8 @@ def test_agent_can_combine_multiple_tools(monkeypatch):
         lambda *args, **kwargs: ("[원문 맥락]\n소셜 로그인 추가로 1주 지연", ["delay.md"], {}),
     )
 
-    result = run_agentic_qa(1, "SDK 연동 담당자와 지연 이유는?", model=fake)
-
-    assert result["debug"]["tools_used"] == [
-        "query_sql_state", "search_hybrid_vector_rag"
-    ]
-    assert "박현우" in result["answer"]
-    assert result["sources"] == ["meeting.md", "delay.md"]
+    with pytest.raises(RuntimeError, match="no valid evidence"):
+        _run_agentic_qa(1, "SDK 연동 담당자와 지연 이유는?", model=fake)
 
 
 def test_attachment_is_temporary_agentic_evidence_and_a_returned_source(monkeypatch):
@@ -564,7 +587,6 @@ def test_attachment_is_temporary_agentic_evidence_and_a_returned_source(monkeypa
             "name": "search_hybrid_vector_rag",
             "args": {
                 "query": "릴리즈명을 확인해줘",
-                "include_history": False,
             },
             "id": "call_evidence",
             "type": "tool_call",
@@ -577,7 +599,7 @@ def test_attachment_is_temporary_agentic_evidence_and_a_returned_source(monkeypa
         lambda *args, **kwargs: ("프로젝트 근거", ["project.md"], {}),
     )
 
-    result = run_agentic_qa(
+    result = _run_agentic_qa(
         1,
         "릴리즈명을 확인해줘",
         attachment_context="[첨부 자료]\n### note.txt\n(출처: note.txt)\n릴리즈명은 Aurora",
@@ -610,7 +632,7 @@ def test_tool_exception_without_recovery_fails_closed(monkeypatch):
     fake = _ToolCallingFake([
         AIMessage(content="", tool_calls=[{
             "name": "search_hybrid_vector_rag",
-            "args": {"query": "현재 상태", "include_history": False},
+            "args": {"query": "현재 상태"},
             "id": "call_failed_search",
             "type": "tool_call",
         }]),
@@ -623,13 +645,13 @@ def test_tool_exception_without_recovery_fails_closed(monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="no valid evidence"):
-        run_agentic_qa(1, "현재 상태는?", model=fake)
+        _run_agentic_qa(1, "현재 상태는?", model=fake)
 
     assert len(fake.invocations) == 2
 
 
-def test_agent_can_recover_from_tool_error_with_another_tool(monkeypatch):
-    """한 Tool 오류 뒤 다른 Tool이 근거를 반환하면 해당 근거로 답한다."""
+def test_unrelated_tool_success_cannot_recover_a_project_tool_error(monkeypatch):
+    """한 facet의 Tool 오류를 다른 Tool 결과로 회복한 것으로 간주하지 않는다."""
     fake = _ToolCallingFake([
         AIMessage(content="", tool_calls=[{
             "name": "search_hybrid_vector_rag",
@@ -638,12 +660,11 @@ def test_agent_can_recover_from_tool_error_with_another_tool(monkeypatch):
             "type": "tool_call",
         }]),
         AIMessage(content="", tool_calls=[{
-            "name": "query_sql_state",
-            "args": {
-                "operation": "count",
-                "text_query": "",
-                "category": "action",
-                "completion_status": "open",
+                "name": "query_sql_state",
+                "args": {
+                    "operation": "count",
+                    "category": "action",
+                    "completion_status": "open",
             },
             "id": "call_recovery",
             "type": "tool_call",
@@ -661,19 +682,22 @@ def test_agent_can_recover_from_tool_error_with_another_tool(monkeypatch):
         lambda *args, **kwargs: [_memory_row(1, "미완료 액션")],
     )
 
-    result = run_agentic_qa(1, "현재 상태는?", model=fake)
-
-    assert [item["status"] for item in result["debug"]["tool_results"]] == [
-        "error", "ok",
-    ]
-    assert result["answer"] == "미완료 액션은 1건입니다."
+    with pytest.raises(RuntimeError, match="no valid evidence"):
+        _run_agentic_qa(
+            1,
+            "현재 상태는?",
+            question_scope={
+                "include_history": False,
+            },
+            model=fake,
+        )
 
 
 def test_zero_hit_search_is_a_valid_evidence_result(monkeypatch):
     fake = _ToolCallingFake([
         AIMessage(content="", tool_calls=[{
             "name": "search_hybrid_vector_rag",
-            "args": {"query": "존재하지 않는 기록", "include_history": False},
+            "args": {"query": "존재하지 않는 기록"},
             "id": "call_empty_search",
             "type": "tool_call",
         }]),
@@ -685,7 +709,7 @@ def test_zero_hit_search_is_a_valid_evidence_result(monkeypatch):
         lambda *args, **kwargs: ("", [], {}),
     )
 
-    result = run_agentic_qa(1, "존재하지 않는 기록은?", model=fake)
+    result = _run_agentic_qa(1, "존재하지 않는 기록은?", model=fake)
 
     assert result["answer"] == "프로젝트 기록에서 확인되지 않습니다."
     assert result["sources"] == []
@@ -698,7 +722,7 @@ def test_attachment_sources_do_not_evict_project_tool_sources(monkeypatch):
     fake = _ToolCallingFake([
         AIMessage(content="", tool_calls=[{
             "name": "search_hybrid_vector_rag",
-            "args": {"query": "근거 확인", "include_history": False},
+            "args": {"query": "근거 확인"},
             "id": "call_many_sources",
             "type": "tool_call",
         }]),
@@ -710,7 +734,7 @@ def test_attachment_sources_do_not_evict_project_tool_sources(monkeypatch):
         lambda *args, **kwargs: ("프로젝트 근거", project_sources, {}),
     )
 
-    result = run_agentic_qa(
+    result = _run_agentic_qa(
         1,
         "근거를 확인해줘",
         attachment_context="[첨부 자료]\n첨부 근거",
@@ -723,11 +747,27 @@ def test_attachment_sources_do_not_evict_project_tool_sources(monkeypatch):
     assert result["debug"]["attachments"] == attachment_sources
 
 
-def test_attachment_only_answer_skips_tools():
-    """첨부만으로 충분하면 프로젝트 Tool을 호출하지 않고 바로 답한다."""
-    fake = _ToolCallingFake([AIMessage(content="릴리즈명은 Aurora입니다.")])
+def test_attachment_evidence_does_not_skip_first_project_tool(monkeypatch):
+    """첨부가 충분해 보여도 첫 프로젝트 Tool 확인은 서버에서 강제한다."""
+    fake = _ToolCallingFake([
+        AIMessage(content="", tool_calls=[{
+            "name": "search_hybrid_vector_rag",
+            "args": {
+                "query": "릴리즈명이 뭐야?",
+            },
+            "id": "call_project_check",
+            "type": "tool_call",
+        }]),
+        AIMessage(content="릴리즈명은 Aurora입니다."),
+    ])
+    build_context = MagicMock(return_value=(
+        "프로젝트 기록 조회 완료",
+        ["project.md"],
+        {},
+    ))
+    monkeypatch.setattr(qa_tools.qa_engine, "_build_context", build_context)
 
-    result = run_agentic_qa(
+    result = _run_agentic_qa(
         1,
         "릴리즈명이 뭐야?",
         attachment_context="[첨부 자료]\n릴리즈명은 Aurora",
@@ -736,9 +776,12 @@ def test_attachment_only_answer_skips_tools():
     )
 
     assert result["answer"] == "릴리즈명은 Aurora입니다."
-    assert result["debug"]["tool_rounds"] == 0
-    assert result["debug"]["tool_calls"] == []
-    assert result["sources"] == ["note.txt"]
+    assert result["debug"]["tool_rounds"] == 1
+    assert result["debug"]["tool_calls"][0]["name"] == "search_hybrid_vector_rag"
+    assert result["sources"] == ["note.txt", "project.md"]
+    assert result["debug"]["evidence"]["attachment"]["available"] is True
+    assert result["debug"]["evidence"]["project"]["has_substantive_evidence"] is True
+    build_context.assert_called_once()
 
 
 def test_failed_attachment_is_not_accepted_as_zero_tool_evidence():
@@ -746,7 +789,7 @@ def test_failed_attachment_is_not_accepted_as_zero_tool_evidence():
     fake = _ToolCallingFake([AIMessage(content="첨부에서 확인했습니다.")])
 
     with pytest.raises(RuntimeError, match="no valid evidence"):
-        run_agentic_qa(
+        _run_agentic_qa(
             1,
             "첨부 내용이 뭐야?",
             attachment_context="[첨부 자료]\n(텍스트를 추출할 수 없습니다.)",
@@ -756,12 +799,12 @@ def test_failed_attachment_is_not_accepted_as_zero_tool_evidence():
         )
 
 
-def test_agent_can_search_then_query_sql_in_next_round(monkeypatch):
-    """첫 검색 결과를 본 뒤 필요한 구조화 상태를 다음 라운드에서 조회한다."""
+def test_later_invalid_sql_query_is_not_masked_by_prior_search(monkeypatch):
+    """앞선 검색 성공이 immutable scope와 불일치한 SQL 호출을 가리지 않는다."""
     fake = _ToolCallingFake([
         AIMessage(content="", tool_calls=[{
             "name": "search_hybrid_vector_rag",
-            "args": {"query": "SDK 지연 이유", "include_history": False},
+            "args": {"query": "SDK 지연 이유"},
             "id": "call_search",
             "type": "tool_call",
         }]),
@@ -769,7 +812,6 @@ def test_agent_can_search_then_query_sql_in_next_round(monkeypatch):
             "name": "query_sql_state",
             "args": {
                 "operation": "count",
-                "text_query": "SDK 미완료 작업",
                 "category": "action",
                 "completion_status": "open",
             },
@@ -789,13 +831,8 @@ def test_agent_can_search_then_query_sql_in_next_round(monkeypatch):
         lambda *args, **kwargs: [_memory_row(1, "SDK 미완료 작업")],
     )
 
-    result = run_agentic_qa(1, "SDK가 왜 지연됐고 남은 작업은 몇 개야?", model=fake)
-
-    assert result["debug"]["tool_rounds"] == 2
-    assert [call["name"] for call in result["debug"]["tool_calls"]] == [
-        "search_hybrid_vector_rag",
-        "query_sql_state",
-    ]
+    with pytest.raises(RuntimeError, match="no valid evidence"):
+        _run_agentic_qa(1, "SDK가 왜 지연됐고 남은 작업은 몇 개야?", model=fake)
 
 
 def test_tool_round_limit_is_hard_capped_at_five(monkeypatch):
@@ -803,7 +840,7 @@ def test_tool_round_limit_is_hard_capped_at_five(monkeypatch):
     responses = [
         AIMessage(content="", tool_calls=[{
             "name": "search_hybrid_vector_rag",
-            "args": {"query": f"검색 {index}", "include_history": False},
+            "args": {"query": f"검색 {index}"},
             "id": f"call_{index}",
             "type": "tool_call",
         }])
@@ -817,7 +854,7 @@ def test_tool_round_limit_is_hard_capped_at_five(monkeypatch):
         lambda *args, **kwargs: ("근거", ["source.md"], {}),
     )
 
-    result = run_agentic_qa(
+    result = _run_agentic_qa(
         1,
         "여러 근거를 확인해줘",
         model=fake,
@@ -850,7 +887,7 @@ def test_duplicate_tool_call_is_not_executed(monkeypatch):
     build_context = MagicMock(return_value=("근거", ["source.md"], {}))
     monkeypatch.setattr(qa_tools.qa_engine, "_build_context", build_context)
 
-    result = run_agentic_qa(1, "SDK 담당자는?", model=fake)
+    result = _run_agentic_qa(1, "SDK 담당자는?", model=fake)
 
     assert build_context.call_count == 1
     assert result["debug"]["tool_rounds"] == 1
@@ -859,7 +896,7 @@ def test_duplicate_tool_call_is_not_executed(monkeypatch):
 
 
 def test_duplicate_tool_calls_in_same_response_are_not_executed(monkeypatch):
-    """한 응답 안의 동일 Tool·인자 중복도 실행 전에 차단한다."""
+    """첫 호출은 실행하고 같은 응답의 실제 중복만 합성 결과로 닫는다."""
     repeated_call = {
         "name": "search_hybrid_vector_rag",
         "args": {"query": "SDK 담당자"},
@@ -875,7 +912,353 @@ def test_duplicate_tool_calls_in_same_response_are_not_executed(monkeypatch):
     build_context = MagicMock(return_value=("근거", ["source.md"], {}))
     monkeypatch.setattr(qa_tools.qa_engine, "_build_context", build_context)
 
+    result = _run_agentic_qa(1, "SDK 담당자는?", model=fake)
+
+    build_context.assert_called_once()
+    assert result["answer"] == "중복 호출 없이 근거 부족을 밝혔습니다."
+    assert result["debug"]["tool_rounds"] == 1
+    assert len(result["debug"]["tool_calls"]) == 1
+    assert [item["status"] for item in result["debug"]["tool_results"]] == [
+        "ok", "duplicate_call",
+    ]
+
+
+def test_mixed_duplicate_batch_executes_each_unique_call(monkeypatch):
+    """중복이 섞인 배치에서도 서로 다른 호출은 모두 실행한다."""
+    fake = _ToolCallingFake([
+        AIMessage(content="", tool_calls=[
+            {
+                "name": "search_hybrid_vector_rag",
+                "args": {"query": "담당자"},
+                "id": "call_owner",
+                "type": "tool_call",
+            },
+            {
+                "name": "search_hybrid_vector_rag",
+                "args": {"query": "  담당자  "},
+                "id": "call_owner_duplicate",
+                "type": "tool_call",
+            },
+            {
+                "name": "search_hybrid_vector_rag",
+                "args": {"query": "일정"},
+                "id": "call_schedule",
+                "type": "tool_call",
+            },
+        ]),
+        AIMessage(content="담당자와 일정을 확인했습니다."),
+    ])
+    build_context = MagicMock(return_value=("근거", ["source.md"], {}))
+    monkeypatch.setattr(qa_tools.qa_engine, "_build_context", build_context)
+
+    result = _run_agentic_qa(1, "담당자와 일정은?", model=fake)
+
+    assert build_context.call_count == 2
+    assert result["debug"]["tool_rounds"] == 1
+    assert [call["args"]["query"] for call in result["debug"]["tool_calls"]] == [
+        "담당자", "일정",
+    ]
+    assert [item["status"] for item in result["debug"]["tool_results"]] == [
+        "ok", "duplicate_call", "ok",
+    ]
+
+
+def test_duplicate_canonicalization_applies_validated_tool_defaults(monkeypatch):
+    """생략된 기본값과 명시된 기본값은 같은 호출로 취급한다."""
+    fake = _ToolCallingFake([
+        AIMessage(content="", tool_calls=[{
+            "name": "search_hybrid_vector_rag",
+            "args": {"query": "릴리즈 상태"},
+            "id": "call_implicit_defaults",
+            "type": "tool_call",
+        }]),
+        AIMessage(content="", tool_calls=[{
+            "name": "search_hybrid_vector_rag",
+            "args": {
+                "query": "릴리즈 상태",
+                "alternate_queries": None,
+            },
+            "id": "call_explicit_defaults",
+            "type": "tool_call",
+        }]),
+        AIMessage(content="첫 조회 근거로 답했습니다."),
+    ])
+    build_context = MagicMock(return_value=("근거", ["source.md"], {}))
+    monkeypatch.setattr(qa_tools.qa_engine, "_build_context", build_context)
+
+    result = _run_agentic_qa(1, "릴리즈 상태는?", model=fake)
+
+    build_context.assert_called_once()
+    assert result["debug"]["tool_rounds"] == 1
+    assert result["debug"]["tool_results"][-1]["status"] == "duplicate_call"
+
+
+def test_zero_structured_result_uses_server_owned_raw_fallback(
+    monkeypatch,
+):
+    """서버가 만든 fallback만 구조화 scope의 원문 확인을 수행한다."""
+    fake = _ToolCallingFake([
+        AIMessage(content="", tool_calls=[{
+            "name": "query_sql_state",
+            "args": {
+                "operation": "count",
+                "category": "action",
+                "completion_status": "open",
+            },
+            "id": "call_zero_count",
+            "type": "tool_call",
+        }]),
+        AIMessage(content="원문에서 미완료 액션을 확인했습니다."),
+    ])
+    monkeypatch.setattr(qa_tools.mysql_search, "search", lambda *args, **kwargs: [])
+    build_context = MagicMock(return_value=(
+        "원문에 미완료 액션이 있습니다.",
+        ["action.md"],
+        {},
+    ))
+    monkeypatch.setattr(qa_tools.qa_engine, "_build_context", build_context)
+
+    result = _run_agentic_qa(1, "미완료 액션은 몇 개야?", model=fake)
+
+    build_context.assert_called_once()
+    assert result["answer"] == "원문에서 미완료 액션을 확인했습니다."
+    assert result["debug"]["server_fallbacks"] == 1
+    assert result["debug"]["evidence"]["project"]["source_ids"] == ["action.md"]
+    assert result["debug"]["evidence"]["project"]["model_context_count"] == 1
+
+
+def test_empty_project_result_cannot_authorize_positive_claim(monkeypatch):
+    """empty만 받은 경우 모델의 긍정 답변을 서버가 근거 없음으로 교체한다."""
+    fake = _ToolCallingFake([
+        AIMessage(content="", tool_calls=[{
+            "name": "search_hybrid_vector_rag",
+            "args": {"query": "미확인 배포"},
+            "id": "call_empty",
+            "type": "tool_call",
+        }]),
+        AIMessage(content="미확인 배포는 완료되었습니다."),
+    ])
+    monkeypatch.setattr(
+        qa_tools.qa_engine,
+        "_build_context",
+        lambda *args, **kwargs: ("", [], {}),
+    )
+
+    result = _run_agentic_qa(1, "미확인 배포가 완료됐어?", model=fake)
+
+    assert result["answer"] == "프로젝트 기록에서 확인되지 않습니다."
+    assert "완료되었습니다" not in result["answer"]
+    assert result["debug"]["evidence"]["project"] == {
+        "lookup_completed": True,
+        "has_substantive_evidence": False,
+        "empty_results": 1,
+        "zero_count_results": 0,
+        "error_results": 0,
+        "invalid_results": 0,
+        "contextless_ok_results": 0,
+        "structured_fallback_results": 0,
+        "raw_search_completed": True,
+        "source_ids": [],
+        "model_context_count": 0,
+    }
+
+
+def test_empty_project_result_uses_server_fallback_when_model_answer_is_blank(
+    monkeypatch,
+):
+    """empty의 최종 문구는 모델 출력이 아니라 서버에서 보장한다."""
+    fake = _ToolCallingFake([
+        AIMessage(content="", tool_calls=[{
+            "name": "search_hybrid_vector_rag",
+            "args": {"query": "미확인 배포"},
+            "id": "call_empty_blank_final",
+            "type": "tool_call",
+        }]),
+        AIMessage(content=""),
+    ])
+    monkeypatch.setattr(
+        qa_tools.qa_engine,
+        "_build_context",
+        lambda *args, **kwargs: ("", [], {}),
+    )
+
+    result = _run_agentic_qa(1, "미확인 배포가 완료됐어?", model=fake)
+
+    assert result["answer"] == "프로젝트 기록에서 확인되지 않습니다."
+    assert result["debug"]["evidence"]["project"]["empty_results"] == 1
+
+
+def test_valid_attachment_answer_survives_normal_empty_project_lookup(monkeypatch):
+    """프로젝트 조회가 정상 empty여도 현재 첨부에서 확인한 답은 보존한다."""
+    fake = _ToolCallingFake([
+        AIMessage(content="", tool_calls=[{
+            "name": "search_hybrid_vector_rag",
+            "args": {"query": "배포 담당자"},
+            "id": "call_empty_project",
+            "type": "tool_call",
+        }]),
+        AIMessage(content="첨부를 보면 배포 담당자는 Aurora입니다."),
+    ])
+    monkeypatch.setattr(
+        qa_tools.qa_engine,
+        "_build_context",
+        lambda *args, **kwargs: ("", [], {}),
+    )
+
+    result = _run_agentic_qa(
+        1,
+        "배포 담당자는 누구야?",
+        attachment_context="[첨부 자료]\n배포 담당자는 Aurora",
+        attachment_sources=["note.txt"],
+        model=fake,
+    )
+
+    assert result["answer"] == "첨부를 보면 배포 담당자는 Aurora입니다."
+    assert result["debug"]["evidence"]["attachment"]["available"] is True
+    assert result["debug"]["evidence"]["project"]["has_substantive_evidence"] is False
+    assert result["sources"] == ["note.txt"]
+
+
+def test_attachment_evidence_does_not_mask_project_tool_error(monkeypatch):
+    """유효 첨부가 있어도 프로젝트 Tool 오류만으로는 답변하지 않는다."""
+    fake = _ToolCallingFake([
+        AIMessage(content="", tool_calls=[{
+            "name": "search_hybrid_vector_rag",
+            "args": {"query": "배포 상태"},
+            "id": "call_failed_project",
+            "type": "tool_call",
+        }]),
+        AIMessage(content="첨부를 근거로 배포가 완료됐다고 답합니다."),
+    ])
+    monkeypatch.setattr(
+        qa_tools.qa_engine,
+        "_build_context",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ConnectionError("project lookup unavailable")
+        ),
+    )
+
     with pytest.raises(RuntimeError, match="no valid evidence"):
-        run_agentic_qa(1, "SDK 담당자는?", model=fake)
+        _run_agentic_qa(
+            1,
+            "배포 상태는?",
+            attachment_context="[첨부 자료]\n배포 완료",
+            attachment_sources=["note.txt"],
+            attachment_evidence=[{"extraction_status": "ok"}],
+            model=fake,
+        )
+
+
+def test_structured_zero_at_round_cap_fails_without_raw_fallback(monkeypatch):
+    """라운드 상한이 원문 fallback을 막으면 0건을 최종 근거로 쓰지 않는다."""
+    fake = _ToolCallingFake([
+        AIMessage(content="", tool_calls=[{
+            "name": "query_sql_state",
+            "args": {
+                "operation": "count",
+                "category": "action",
+                "completion_status": "open",
+            },
+            "id": "call_zero_at_cap",
+            "type": "tool_call",
+        }]),
+        AIMessage(content="미완료 액션은 0건입니다."),
+    ])
+    monkeypatch.setattr(qa_tools.mysql_search, "search", lambda *args, **kwargs: [])
+    build_context = MagicMock()
+    monkeypatch.setattr(qa_tools.qa_engine, "_build_context", build_context)
+
+    with pytest.raises(RuntimeError, match="no valid evidence"):
+        _run_agentic_qa(
+            1,
+            "미완료 액션은 몇 개야?",
+            model=fake,
+            max_tool_rounds=1,
+        )
 
     build_context.assert_not_called()
+
+
+def test_prior_raw_search_does_not_satisfy_later_structured_zero_fallback(
+    monkeypatch,
+):
+    """0건 이전의 다른 원문 조회로 필수 fallback을 충족한 척하지 않는다."""
+    fake = _ToolCallingFake([
+        AIMessage(content="", tool_calls=[{
+            "name": "search_hybrid_vector_rag",
+            "args": {"query": "배포 일정"},
+            "id": "call_prior_search",
+            "type": "tool_call",
+        }]),
+        AIMessage(content="", tool_calls=[{
+            "name": "query_sql_state",
+            "args": {
+                "operation": "count",
+                "category": "action",
+                "completion_status": "open",
+            },
+            "id": "call_later_zero",
+            "type": "tool_call",
+        }]),
+        AIMessage(content="미완료 액션은 0건입니다."),
+    ])
+    monkeypatch.setattr(qa_tools.mysql_search, "search", lambda *args, **kwargs: [])
+    build_context = MagicMock(return_value=(
+        "배포 일정 근거",
+        ["schedule.md"],
+        {},
+    ))
+    monkeypatch.setattr(qa_tools.qa_engine, "_build_context", build_context)
+
+    with pytest.raises(RuntimeError, match="no valid evidence"):
+        _run_agentic_qa(
+            1,
+            "배포 일정과 미완료 액션 수를 알려줘",
+            question_scope={
+                "operation": "count",
+                "category": "action",
+                "completion_status": "open",
+            },
+            model=fake,
+            max_tool_rounds=2,
+        )
+
+    build_context.assert_not_called()
+
+
+def test_later_project_error_is_not_masked_by_attachment_or_earlier_success(
+    monkeypatch,
+):
+    """이전 성공 뒤 발생한 오류는 첨부나 과거 성공으로 복구된 것으로 보지 않는다."""
+    fake = _ToolCallingFake([
+        AIMessage(content="", tool_calls=[{
+            "name": "search_hybrid_vector_rag",
+            "args": {"query": "배포 일정"},
+            "id": "call_success",
+            "type": "tool_call",
+        }]),
+        AIMessage(content="", tool_calls=[{
+            "name": "search_hybrid_vector_rag",
+            "args": {"query": "배포 담당자"},
+            "id": "call_later_error",
+            "type": "tool_call",
+        }]),
+        AIMessage(content="첨부를 근거로 담당자는 Aurora라고 답합니다."),
+    ])
+    build_context = MagicMock(side_effect=[
+        ("배포 일정 근거", ["schedule.md"], {}),
+        ConnectionError("owner lookup unavailable"),
+    ])
+    monkeypatch.setattr(qa_tools.qa_engine, "_build_context", build_context)
+
+    with pytest.raises(RuntimeError, match="no valid evidence"):
+        _run_agentic_qa(
+            1,
+            "배포 담당자와 일정은?",
+            attachment_context="[첨부 자료]\n릴리즈명은 Aurora",
+            attachment_sources=["note.txt"],
+            attachment_evidence=[{"extraction_status": "ok"}],
+            model=fake,
+        )
+
+    assert build_context.call_count == 2

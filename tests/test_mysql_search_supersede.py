@@ -151,8 +151,16 @@ def test_hidden_successor_does_not_hide_published_predecessor():
 @pytest.mark.parametrize(
     "kwargs, expected_fragments, expected_params",
     [
-        ({"completed": True}, ["m.completion_status = %s"], [1, "completed"]),
-        ({"completed": False}, ["m.completion_status = %s"], [1, "open"]),
+        (
+            {"completed": True},
+            ["m.category = %s", "m.completion_status = %s"],
+            [1, "action", "completed"],
+        ),
+        (
+            {"completed": False},
+            ["m.category = %s", "m.completion_status = %s"],
+            [1, "action", "open"],
+        ),
         (
             {"text_query": "API_v2 100%!"},
             ["CONCAT_WS(' ', m.content, m.topic, m.reason) LIKE %s ESCAPE '!'"],
@@ -160,16 +168,21 @@ def test_hidden_successor_does_not_hide_published_predecessor():
         ),
         (
             {"overdue": True},
-            ["m.due_date < CURDATE()", "m.completion_status = 'open'"],
-            [1],
+            [
+                "m.category = %s",
+                "m.due_date < CURDATE()",
+                "m.completion_status = 'open'",
+            ],
+            [1, "action"],
         ),
         (
             {"due_within_days": 7},
             [
+                "m.category = %s",
                 "m.due_date >= CURDATE()",
                 "m.due_date <= DATE_ADD(CURDATE(), INTERVAL 7 DAY)",
             ],
-            [1],
+            [1, "action"],
         ),
     ],
 )
@@ -189,6 +202,88 @@ def test_filter_predicates_combine_with_supersede_mode(
         assert _ACTIVE_PREDICATE in sql
 
     assert params == expected_params
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"due_within_days": -1},
+        {"due_within_days": 366},
+        {"due_within_days": 3, "overdue": True},
+        {"completion_status": "completed", "overdue": True},
+        {"completion_status": "open", "category": "issue"},
+        {"overdue": False},
+    ],
+)
+def test_invalid_action_filter_combinations_fail_before_query(kwargs):
+    with pytest.raises(ValueError):
+        mysql_search.search(1, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"due_within_days": 1.9},
+        {"due_within_days": True},
+        {"overdue": 1},
+        {"completed": 0},
+        {"include_superseded": 1},
+        {"owner": 9},
+        {"text_query": False},
+    ],
+)
+def test_coercible_filter_shapes_fail_before_query(kwargs):
+    with pytest.raises(ValueError):
+        mysql_search.search(1, **kwargs)
+
+
+def test_search_collapses_join_rows_and_preserves_sorted_sources():
+    rows = [
+        {
+            "id": 3,
+            "project_id": 1,
+            "category": "decision",
+            "content": "Choose relay",
+            "source": "fallback.md",
+            "source_kind": "repository",
+            "ms_doc_id": None,
+            "ms_repo_id": 9,
+            "source_type": "markdown",
+            "source_path": "z.md",
+            "source_ref": "b",
+            "source_url": None,
+        },
+        {
+            "id": 3,
+            "project_id": 1,
+            "category": "decision",
+            "content": "Choose relay",
+            "source": "fallback.md",
+            "source_kind": "repository",
+            "ms_doc_id": None,
+            "ms_repo_id": 2,
+            "source_type": "markdown",
+            "source_path": "a.md",
+            "source_ref": "a",
+            "source_url": None,
+        },
+    ]
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [dict(row) for row in rows]
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cursor
+
+    with patch("backend.retriever.mysql_search.get_connection", return_value=conn):
+        result = mysql_search.search(1)
+
+    assert len(result) == 1
+    assert [
+        (info["repo_id"], info["path"])
+        for info in result[0]["source_infos"]
+    ] == [(2, "a.md"), (9, "z.md")]
+    assert result[0]["source_info"] == result[0]["source_infos"][0]
+    sql = cursor.execute.call_args.args[0]
+    assert "ms.repo_id ASC, ms.source_path ASC, ms.id ASC" in sql
 
 
 # --- TASK-004: fetch_supersede_graph 전용 조회 -----------------------------------

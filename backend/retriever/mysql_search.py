@@ -1,3 +1,4 @@
+import unicodedata
 from typing import Optional, List, Dict
 from ..db.mysql import get_connection
 from .index_scope import (
@@ -21,6 +22,73 @@ def _resolve_scope(
     if scope.project_id != project_id:
         raise ValueError("index_scope project_id does not match project_id")
     return scope
+
+
+def _optional_text(value, field: str) -> Optional[str]:
+    if value is None:
+        return None
+    if type(value) is not str:
+        raise ValueError(f"{field} must be a string")
+    normalized = unicodedata.normalize("NFKC", value).strip()
+    if not normalized:
+        raise ValueError(f"{field} cannot be empty")
+    return normalized
+
+
+def _source_info_from_row(row: dict) -> dict:
+    return {
+        "kind": row.pop("source_kind", None),
+        "doc_id": row.pop("ms_doc_id", None),
+        "repo_id": row.pop("ms_repo_id", None),
+        "type": row.pop("source_type", None),
+        "path": row.pop("source_path", None),
+        "ref": row.pop("source_ref", None),
+        "url": row.pop("source_url", None),
+    }
+
+
+def _source_info_key(info: dict) -> tuple[str, ...]:
+    return tuple(
+        "" if info.get(field) is None else str(info.get(field))
+        for field in ("kind", "doc_id", "repo_id", "type", "path", "ref", "url")
+    )
+
+
+def _collapse_joined_sources(rows: list[dict]) -> list[dict]:
+    """Collapse JOIN-expanded memory rows with deterministic provenance."""
+    result: list[dict] = []
+    by_id: dict[object, dict] = {}
+    sources_by_id: dict[object, dict[tuple[str, ...], dict]] = {}
+    empty_source = {
+        "kind": None,
+        "doc_id": None,
+        "repo_id": None,
+        "type": None,
+        "path": None,
+        "ref": None,
+        "url": None,
+    }
+    for position, raw_row in enumerate(rows):
+        row = dict(raw_row)
+        info = _source_info_from_row(row)
+        key = row.get("id")
+        if key is None:
+            key = ("row", position)
+        if key not in by_id:
+            by_id[key] = row
+            sources_by_id[key] = {}
+            result.append(row)
+        if any(value is not None for value in info.values()):
+            sources_by_id[key][_source_info_key(info)] = info
+
+    for key, row in by_id.items():
+        infos = [
+            sources_by_id[key][info_key]
+            for info_key in sorted(sources_by_id[key])
+        ]
+        row["source_infos"] = infos
+        row["source_info"] = infos[0] if infos else dict(empty_source)
+    return result
 
 
 def _visible_successor_exists(
@@ -50,13 +118,50 @@ def search(
     text_query: Optional[str] = None,
     index_scope: ProjectIndexScope | None = None,
 ) -> List[Dict]:
+    if type(project_id) is not int or project_id <= 0:
+        raise ValueError("project_id must be a positive integer")
+    if category is not None and (
+        type(category) is not str
+        or category not in ("decision", "action", "issue", "risk")
+    ):
+        raise ValueError("category is invalid")
+    owner = _optional_text(owner, "owner")
+    text_query = _optional_text(text_query, "text_query")
+    if completed is not None and type(completed) is not bool:
+        raise ValueError("completed must be a boolean")
+    if overdue is not None and type(overdue) is not bool:
+        raise ValueError("overdue must be a boolean")
+    if type(include_superseded) is not bool:
+        raise ValueError("include_superseded must be a boolean")
     if completed is not None:
         legacy_status = "completed" if completed else "open"
         if completion_status not in (None, legacy_status):
             raise ValueError("completed and completion_status conflict")
         completion_status = legacy_status
+    if completion_status is not None and type(completion_status) is not str:
+        raise ValueError("completion_status must be a string")
     if completion_status not in (None, "open", "completed", "unknown"):
         raise ValueError("completion_status must be open, completed, or unknown")
+    if overdue not in (None, True):
+        raise ValueError("overdue must be true when provided")
+    if overdue is True and due_within_days is not None:
+        raise ValueError("overdue and due_within_days conflict")
+    if overdue is True and completion_status not in (None, "open"):
+        raise ValueError("overdue is only compatible with open actions")
+    if due_within_days is not None:
+        if type(due_within_days) is not int:
+            raise ValueError("due_within_days must be an integer")
+        if not 0 <= due_within_days <= 365:
+            raise ValueError("due_within_days must be between 0 and 365")
+
+    action_filter_requested = any(
+        value is not None
+        for value in (completion_status, due_within_days, overdue)
+    )
+    if action_filter_requested:
+        if category not in (None, "action"):
+            raise ValueError("status and due filters apply only to action rows")
+        category = "action"
 
     scope = _resolve_scope(project_id, index_scope)
     conditions = ["m.project_id = %s"]
@@ -92,10 +197,11 @@ def search(
         conditions.append("m.due_date < CURDATE()")
         conditions.append("m.completion_status = 'open'")
     if due_within_days is not None:
-        days = max(0, min(int(due_within_days), 365))
         conditions.append("m.due_date IS NOT NULL")
         conditions.append("m.due_date >= CURDATE()")
-        conditions.append(f"m.due_date <= DATE_ADD(CURDATE(), INTERVAL {days} DAY)")
+        conditions.append(
+            f"m.due_date <= DATE_ADD(CURDATE(), INTERVAL {due_within_days} DAY)"
+        )
 
     where = " AND ".join(conditions)
     sql = (
@@ -105,7 +211,8 @@ def search(
         f" FROM memory m"
         f" LEFT JOIN memory_sources ms ON ms.memory_id = m.id"
         f" WHERE {where}"
-        f" ORDER BY (m.sort_order IS NULL), m.sort_order ASC, m.created_at DESC"
+        f" ORDER BY (m.sort_order IS NULL), m.sort_order ASC, m.created_at DESC,"
+        f" ms.repo_id ASC, ms.source_path ASC, ms.id ASC"
     )
 
     conn = get_connection()
@@ -116,19 +223,7 @@ def search(
     finally:
         conn.close()
 
-    result = []
-    for row in rows:
-        row["source_info"] = {
-            "kind":    row.pop("source_kind", None),
-            "doc_id":  row.pop("ms_doc_id", None),
-            "repo_id": row.pop("ms_repo_id", None),
-            "type":    row.pop("source_type", None),
-            "path":    row.pop("source_path", None),
-            "ref":     row.pop("source_ref", None),
-            "url":     row.pop("source_url", None),
-        }
-        result.append(row)
-    return result
+    return _collapse_joined_sources(rows)
 
 
 def fetch_supersede_graph(
@@ -172,7 +267,7 @@ def fetch_supersede_graph(
         " WHERE visible_predecessor.project_id=m.project_id"
         " AND visible_predecessor.superseded_by=m.id"
         f" AND {predecessor_visible_sql}))"
-        " ORDER BY m.id ASC"
+        " ORDER BY m.id ASC, ms.repo_id ASC, ms.source_path ASC, ms.id ASC"
     )
     conn = get_connection()
     try:
@@ -189,16 +284,4 @@ def fetch_supersede_graph(
             rows = cursor.fetchall()
     finally:
         conn.close()
-    # 체인 행에도 source_info(repo_id·path)를 실어 충돌 없는 출처 라벨(repo#N)을
-    # 만들 수 있게 한다(리뷰 C-002) — search()와 동일 형식.
-    for row in rows:
-        row["source_info"] = {
-            "kind":    row.pop("source_kind", None),
-            "doc_id":  row.pop("ms_doc_id", None),
-            "repo_id": row.pop("ms_repo_id", None),
-            "type":    row.pop("source_type", None),
-            "path":    row.pop("source_path", None),
-            "ref":     row.pop("source_ref", None),
-            "url":     row.pop("source_url", None),
-        }
-    return rows
+    return _collapse_joined_sources(rows)
