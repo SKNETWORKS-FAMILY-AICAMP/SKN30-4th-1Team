@@ -11,7 +11,6 @@ const ko: Record<string, string> = {
   "Delete": "삭제",
   "Delete again": "다시 삭제",
   "Send a message": "메시지를 입력하세요",
-  "Project Briefing": "프로젝트 브리핑",
 };
 
 const en: Record<string, string> = {
@@ -188,7 +187,6 @@ const en: Record<string, string> = {
   "새 프로젝트": "New Project",
   "프로젝트": "Projects",
   "프로젝트 이름 변경": "Rename project",
-  "{name}에 새 채팅 만들기": "New chat in {name}",
   "{name} 메뉴": "{name} menu",
   "채팅 이름 변경": "Rename chat",
   "사이드바 크기 조절": "Resize sidebar",
@@ -209,13 +207,6 @@ const en: Record<string, string> = {
   "마감 임박 {count}건": "{count} due soon",
   "기한 초과 {count}건": "{count} overdue",
   "서버에서 찾을 수 없어 로컬 캐시를 표시 중": "Not found on the server, showing local cache",
-  "프로젝트 분석 중": "Analyzing project",
-  "프로젝트를 분석하고 있습니다": "Analyzing your project",
-  "프로젝트 설명을 읽는 중": "Reading the project description",
-  "연결된 자료를 훑는 중": "Reviewing connected sources",
-  "핵심 결정과 액션을 정리하는 중": "Organizing key decisions and actions",
-  "브리핑을 작성하는 중": "Writing the briefing",
-  "{step} · {seconds}초": "{step} · {seconds}s",
   "{seconds}초": "{seconds}s",
   "{name}에서 무엇을 도와드릴까요?": "What can I help with in {name}?",
   "{seconds}초 동안 생각함": "Thought for {seconds}s",
@@ -244,8 +235,6 @@ const en: Record<string, string> = {
   "파일 추가": "Add file",
   "지원 문서": "Supported documents",
   "PaiM에 첨부할 파일 선택": "Choose files to attach to PaiM",
-  "{added}개 추가 · {skipped}개 제외 — 채팅 첨부는 md/txt/pdf를 지원합니다":
-    "{added} added · {skipped} skipped — chat attachments support md, txt, and pdf.",
   "업로드 결과 · {done}개 완료 · {failed}개 실패 · {cancelled}개 취소":
     "Upload result · {done} completed · {failed} failed · {cancelled} cancelled",
   "자료 {added}개 추가 · {failed}개 읽기 실패":
@@ -267,15 +256,9 @@ const en: Record<string, string> = {
   "프로젝트 설명": "Project description",
   "프로젝트 설명을 적어두면 PaiM이 맥락을 잡는 데 도움이 됩니다.": "Describe the project so PaiM can understand the context.",
   "프로젝트 맥락 추가": "Add project context",
-  "회의록, README, PDF, 스펙 문서 등 관련 자료를 추가해 주세요.":
-    "Add relevant notes, READMEs, PDFs, specs, and other sources.",
   "자료를 추가해 프로젝트 맥락을 만드세요": "Add sources to build project context",
   "파일을 드래그하거나 아래 버튼을 이용해 추가할 수 있습니다.":
     "Drag files here or use the buttons below.",
-  "자료를 추가하거나 설명만으로 바로 대화를 시작하세요": "Add sources, or start chatting with only a description.",
-  "{count}개 자료가 연결되었습니다": "{count} sources connected",
-  "자료를 여기에 끌어다 놓으세요": "Drop sources here",
-  "회의록, README, PDF, 스펙 문서를 읽고 프로젝트 맥락을 정리합니다": "PaiM reads notes, READMEs, PDFs, and specs to organize project context.",
   "{count}개 완료": "{count} done",
   "{count}개 처리 중": "{count} processing",
   "{count}개 실패": "{count} failed",
@@ -290,7 +273,6 @@ const en: Record<string, string> = {
   "자료 삭제 확인": "Confirm source deletion",
   "한 번 더 누르면 삭제": "Press again to delete",
   "외 {count}개 자료 보기": "View {count} more sources",
-  "시작하기": "Start",
   "추가": "Add",
   "파일 선택": "Select files",
   "폴더 선택": "Select folder",
@@ -301,7 +283,6 @@ const en: Record<string, string> = {
   "기록 없음": "No activity",
   "연결 상태": "Connection status",
   "메모리 연결": "Memory links",
-  "{count}개 연결됨": "{count} linked",
   "연결된 메모리가 없습니다": "No linked memory yet",
   "GitHub 동기화를 실행하면 repo 기반 메모리가 표시됩니다.": "Run GitHub sync to show repo-based memory.",
   "최근 활동": "Recent activity",
@@ -310,7 +291,7 @@ const en: Record<string, string> = {
   "설명이나 자료를 추가하면 분석할 수 있습니다": "Add a description or source to enable analysis.",
   "분석 중": "Analyzing",
   "분석 시작": "Start analysis",
-  "분석 없이 채팅": "Chat without analysis",
+  "설정 완료": "Complete setup",
   "추출될 항목": "Extracted items",
   "액션": "Actions",
   "결정": "Decisions",
@@ -318,12 +299,8 @@ const en: Record<string, string> = {
   "서버 프로젝트 메모리 개수를 표시합니다": "Showing server project memory counts.",
   "자료 업로드 후 서버 메모리 개수를 표시합니다": "Server memory counts appear after upload.",
   "업로드와 분석 결과가 서버에 반영되면 자동으로 갱신됩니다.": "Updates automatically when uploads and analysis are saved on the server.",
-  "새 프로젝트 시작하기": "Start new project",
-  "프로젝트의 맥락을 놓치지 마세요": "Keep the project context within reach",
-  "자료와 대화를 연결해 결정, 액션, 이슈와 리스크를 한곳에서 정리합니다.": "Connect sources and conversations to organize decisions, actions, issues, and risks in one place.",
   "프로젝트와 대화": "Projects and conversations",
   "프로젝트 작업": "Project actions",
-  "프로젝트 브리핑": "Project briefing",
   "프로젝트 보조 패널": "Project side panel",
   "프로젝트 패널 크기 조절": "Resize project panel",
   "도구 선택": "Choose tool",
@@ -409,9 +386,8 @@ const en: Record<string, string> = {
   "최소화": "Minimize",
   "최대화": "Maximize",
   "프로젝트 상태": "Project status",
-  "프로젝트 전환": "Switch project",
   "대화": "Chats",
-  "분석하면 설명과 자료를 읽고 첫 브리핑을 만든 뒤 채팅으로 이어집니다.": "PaiM reads the description and sources, creates the first briefing, then opens chat.",
+  "분석하면 설명과 자료를 읽고 프로젝트 상세 Home으로 이동합니다.": "PaiM reads the description and sources, then opens the project detail Home.",
   "프로젝트 패널 닫기": "Close project panel",
   "Action": "Action",
   "GitHub 연결": "GitHub connection",
@@ -538,6 +514,10 @@ const en: Record<string, string> = {
   "지원 문서 {count}개 서버 업로드 중...": "Uploading {count} supported documents to the server...",
   "취소한 업로드의 서버 문서를 정리하지 못했습니다":
     "The server copy of the cancelled upload could not be removed",
+  "취소한 업로드의 서버 정리를 계속 재시도합니다":
+    "Retrying cleanup of the canceled server upload.",
+  "삭제 예약을 저장하지 못했습니다. 앱을 닫기 전에 서버 정리를 다시 시도합니다":
+    "Could not save the cleanup request. Retrying server cleanup before the app closes.",
   "서버에 연결되지 않아 로컬 채팅만 삭제했습니다": "The server is offline, so only the local chat was deleted.",
   "서버에 연결되지 않아 프로젝트를 삭제할 수 없습니다": "The project cannot be deleted while the server is offline.",
   "드롭한 파일이나 폴더를 등록할 수 없습니다": "Could not add the dropped files or folders.",
@@ -545,6 +525,83 @@ const en: Record<string, string> = {
   "프로젝트 파일을 업로드할 수 없습니다": "Could not upload the project files.",
   "데스크톱 앱에서 폴더를 업로드할 수 있습니다": "Folders can be uploaded from the desktop app.",
   "프로젝트 폴더를 업로드할 수 없습니다": "Could not upload the project folder.",
+  "회의 음성": "Meeting audio",
+  "회의 음성 추가": "Add meeting audio",
+  "회의 음성 전사": "Transcribe meeting audio",
+  "{name} 회의 음성 상태": "{name} meeting audio status",
+  "녹음 파일을 전사해 프로젝트 메모리로 반영합니다.":
+    "Transcribe a recording and add the results to project memory.",
+  "지원 형식 및 제한: {details}": "Supported formats and limit: {details}",
+  "회의 날짜": "Meeting date",
+  "회의에서 언급된 상대 날짜를 해석할 기준일입니다.":
+    "This date is used to interpret relative dates mentioned in the meeting.",
+  "올바른 회의 날짜를 선택해 주세요": "Choose a valid meeting date.",
+  "전사 후 자동 분석": "Automatic analysis after transcription",
+  "서버가 음성을 전사한 뒤 결정·액션·이슈·리스크를 추출합니다. 처리에는 몇 분이 걸릴 수 있습니다.":
+    "The server transcribes the audio, then extracts decisions, actions, issues, and risks. Processing may take several minutes.",
+  "CLOVA 회의 음성 계약에서 지원하는 형식만 선택할 수 있습니다.":
+    "You can select only formats supported by the CLOVA meeting-audio contract.",
+  "상태 새로고침": "Refresh status",
+  "회의 음성은 한 번에 하나씩 올려 주세요":
+    "Upload one meeting recording at a time.",
+  "음성 파일은 프로젝트 자료함의 회의 녹음 업로드를 이용해 주세요.":
+    "Use Meeting recording upload in the project library for audio files.",
+  "지원 오디오": "Supported audio",
+  "전사할 회의 음성 선택": "Select meeting audio to transcribe",
+  "전사 시작": "Start transcription",
+  "회의 음성 · {provider}": "Meeting audio · {provider}",
+  "메모리 분석 {done}/{total}": "Analyzing memory {done}/{total}",
+  "프로젝트 메모리 {count}개 추출": "Extracted {count} project memory items",
+  "PaiM에게 제공할 파일·폴더·회의 음성을 업로드하세요.":
+    "Upload files, folders, or meeting audio for PaiM.",
+  "회의 음성 분석 완료 · 프로젝트 메모리 {count}개 추출":
+    "Meeting audio analyzed · extracted {count} project memory items",
+  "회의 음성 분석을 완료했습니다": "Meeting audio analysis complete",
+  "지원하지 않는 회의 음성 형식입니다 · {formats}":
+    "Unsupported meeting audio format · {formats}",
+  "회의 음성 파일이 비어 있습니다": "The meeting audio file is empty.",
+  "{name}은 {limit}를 초과해 전사할 수 없습니다":
+    "{name} exceeds {limit} and cannot be transcribed.",
+  "데스크톱 앱에서 회의 음성을 업로드할 수 있습니다":
+    "Meeting audio can be uploaded from the desktop app.",
+  "회의 음성 파일을 선택할 수 없습니다": "Could not select the meeting audio file.",
+  "서버에 다시 연결한 뒤 전사를 시작할 수 있습니다":
+    "Reconnect to the server before starting transcription.",
+  "회의 음성을 서버에 업로드하는 중입니다": "Uploading meeting audio to the server.",
+  "취소한 회의 음성의 서버 문서를 정리하지 못했습니다":
+    "Could not remove the canceled meeting audio from the server.",
+  "취소한 회의 음성의 서버 정리를 계속 재시도합니다":
+    "Retrying cleanup of the canceled meeting audio on the server.",
+  "회의 음성 전사를 시작했습니다 · {provider} · 화자 분리 지원":
+    "Started meeting transcription · {provider} · speaker diarization supported",
+  "회의 음성 전사를 시작했습니다 · {provider}":
+    "Started meeting transcription · {provider}",
+  "회의 음성을 업로드할 수 없습니다": "Could not upload the meeting audio.",
+  "회의 음성 업로드를 시작할 수 없습니다": "Could not start the meeting audio upload.",
+  "회의 음성 처리 지연 — 앱을 다시 열면 상태를 이어서 확인합니다":
+    "Meeting audio is taking longer — reopen the app to resume status checks.",
+  "서버 연결을 기다린 뒤 회의 음성 상태를 다시 확인합니다":
+    "Waiting for the server, then checking the meeting audio status again.",
+  "회의 음성 처리 상태를 확인할 수 없습니다":
+    "Could not check the meeting audio processing status.",
+  "회의 음성 파일이 서버 허용 크기를 초과했습니다":
+    "The meeting audio exceeds the server size limit.",
+  "전사 결과를 프로젝트 메모리로 반영하지 못했습니다":
+    "Could not add the transcription results to project memory.",
+  "음성 전사 서비스 인증 정보가 설정되지 않았습니다":
+    "Audio transcription credentials are not configured.",
+  "음성 전사에 필요한 서버 구성 요소가 없습니다":
+    "The server is missing a required audio transcription component.",
+  "회의 음성에서 인식할 수 있는 발화를 찾지 못했습니다":
+    "No recognizable speech was found in the meeting audio.",
+  "음성 전사 서비스에서 처리에 실패했습니다":
+    "The audio transcription service could not process the recording.",
+  "서버가 이 회의 음성 형식을 지원하지 않습니다":
+    "The server does not support this meeting audio format.",
+  "회의 음성 처리가 취소되었습니다": "Meeting audio processing was canceled.",
+  "회의 음성 처리가 중단되어 다시 업로드해야 합니다":
+    "Meeting audio processing stopped and the file must be uploaded again.",
+  "회의 음성을 처리하지 못했습니다": "Could not process the meeting audio.",
   "하위 폴더를 읽을 수 없습니다": "Could not read the subfolder.",
   "서버 문서는 로컬 경로가 없어 미리볼 수 없습니다":
     "Server documents cannot be previewed because they do not have a local path.",

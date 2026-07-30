@@ -8,6 +8,7 @@ import types
 from unittest.mock import MagicMock, patch
 
 from backend.retriever import qa_engine
+from backend.retriever.index_scope import ProjectIndexScope
 
 
 # ── 출처 라벨(충돌 없는 식별자) ────────────────────────────────────────────────
@@ -52,6 +53,7 @@ def test_system_qa_has_citation_rule():
     assert "출처 인용" in qa_engine.SYSTEM_QA
     # 유형 라벨을 출처로 쓰지 말라는 지시가 있어야 한다.
     assert "유형 이름을" in qa_engine.SYSTEM_QA
+    assert "컨텍스트에 없는 출처를 지어내지 마라" in qa_engine.SYSTEM_QA
 
 
 # ── 원문 청크 컨텍스트에 출처 마커가 실리는지 (_build_context 수준) ────────────
@@ -84,6 +86,11 @@ def test_chroma_context_carries_source_marker(monkeypatch):
             "item_type": "document", "source_path": "", "repo_id": -1}
     monkeypatch.setattr(qa_engine, "_generate_multi_queries",
                         lambda q: ["채팅 착수"])
+    monkeypatch.setattr(
+        qa_engine,
+        "load_project_index_scope",
+        lambda project_id: ProjectIndexScope(project_id),
+    )
     monkeypatch.setattr(qa_engine.mysql_search, "search", lambda pid, **kw: [])
     monkeypatch.setattr(qa_engine.mysql_search, "fetch_supersede_graph",
                         lambda pid: [])

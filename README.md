@@ -3,7 +3,7 @@
 > **내가 쉬는 동안 프로젝트를 파악해주는 AI PM.**
 > 회의록·문서·GitHub 활동을 하나의 **살아있는 메모리**로 쌓고, AI가 스스로 Issue와 PR을 읽어 액션 완료를 감지하고 다음 할 일을 제안합니다.
 
-**Download:** https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/releases
+**Download:** https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/releases
 
 ![Python](https://img.shields.io/badge/Python-3.14-3776AB?style=flat-square&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-Backend-009688?style=flat-square&logo=fastapi&logoColor=white)
@@ -26,7 +26,7 @@
 
 - 회의록(.md/.txt/.pdf) 업로드 → LLM이 **결정·액션·이슈·리스크**로 구조화 추출
 - GitHub repo 연결 → 머지된 PR이 열린 액션을 해결하면 **완료 제안** (승인은 항상 사람)
-- 질문 의도별 3경로 Q&A — 조회형은 **DB 직조회로 정답 보장**, 탐색형은 하이브리드 RAG
+- Agentic Q&A — 오케스트레이터가 SQL 상태·하이브리드 근거·프로젝트 조망 도구를 필요에 따라 조합
 - 앱을 열면 "지난 확인 이후" 변화를 **델타 브리핑**으로
 - macOS·Windows 데스크탑 앱, 태그 push 시 CI 자동 릴리즈
 
@@ -35,14 +35,14 @@
              ├→ LLM 구조화 추출 → 프로젝트 메모리 (MySQL + ChromaDB + 응축 요약)
 repo 연결  ─┘
 repo sync → 머지 PR × 열린 액션 대조(Reconciler) → 완료 제안 → 사용자 승인
-질문 → 의도 라우터 → 조회(SQL 직조회) / 조망(요약) / 탐색(멀티쿼리 RAG) → 출처 있는 답변
+질문(+ 임시 첨부) → Agentic 오케스트레이터 → SQL 상태 / 하이브리드 근거 / 프로젝트 조망 도구 → 출처 있는 답변
 ```
 
 ## Architecture
 
 ![PaiM LangGraph 아키텍처](desktop/assets/readme/PaiM_LangGraph.png)
 
-질문은 Router가 조회형(SQL) · 조망형(project_memory) · 탐색형(RAG)으로 분기하고, repo가 indexed 되면 Reconciler가 완료 제안만 생성합니다.
+프로젝트 Q&A는 하나의 Agentic 오케스트레이터가 필요한 읽기 전용 도구를 호출해 근거를 모은 뒤 답합니다. repo가 indexed 되면 Reconciler가 완료 제안만 생성합니다.
 
 ## Team
 
@@ -77,8 +77,8 @@ repo sync → 머지 PR × 열린 액션 대조(Reconciler) → 완료 제안 �
 │   │                                #   suggestions · delta · query 엔드포인트
 │   ├── pipeline/                    # 추출(extractor, 소스 타입별 지침) + 저장(ingestor)
 │   ├── reconciler/                  # PR→액션 완료 제안 (LangGraph, 배치 판정)
-│   ├── retriever/                   # 의도 라우터 · Q&A 엔진(하이브리드 RRF) · 메모리 벡터
-│   ├── chat/                        # AES-256-GCM 암호화 세션
+│   ├── retriever/                   # Agentic Q&A 도구 · 하이브리드 RRF · SQL 상태 · 메모리 벡터
+│   ├── chat/                        # 구형 서버 세션 API (AES-256-GCM, 폐기 예정)
 │   ├── llm/                         # LLM 클라이언트 (fast/quality 티어링 팩토리)
 │   ├── github/                      # GitHub App 연동 (설치 세션 · repo preview)
 │   └── db/                          # MySQL(schema.sql + migrate_v2~v9) · ChromaDB
@@ -98,7 +98,7 @@ repo sync → 머지 PR × 열린 액션 대조(Reconciler) → 완료 제안 �
 
 ### 사용자 — 릴리즈 설치
 
-1. [Releases](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-3rd-1Team/releases)에서 설치 파일 다운로드 — macOS `.dmg`, Windows `-setup.exe` / `.msi`
+1. [Releases](https://github.com/SKNETWORKS-FAMILY-AICAMP/SKN30-4th-1Team/releases)에서 설치 파일 다운로드 — macOS `.dmg`, Windows `-setup.exe` / `.msi`
 2. macOS에서 "확인되지 않은 개발자" 경고 시: 시스템 설정 → 개인정보 보호 및 보안 → **그래도 열기** (코드 서명은 4차 로드맵)
 3. 로컬 백엔드 준비(아래) 후 앱 실행 — 설정에서 서버 주소 변경 가능
 
@@ -112,6 +112,13 @@ docker compose up -d      # MySQL — 스키마 자동 적용
 uv sync
 uv run uvicorn backend.main:app --port 8000
 ```
+
+Agentic 프로젝트 Q&A의 MVP 지원 계약은 공식 OpenAI API의
+`gpt-4.1-mini` 하나다. `.env`의 `LLM_PROVIDER=openai`와
+`OPENAI_MODEL=gpt-4.1-mini`를 유지하고 Q&A graph의 기본 모델은
+`get_agentic_qa_model()`로 생성해야 한다. 이 helper는 다른 provider/model 또는 사용자
+지정 OpenAI 호환 endpoint를 네트워크 호출 전에 명확한 설정 오류로 중단한다. 문서 추출
+등 일반 LLM factory의 기존 provider 분기는 제거하지 않았다.
 
 ### Windows 원클릭 실행 (`start-paim.bat`)
 
@@ -199,15 +206,17 @@ repo sync 시 머지된 PR과 열린 액션을 LLM이 배치 대조해, 해결�
 
 ![완료 제안 인박스](desktop/assets/readme/suggestions.png)
 
-### 3. 기억에 묻기 — 의도 라우터
+### 3. 기억에 묻기 — Agentic Q&A
 
-| 경로 | 대상 질문 | 방식 |
+| 도구 | 쓰는 경우 | 근거 |
 | --- | --- | --- |
-| 조회형 | "박제섭 담당 미완료 액션은?" | 필터 추출 → SQL 직조회 → 결정론 템플릿 (**정답 보장**) |
-| 조망형 | "전체 상황 정리해줘" | 응축 요약 직접 컨텍스트 (검색 없음) |
-| 탐색형 | "왜 이 방식을 선택했어?" | 멀티쿼리 재표현 → BM25+벡터 RRF 융합 → 출처 있는 생성 |
+| `query_structured_memory` | 담당자·상태·분류가 정해진 목록·개수 | SQL 구조화 상태 |
+| `search_project_evidence` | 이유·수치·담당자·변경 이력 | BM25+벡터 RRF 하이브리드 검색 |
+| `get_project_overview` | 프로젝트 전반 브리핑 | 프로젝트 요약 + 유효 Action Plan |
 
-채팅에 파일을 드래그하면 그 질문에서만 참고하는 임시 컨텍스트가 되며, 프로젝트 기억에는 남지 않습니다.
+오케스트레이터는 질문에 맞는 도구를 하나 이상 호출한 뒤 근거만으로 답합니다. `overview`는 별도 라우트가 아니라 이 도구를 조합하는 질문 유형입니다. 채팅에 파일을 드래그하면 검증·텍스트 추출 뒤 이번 질문에만 쓰는 임시 근거가 되며, 프로젝트 기억에는 남지 않습니다.
+
+이전 라우터 분기 구현은 실행 가능한 비교 기준선으로 [archive/legacy_qa_v1](archive/legacy_qa_v1/README.md)에 고정했습니다.
 
 ### 4. 자리 비운 사이 — 델타 브리핑
 
@@ -217,8 +226,8 @@ repo sync 시 머지된 PR과 열린 액션을 LLM이 배치 대조해, 해결�
 
 - **정확도 > 재현율** — Reconciler의 완료 매칭은 "애매하면 보고하지 않는다"가 규칙입니다(high/medium 확신 + 한 줄 근거 필수). 놓친 제안은 다음 동기화나 사람이 잡을 수 있지만, 틀린 완료 처리는 신뢰를 무너뜨리기 때문입니다.
 - **파괴적 변경은 제안-승인, 추가는 자동** — 메모리에 쌓는 것은 자동이지만 완료 처리처럼 상태를 바꾸는 일은 반드시 사람의 승인을 거칩니다. 메모리가 조용히 오염되지 않는 human-in-the-loop 구조입니다.
-- **자기검증하는 답변 그래프** — 탐색형 Q&A는 LangGraph로 검색 → 답변 → 검증 → (부족하면) 질의 확장 후 재검색 → 다음 할 일(plan) 제안까지 도는 그래프입니다. plan 생성이 실패해도 답변은 유지되는 best-effort 설계입니다.
-- **로컬 우선 + 암호화** — 백엔드는 `127.0.0.1`에만 바인딩되어 LAN에 노출되지 않고, 세션 대화는 AES-256-GCM으로 암호화 저장됩니다. 회의록이라는 민감 데이터를 다루는 도구로서의 기본기입니다.
+- **근거 우선 Agentic Q&A** — 하나의 오케스트레이터가 읽기 전용 도구를 호출해 근거를 확인한 뒤 답합니다.
+- **공유 지식은 서버, 개인 대화는 로컬** — 프로젝트 자료와 메모리는 서버에서 협업하고, 새 데스크톱의 채팅·초안은 계정과 서버별 WebView 로컬 저장소에만 보관합니다. 앱 전용 암호화 저장소 전환은 후속 과제입니다.
 
 ## Data Model
 
@@ -250,7 +259,7 @@ repo sync 시 머지된 PR과 열린 액션을 LLM이 배치 대조해, 해결�
 | 회의록 액션 추출 (헤더 없는 서술형) | 9/9건, 담당자 100% 정확 |
 | repo README 오추출 (소스 지침 적용 후) | 액션 4건 → **0건** |
 | PR→액션 완료 제안 | 6/6건 매칭 (전부 high confidence) |
-| 조회형 질문 정확도 | DB 직조회 — 담당·개수·마감 정답 보장 |
+| 구조화 상태 질문 | Agentic 도구가 SQL 상태 근거를 선택해 답변에 반영 |
 | 동일 질문 전/후 대비 | 승인 전 "진행 중" → 승인 후 "완료 (PR 근거)" |
 
 ## Roadmap
@@ -258,7 +267,7 @@ repo sync 시 머지된 PR과 열린 액션을 LLM이 배치 대조해, 해결�
 ### 3차 프로젝트 마무리 (현재 — 로컬 서버, 개인 사용)
 
 - [ ] 검색 품질 평가셋(골든 질문 20~30개) 구축 및 baseline 측정
-- [ ] 세션 기반 채팅에 RAG 내장 — 서버 측 대화 이력 축적
+- [ ] 개인 대화를 앱 전용 암호화 저장소로 이전 — 운영체제 보안 저장소에 키 보관
 - [ ] 임베딩 모델·리랭커 개선 — 평가셋 측정 결과 기반으로 결정
 
 ### 4차 프로젝트 (약 한 달 뒤 — 팀 서비스로 확장)

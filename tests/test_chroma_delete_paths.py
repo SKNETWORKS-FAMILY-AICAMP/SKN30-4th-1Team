@@ -27,14 +27,23 @@ def _silent_conn():
     return conn
 
 
-def test_clear_repo_indexed_data_uses_key_free_delete():
-    """저장소 재동기화 전 정리가 임베딩 클라이언트를 만들지 않는다."""
+def test_cleanup_repo_generation_uses_key_free_delete():
+    """실패한 세대 정리가 임베딩 클라이언트를 만들지 않는다."""
+    collection = MagicMock()
+    collection.get.return_value = {
+        "ids": ["repo:7:old:1", "repo:7:new:1"],
+        "metadatas": [
+            {"repo_id": 7, "repo_sync_run_id": "old"},
+            {"repo_id": 7, "repo_sync_run_id": "new"},
+        ],
+    }
     with patch.object(repository_module, "get_connection", return_value=_silent_conn()), \
-         patch("backend.db.chroma.delete_from_existing_collection") as key_free, \
+         patch("backend.db.chroma.get_existing_collection", return_value=collection) as key_free, \
          patch("backend.db.chroma.get_collection") as needs_key:
-        repository_module._clear_repo_indexed_data(repo_id=7)
+        repository_module._cleanup_repo_generation(repo_id=7, run_id="new")
 
-    key_free.assert_called_once_with(where={"repo_id": 7})
+    key_free.assert_called_once_with()
+    collection.delete.assert_called_once_with(ids=["repo:7:new:1"])
     needs_key.assert_not_called()
 
 
@@ -49,12 +58,12 @@ def test_delete_repo_data_uses_key_free_delete():
     needs_key.assert_not_called()
 
 
-def test_upload_module_has_no_dead_chroma_helper():
+def test_documents_module_has_no_dead_chroma_helper():
     """`_delete_chroma_vectors` 는 호출부가 0인 죽은 코드였다.
 
     `quota._delete_doc_vectors` 가 같은 doc_id 조건으로 실제 삭제를 수행한다.
     되살아나면 키를 요구하는 경로가 다시 생기므로 부재를 고정한다.
     """
-    from backend.api import upload as upload_module
+    from backend.api import documents as documents_module
 
-    assert not hasattr(upload_module, "_delete_chroma_vectors")
+    assert not hasattr(documents_module, "_delete_chroma_vectors")

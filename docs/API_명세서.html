@@ -308,13 +308,13 @@
 
   <main>
     <!-- auth-mode: jwt-fail-closed -->
-    <!-- updated: 2026-07-22 -->
+    <!-- updated: 2026-07-29 -->
     <h1>PaiM FastAPI 명세서</h1>
     <p class="subtitle">
       Base URL (로컬): <code>http://127.0.0.1:8000</code> &nbsp;·&nbsp;
       API Prefix: <code>/api/v1</code> (GitHub App은 <code>/github/app/*</code>, prefix 없음) &nbsp;·&nbsp;
       에러 형식: <code>{"detail": "...", "request_id": "&lt;uuid&gt;"}</code> &nbsp;·&nbsp;
-      갱신: 2026-07-22 (TASK-010 — 누락 20 operation·인증/권한 최신화)
+      갱신: 2026-07-29 (#9 STT 업로드 경로 반영, 전체 47 operation)
     </p>
 
     <!-- ── Auth ───────────────────────────────────────────────── -->
@@ -586,6 +586,34 @@
           업로드 즉시 <code>processing</code> 반환 → 백그라운드 처리 완료 후 <code>indexed</code> 또는 <code>failed</code>로 갱신.
           <code>GET /documents/{doc_id}/status</code>로 폴링하여 완료 확인.
         </div>
+      </div>
+    </div>
+
+    <div class="endpoint" id="audio-upload">
+      <div class="endpoint-header">
+        <span class="method POST">POST</span>
+        <span class="path">/api/v1/projects/{project_id}/audio</span>
+      </div>
+      <div class="endpoint-desc">
+        회의 녹음을 STT 전사 → LLM 추출 → MySQL·Vector DB 적재 → Project Memory 갱신으로 연결 (최소 역할 member).
+      </div>
+      <div class="endpoint-body">
+        <div class="res-label">Request — <code>multipart/form-data</code></div>
+        <table>
+          <tr><th>필드</th><th>타입</th><th>필수</th><th>설명</th></tr>
+          <tr><td><code>file</code></td><td>File</td><td>✅</td><td>provider 지원 오디오 (OpenAI 25 MB, CLOVA 200 MB)</td></tr>
+          <tr><td><code>date</code></td><td>string</td><td>-</td><td>회의 날짜 YYYY-MM-DD</td></tr>
+        </table>
+        <div class="res-label"><span class="s201">201</span> Created</div>
+        <pre><code>{ "doc_id": 71, "status": "processing", "provider": "openai", "diarization": false }</code></pre>
+        <div class="note">
+          <code>GET /documents/{doc_id}/status</code>로 <code>indexed</code>/<code>failed</code> 폴링.
+          설정: <code>STT_PROVIDER</code>, <code>STT_MODEL</code>, <code>STT_LANGUAGE</code>, <code>STT_TIMEOUT_SECONDS</code>.
+        </div>
+        <div class="res-label"><span class="s400">400</span> 빈 오디오·미지원 확장자</div>
+        <div class="res-label"><span class="s403">403</span> member 미만</div>
+        <div class="res-label"><span class="s413">413</span> provider 크기 상한 초과</div>
+        <div class="res-label"><span class="s503">503</span> 잘못된 provider 설정</div>
       </div>
     </div>
 
@@ -941,7 +969,7 @@
           <tr><td><code>completed</code></td><td>boolean</td><td><code>true</code>→<code>completed_at=NOW()</code>, <code>false</code>→<code>null</code>. <code>null</code> 전송은 400</td></tr>
           <tr><td><code>sort_order</code></td><td>integer | null</td><td>표시 정렬 순서. 명시적 <code>null</code> 전송 시 해제</td></tr>
         </table>
-        <div class="note"><code>completed</code>(요청, boolean) ↔ <code>completed_at</code>(응답, timestamp). 수정 필드가 없으면 400. category를 decision 밖으로 바꾸는 변경이 supersede 관계와 충돌하면 409.</div>
+        <div class="note"><code>completed</code>(요청, boolean) ↔ <code>completed_at</code>(응답, timestamp). <code>due_date</code>를 직접 설정·해제하면 pending <code>set_due_date</code> 제안은 자동 거절된다. 수정 필드가 없으면 400. category를 decision 밖으로 바꾸는 변경이 supersede 관계와 충돌하면 409.</div>
         <div class="res-label"><span class="s200">200</span> OK</div>
         <pre><code>{
   "id": 1,
@@ -1034,7 +1062,7 @@
     <!-- ── Suggestions ────────────────────────────────────────── -->
     <h2 id="suggestions">제안 (Suggestions)</h2>
     <p class="note" style="margin-bottom:16px;">
-      <code>kind</code>: <code>complete_action</code>(기본)·<code>supersede</code>·<code>all</code>.
+      <code>kind</code>: <code>complete_action</code>(기본)·<code>set_due_date</code>·<code>supersede</code>·<code>all</code>.
       상세 계약·에러는 <code>HANDOVER_SUPERSEDE_FRONTEND.md</code>.
     </p>
 
@@ -1049,6 +1077,7 @@
         <pre><code>[{ "id": 8, "project_id": 1, "memory_id": 10, "kind": "complete_action",
   "evidence": {...}, "rationale": "...", "confidence": "high",
   "status": "pending", "created_at": "...", "resolved_at": null, "resolved_by": null }]</code></pre>
+        <div class="note"><code>set_due_date</code> evidence: <code>{ "type": "due_date", "suggested_due_date": "2026-08-07", "raw_text": "다음 주 금요일까지", "reference_date": "2026-07-30", "source": "회의록.md" }</code>. 연도·월·일이 명시된 날짜는 자동 저장하고, 상대·연도 생략 날짜만 승인 후보로 만든다.</div>
         <div class="res-label"><span class="s400">400</span> 잘못된 status/kind &nbsp;·&nbsp; <span class="s404">404</span> 프로젝트 없음</div>
       </div>
     </div>
@@ -1058,10 +1087,10 @@
         <span class="method POST">POST</span>
         <span class="path">/api/v1/projects/{project_id}/suggestions/{suggestion_id}/accept</span>
       </div>
-      <div class="endpoint-desc">제안 승인 (최소 역할 member). complete_action=완료 처리, supersede=결정 번복.</div>
+      <div class="endpoint-desc">제안 승인 (최소 역할 member). complete_action=완료 처리, set_due_date=action 마감 설정, supersede=결정 번복.</div>
       <div class="endpoint-body">
         <div class="res-label"><span class="s200">200</span> OK — 갱신된 suggestion (<code>status: "accepted"</code>)</div>
-        <div class="res-label"><span class="s400">400</span> 이미 해소/미지원 kind &nbsp;·&nbsp; <span class="s409">409</span> supersede 충돌/경합 &nbsp;·&nbsp; <span class="s404">404</span> 제안 없음</div>
+        <div class="res-label"><span class="s400">400</span> 이미 해소/미지원 kind &nbsp;·&nbsp; <span class="s409">409</span> 마감 변경·supersede 충돌/경합 &nbsp;·&nbsp; <span class="s404">404</span> 제안 없음</div>
       </div>
     </div>
 
@@ -1216,7 +1245,8 @@
         <span class="path" id="session-query">/api/v1/projects/{project_id}/sessions/{session_id}/query</span>
       </div>
       <div class="endpoint-desc">
-        세션 기반 대화형 질의. 암호화된 대화 이력을 컨텍스트로 사용하며 롤링 요약을 자동 관리.
+        세션 기반 Agentic 대화형 질의. 암호화된 대화 이력과 롤링 요약을 컨텍스트로 사용하고,
+        프로젝트 질의와 같은 읽기 전용 근거 도구로 답변을 생성.
         <code>member</code> 이상 권한 필요.
       </div>
       <div class="endpoint-body">
@@ -1225,6 +1255,7 @@
   "current_question": "현재 가장 큰 리스크가 뭐야?",
   "rag_context": ""
 }</code></pre>
+        <div class="endpoint-desc"><code>rag_context</code>는 이번 Agentic 질의에서만 사용하는 임시 참고 텍스트이며 세션에 저장하지 않습니다.</div>
         <div class="res-label"><span class="s200">200</span> OK</div>
         <pre><code>{
   "status": "success",
@@ -1244,7 +1275,7 @@
         <span class="method POST">POST</span>
         <span class="path">/api/v1/projects/{project_id}/query</span>
       </div>
-      <div class="endpoint-desc">프로젝트 기반 자연어 질의. MySQL 구조화 검색 + ChromaDB 벡터 검색 혼합.</div>
+      <div class="endpoint-desc">프로젝트 기반 자연어 질의. Agentic 오케스트레이터가 읽기 전용 근거 도구를 조합한다.</div>
       <div class="endpoint-body">
         <div class="res-label">Request Body</div>
         <pre><code>{
@@ -1257,14 +1288,17 @@
     { "filename": "meeting.md", "content_base64": "&lt;base64&gt;" }
   ]
 }</code></pre>
-        <div class="res-label">첨부 <code>attachments</code>: <code>.md</code>/<code>.markdown</code>/<code>.txt</code>/<code>.docx</code>/<code>.pdf</code>, <strong>파일당 최대 8 MB · 전체 합계 8 MB</strong>. 형식 미지원 400, 내용 불일치 415, 초과 413. 첨부 시 항상 <code>route: "semantic"</code>.</div>
+        <div class="res-label">첨부 <code>attachments</code>: <code>.md</code>/<code>.markdown</code>/<code>.txt</code>/<code>.docx</code>/<code>.pdf</code>, <strong>파일당 최대 8 MB · 전체 합계 8 MB</strong>. 검증·텍스트 추출 뒤 같은 Agentic Q&amp;A의 이번 질문 전용 근거로 전달된다. 형식 미지원 400, 내용 불일치 415, 초과 413.</div>
         <div class="res-label"><span class="s200">200</span> OK</div>
         <pre><code>{
   "answer": "현재 가장 큰 리스크는 API 계약 변경 가능성입니다. (출처: planning.pdf)",
-  "plan": ["API 계약 변경 사항을 프론트엔드 팀과 공유한다"],
+  "plan": [],
   "sources": ["planning.pdf", "meeting_notes.md"],
   "route": "semantic",
   "debug": {
+    "router_stage": "tool_agent",
+    "tools_used": ["search_project_evidence"],
+    "tool_rounds": 1,
     "filters": { "category": null },
     "mysql_rows": [
       { "category": "risk", "content": "...", "source": "planning.pdf", "source_label": "planning.pdf" }
@@ -1281,7 +1315,7 @@
           없음. <code>debug.*.source_label</code>이 추가됐다(무시 가능). 상세: HANDOVER_CITATION_FRONTEND.md
         </div>
         <div class="endpoint-desc">
-          <strong>route</strong>: <code>semantic</code>(RAG·첨부) · <code>filter_lookup</code>(구조화 조회) · <code>overview</code>(조망 요약) 중 하나(구 <code>both</code> 제거). 세 경로 모두 <code>plan</code>·<code>debug</code>를 반환한다(생략 없음). 단 <code>filter_lookup</code>·<code>overview</code>는 <code>plan</code>이 항상 <code>[]</code>이고 <code>debug</code>에 <code>mysql_rows</code>/<code>chroma_chunks</code>가 없으며(각 <code>rows</code>/<code>overview</code>), 인라인 <code>(출처:)</code> 마커가 없을 수 있다.
+          <strong>route</strong>: 기존 클라이언트 호환을 위해 이 엔드포인트는 항상 <code>semantic</code>을 반환한다. 질문 유형은 Agentic 오케스트레이터가 <code>search_project_evidence</code>, <code>query_structured_memory</code>, <code>get_project_overview</code>를 필요에 따라 조합해 처리한다. 사용한 도구와 라운드는 <code>debug.tools_used</code>/<code>debug.tool_rounds</code>에서 확인할 수 있으며, 검색 도구에 따라 <code>debug.mysql_rows</code>/<code>debug.chroma_chunks</code>가 포함될 수 있다. <code>plan</code>은 하위호환 필드이며 현재 기본 Agentic Q&amp;A에서는 <code>[]</code>이다.
         </div>
         <div class="res-label"><span class="s503">503</span> Service Unavailable</div>
         <pre><code>{ "detail": "Q&amp;A 처리 중 오류가 발생했습니다. 서버 로그를 확인하세요." }</code></pre>
@@ -1449,7 +1483,7 @@
 
     <!-- ── Implementation Status ──────────────────────────────── -->
     <h2 id="status-impl">구현 현황</h2>
-    <p style="color:#6b7280; font-size:13px; margin-bottom:12px;">갱신: 2026-07-22 · TASK-010 기준 (origin/main <code>5240f40</code> 병합 완료, 전체 46 operation)</p>
+    <p style="color:#6b7280; font-size:13px; margin-bottom:12px;">갱신: 2026-07-29 · #9 STT 업로드 경로 반영 (전체 47 operation)</p>
 
     <table>
       <tr><th>엔드포인트</th><th>상태</th><th>비고</th></tr>
@@ -1460,6 +1494,7 @@
       <tr><td><code>GET /api/v1/projects</code></td><td><span class="badge badge-done">✅ 완료</span></td><td>DEV user 시 membership JOIN</td></tr>
       <tr><td><code>GET /api/v1/projects/{id}</code></td><td><span class="badge badge-done">✅ 완료</span></td><td></td></tr>
       <tr><td><code>POST /api/v1/projects/{id}/documents</code></td><td><span class="badge badge-done">✅ 완료</span></td><td>BackgroundTask async</td></tr>
+      <tr><td><code>POST /api/v1/projects/{id}/audio</code></td><td><span class="badge badge-done">✅ 완료</span></td><td>STT → Project Memory, BackgroundTask async</td></tr>
       <tr><td><code>GET /api/v1/projects/{id}/documents</code></td><td><span class="badge badge-done">✅ 완료</span></td><td></td></tr>
       <tr><td><code>GET /api/v1/projects/{id}/documents/{doc_id}/status</code></td><td><span class="badge badge-done">✅ 완료</span></td><td>last_error 포함</td></tr>
       <tr><td><code>DELETE /api/v1/projects/{id}/documents/{doc_id}</code></td><td><span class="badge badge-done">✅ 완료</span></td><td>memory + chroma + file cleanup</td></tr>

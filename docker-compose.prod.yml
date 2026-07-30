@@ -103,6 +103,12 @@ services:
       CHROMA_PERSIST_DIR: /app/.chroma
       # 운영에서 dev 모드로 뜨는 사고를 원천 차단한다(dev는 JWT 검증을 생략).
       PAIM_AUTH_MODE: jwt
+      # #18 Agentic Q&A MVP 계약. env_file이나 호스트 환경이 다른 provider/model을
+      # 주입해도 운영 컨테이너는 지원 조합으로만 뜬다.
+      LLM_PROVIDER: openai
+      OPENAI_MODEL: gpt-4.1-mini
+      OPENAI_BASE_URL: ""
+      OPENAI_API_BASE: ""
       # Dockerfile CMD의 --workers 1과 이중으로 막는다. 이 값이 없으면 uvicorn이
       # 외부 WEB_CONCURRENCY를 읽어 다중 워커로 뜰 수 있다.
       WEB_CONCURRENCY: "1"

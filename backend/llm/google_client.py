@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List
 import google.generativeai as genai
 from .base import BaseLLMClient, Message, LLMResponse
 

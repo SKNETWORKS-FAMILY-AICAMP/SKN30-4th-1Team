@@ -36,8 +36,8 @@ def _forbidden(*args, **kwargs):
 
 def test_non_member_upload_does_not_read_body():
     """비구성원 업로드가 거부되고, 그 시점에 본문을 메모리로 읽지 않는다."""
-    with patch("backend.api.upload.require_upload_user", return_value=1), \
-         patch("backend.api.upload.require_project_access", side_effect=_forbidden), \
+    with patch("backend.api.documents.require_upload_user", return_value=1), \
+         patch("backend.api.documents.require_project_access", side_effect=_forbidden), \
          patch.object(UploadFile, "read", new_callable=AsyncMock) as read:
         resp = _client.post(_URL, files={"file": _FILE}, data={"date": ""})
 
@@ -51,7 +51,7 @@ def test_unauthenticated_upload_does_not_read_body():
     def _no_user(*args, **kwargs):
         raise HTTPException(status_code=401, detail="인증이 필요합니다")
 
-    with patch("backend.api.upload.require_upload_user", side_effect=_no_user), \
+    with patch("backend.api.documents.require_upload_user", side_effect=_no_user), \
          patch.object(UploadFile, "read", new_callable=AsyncMock) as read:
         resp = _client.post(_URL, files={"file": _FILE}, data={"date": ""})
 
@@ -61,8 +61,8 @@ def test_unauthenticated_upload_does_not_read_body():
 
 def test_member_upload_still_reads_body():
     """정상 구성원 경로에서는 본문을 읽는다 — 순서 이동이 기능을 막지 않았다."""
-    with patch("backend.api.upload.require_upload_user", return_value=1), \
-         patch("backend.api.upload.require_project_access"), \
+    with patch("backend.api.documents.require_upload_user", return_value=1), \
+         patch("backend.api.documents.require_project_access"), \
          patch.object(UploadFile, "read", new_callable=AsyncMock,
                       return_value=b"x") as read:
         _client.post(_URL, files={"file": _FILE}, data={"date": ""})

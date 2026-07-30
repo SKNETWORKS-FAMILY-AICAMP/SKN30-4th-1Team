@@ -738,36 +738,22 @@ def collect_e0(project_id: int, question: str) -> tuple[list[str], dict]:
 
 
 def collect_e2_e2e(project_id: int, question: str) -> tuple[list[str], dict]:
-    """실서비스 그대로: 라우터 감지 → predicate 고정 → _build_context →
-    graph.qa_node와 동일하게 [프로젝트 메모리] 접두 조립(리뷰 R-005)."""
-    from backend.graph import _resolve_history_state, get_project_memory
-    from backend.retriever.query_intent import classify_question
-    decision = classify_question(question)
-    mode, scope, tokens, effective = _resolve_history_state(
-        question, None, decision.history_mode)
+    """Agentic evidence retrieval: history context → generation-scoped hybrid search."""
+    from backend.retriever.history_context import resolve_history_context
+    mode, scope, tokens, effective = resolve_history_context(question)
     contexts, debug = _build_context_configured(
         project_id, effective, history_mode=mode,
         history_scope=scope, history_topic_tokens=tokens)
-    # 실서비스(graph.qa_node)는 프로젝트 메모리 요약을 컨텍스트 앞에 얹는다.
-    # 프로젝트 메모리는 파일 출처가 없는 요약이라 source_labels(인용 근거 집합)는
-    # 바꾸지 않고 생성 컨텍스트에만 영향을 준다.
-    parts = []
-    mem = get_project_memory(project_id)
-    if mem:
-        parts.append(f"[프로젝트 메모리]\n{mem}")
-    if debug.get("rendered_context"):
-        parts.append(debug["rendered_context"])
-    debug["rendered_context"] = "\n\n".join(parts)
-    debug["route"] = decision.route
-    debug["router_stage"] = decision.router_stage
+    debug["route"] = "semantic"
+    debug["router_stage"] = "agentic_evidence_tool"
     return contexts, debug
 
 
 def make_collect_e2_oracle(expected_history: bool):
     def collect(project_id: int, question: str) -> tuple[list[str], dict]:
-        from backend.graph import _resolve_history_state
-        mode, scope, tokens, effective = _resolve_history_state(
-            question, None, expected_history)
+        from backend.retriever.history_context import resolve_history_context
+        mode, scope, tokens, effective = resolve_history_context(
+            question, history_mode=expected_history)
         return _build_context_configured(
             project_id, effective, history_mode=mode,
             history_scope=scope, history_topic_tokens=tokens)
@@ -956,17 +942,20 @@ def cmd_ingest(args) -> None:
                 conn.commit()
             finally:
                 conn.close()
-            items = extract(md.read_text(encoding="utf-8"), default_source=md.name)
+            items = extract(
+                md.read_text(encoding="utf-8"),
+                default_source=md.name,
+                reference_date=date,
+            )
             ingest(project_id=project_id, doc_id=doc_id, items=items,
                    raw_text=md.read_text(encoding="utf-8"), source=md.name,
                    date=date, doc_type="meeting")
     finally:
         supersede_mod.detect_supersede = original_detect
 
-    # 실서비스는 적재 후 프로젝트 메모리 요약을 만들어 QA 컨텍스트 최상단에
-    # 얹는다(graph.qa_node). E2-e2e가 그 경로를 충실히 재현하도록 eval도 동일
-    # 생성한다(리뷰 R-005). checkpoint(mysqldump)에 포함돼 final restore 시 복원.
-    from backend.graph import regenerate_project_memory
+    # 프로젝트 조망 도구가 사용하는 요약을 생성한다. Targeted evidence 검색은
+    # generation이 없는 이 요약을 근거에 섞지 않는다.
+    from backend.project_memory import regenerate_project_memory
     regenerate_project_memory(project_id)
 
     # 적재 결과 덤프(runid 무관 — 코퍼스 상태에 귀속)
@@ -1077,7 +1066,7 @@ def cmd_pmem(args) -> None:
     (dev context 승격분을 지키려면 재적재 대신 이 경로를 사용한다.)"""
     setup_env(args.corpus)
     require_openai_key()
-    from backend.graph import regenerate_project_memory, get_project_memory
+    from backend.project_memory import regenerate_project_memory, get_project_memory
     project_id = get_project_id(args.corpus)
     regenerate_project_memory(project_id)
     mem = get_project_memory(project_id) or ""
@@ -1123,8 +1112,7 @@ def cmd_pairs(args) -> None:
                  "--runid", args.runid, "--coverage-only"])
             if cov_run.returncode != 0:
                 sys.exit(f"[중단] post 상태 coverage 복구 실패({cov_path.name})")
-        # 재개 시에도 post 상태 프로젝트 메모리를 보장(C-001) — pairs 이전 캐시가
-        # 남아 있으면 대체된 결정이 요약에 계속 노출된다.
+        # 재개 시에도 조망 도구용 post 상태 프로젝트 메모리를 보장한다.
         run_step(["pmem", "--corpus", corpus])
         print(f"[건너뜀] pairs {corpus} — 이미 E1(post) 상태(coverage 확인 완료)")
         return
@@ -1164,9 +1152,7 @@ def cmd_pairs(args) -> None:
 
     # 4. post-state 검증
     run_step(["_state-check", "--corpus", corpus, "--expect", "post"])
-    # 5. supersede 반영 후 프로젝트 메모리 재생성(C-001) — 실서비스의
-    #    refresh_project_memory_after_delete와 동일 취지. E2-e2e가 대체된 결정이
-    #    빠진 최신 요약을 컨텍스트로 쓰도록 한다(active_memory 기준 재생성).
+    # 5. supersede 반영 후 조망 도구용 프로젝트 메모리를 재생성한다.
     run_step(["pmem", "--corpus", corpus])
     print(f"[완료] pairs {corpus} (E1 상태 전환 + post 검증 + 프로젝트 메모리 갱신)")
 
@@ -1564,42 +1550,39 @@ def cmd_audit(args) -> None:
     if args.no_langsmith:
         disable_langsmith()
     questions = [q for q in load_golden() if q["corpus"] == corpus]  # 30문항
-    from backend.retriever.query_intent import classify_question
+    from backend.retriever.history_context import resolve_history_context
 
     RESULTS_DIR.mkdir(exist_ok=True)
-    audit_path = RESULTS_DIR / f"routing_audit_{corpus}_{phase}_{runid}.csv"
-    route_match = 0
+    audit_path = RESULTS_DIR / f"agentic_history_audit_{corpus}_{phase}_{runid}.csv"
     hist_expected = [q for q in questions if q["expected_history_mode"]]
     hist_detected = 0
     with open(audit_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
-        writer.writerow(["corpus", "qid", "tag", "question", "expected_route",
-                         "actual_route", "router_stage", "expected_history",
-                         "actual_history", "route_match", "history_match"])
+        writer.writerow(["corpus", "qid", "tag", "question", "legacy_expected_route",
+                         "runtime_path", "history_scope", "expected_history",
+                         "actual_history", "history_match"])
         for q in questions:
-            decision = classify_question(q["question"])
-            r_ok = decision.route == q["expected_route"]
-            h_ok = decision.history_mode == q["expected_history_mode"]
-            route_match += int(r_ok)
-            if q["expected_history_mode"] and decision.history_mode:
+            mode, scope, _, _ = resolve_history_context(q["question"])
+            h_ok = mode == q["expected_history_mode"]
+            if q["expected_history_mode"] and mode:
                 hist_detected += 1
             writer.writerow([corpus, q["qid"], q["tag"], q["question"],
-                             q["expected_route"], decision.route,
-                             decision.router_stage, q["expected_history_mode"],
-                             decision.history_mode, r_ok, h_ok])
-    routing_accuracy = round(route_match / len(questions), 3)
+                             q["expected_route"], "tool_agent",
+                             scope or "", q["expected_history_mode"],
+                             mode, h_ok])
     detect_rate = (round(hist_detected / len(hist_expected), 3)
                    if hist_expected else "")
-    # summary의 해당 코퍼스 행들에 병합(upsert)
+    # Agentic runtime has no fixed router label. Preserve the old column as N/A
+    # so historical router results and current history checks do not mix.
     writer_obj = SummaryWriter(RESULTS_DIR / "summary.csv")
     for config in MAIN_CONFIGS:
         writer_obj.upsert({
             "run_id": runid, "corpus": corpus, "config": config, "phase": phase,
-            "routing_accuracy": routing_accuracy,
+            "routing_accuracy": "N/A",
             "history_detect_rate": detect_rate,
         })
-    print(f"[완료] audit {corpus}: 라우팅 정확도 {routing_accuracy}, "
-          f"이력 감지율 {detect_rate} → {audit_path.name}")
+    print(f"[완료] Agentic history audit {corpus}: 이력 감지율 {detect_rate} "
+          f"→ {audit_path.name}")
 
 
 def cmd_report(args) -> None:

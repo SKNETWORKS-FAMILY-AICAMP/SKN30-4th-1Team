@@ -81,9 +81,8 @@ QA 스키마: `{id, set(A/B/C), tag, question, answer(골든 답), source(출처
 > 주(TASK-007): 답변 생성은 `_build_context`의 **렌더링 컨텍스트**(출처 마커
 > 포함)로 수행한다. RAGAS 검색 지표(1축)에는 마커 없는 원문 청크를 그대로
 > 쓰므로 context_precision/recall은 영향받지 않는다. E2-e2e는 실서비스
-> (`graph.qa_node`)와 동일하게 `[프로젝트 메모리]` 접두를 조립하며, 이를 위해
-> ingest 단계에서 프로젝트 메모리 요약을 생성한다(무출처 요약이라 인용 근거
-> 집합에는 더해지지 않음).
+> (`qa_tools.search_project_evidence`)와 동일하게 generation-scoped 검색 근거만
+> 사용한다. generation이 없는 프로젝트 요약은 조망 도구 평가에만 사용한다.
 
 ## 4. 기대 라우팅 라벨 (`routing_expected.json`, 리뷰 반영 v2)
 

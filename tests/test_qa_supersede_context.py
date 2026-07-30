@@ -11,6 +11,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from backend.retriever import qa_engine
+from backend.retriever.index_scope import ProjectIndexScope
+
+
+@pytest.fixture(autouse=True)
+def _published_index_scope(monkeypatch):
+    monkeypatch.setattr(
+        qa_engine,
+        "load_project_index_scope",
+        lambda project_id: ProjectIndexScope(project_id),
+    )
 
 
 # ── 공통 fixture ──────────────────────────────────────────────────────────────
@@ -41,7 +51,7 @@ def _build(question, rows, graph_rows, *, scope="global", tokens=(),
     )
     monkeypatch.setattr(
         qa_engine.mysql_search, "fetch_supersede_graph",
-        lambda pid: [dict(r) for r in graph_rows],
+        lambda pid, **kwargs: [dict(r) for r in graph_rows],
     )
     with patch("backend.retriever.qa_engine.get_collection",
                return_value=collection or _empty_chunk_collection()):
@@ -342,10 +352,9 @@ def test_bm25_tie_input_order_invariant_without_dense(monkeypatch):
     assert all(c["dense_rank"] is None for c in debug_fwd["chroma_chunks"])
 
 
-def test_chain_only_context_visible_to_verify_node(monkeypatch):
+def test_chain_only_context_remains_visible_to_agentic_retrieval(monkeypatch):
     """round-1 R-004: 일반 슬롯 0행 + 체인 행만 있는 컨텍스트(전 행 superseded 순환)가
-    debug.mysql_rows에 반영되어 verify_answer_node가 컨텍스트 있음으로 판정한다."""
-    from backend.graph import verify_answer_node
+    Agentic evidence tool에 전달될 debug.mysql_rows에 반영되어야 한다."""
 
     cycle = [
         _row(1, "결정 알파", superseded_by=2, date="2026-01-01"),
@@ -356,8 +365,7 @@ def test_chain_only_context_visible_to_verify_node(monkeypatch):
 
     assert len(debug["mysql_rows"]) == 3
     assert {r["content"] for r in debug["mysql_rows"]} == {"결정 알파", "결정 베타", "결정 감마"}
-    verdict = verify_answer_node({"debug": debug, "answer": "결정 경위 답변"})
-    assert verdict["answer_ok"] is True
+    assert bool(debug["mysql_rows"] or debug["chroma_chunks"]) is True
 
 
 def test_rewrite_suffix_selects_same_component_ids(monkeypatch):
@@ -395,7 +403,7 @@ def test_history_mode_uses_dedicated_graph_query(monkeypatch):
     graph_calls = []
     monkeypatch.setattr(
         qa_engine.mysql_search, "fetch_supersede_graph",
-        lambda pid: graph_calls.append(pid) or [],
+        lambda pid, **kwargs: graph_calls.append(pid) or [],
     )
     with patch("backend.retriever.qa_engine.get_collection",
                return_value=_empty_chunk_collection()):
@@ -438,7 +446,11 @@ def _fake_vectorstore(order_by_query):
 def _build_chunks(question, queries, chunks, dense_map, monkeypatch):
     monkeypatch.setattr(qa_engine, "_generate_multi_queries", lambda q: list(queries))
     monkeypatch.setattr(qa_engine.mysql_search, "search", lambda pid, **kw: [])
-    monkeypatch.setattr(qa_engine.mysql_search, "fetch_supersede_graph", lambda pid: [])
+    monkeypatch.setattr(
+        qa_engine.mysql_search,
+        "fetch_supersede_graph",
+        lambda pid, **kwargs: [],
+    )
     monkeypatch.setattr(qa_engine, "_get_vectorstore", lambda: _fake_vectorstore(dense_map))
     with patch("backend.retriever.qa_engine.get_collection",
                return_value=_chunk_collection(chunks)):

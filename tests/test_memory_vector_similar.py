@@ -2,6 +2,7 @@
 from unittest.mock import MagicMock, patch
 
 from backend.retriever import memory_vector
+from backend.retriever.index_scope import ProjectIndexScope
 
 
 class _FakeCollection:
@@ -34,7 +35,8 @@ def test_find_similar_returns_memory_ids_excluding_self():
     coll, cm = _patch_collection(metas)
     with cm:
         ids = memory_vector.find_similar_memories(
-            1, "새 결정 내용", category="decision", n_results=5, exclude_ids={3}
+            1, "새 결정 내용", category="decision", n_results=5,
+            exclude_ids={3}, index_scope=ProjectIndexScope(1),
         )
     assert ids == [10, 7]
 
@@ -43,10 +45,14 @@ def test_find_similar_builds_and_where_with_category():
     """project_id·item_type=memory·category를 $and로 결합해 검색한다."""
     coll, cm = _patch_collection([])
     with cm:
-        memory_vector.find_similar_memories(2, "내용", category="decision", n_results=4)
+        memory_vector.find_similar_memories(
+            2, "내용", category="decision", n_results=4,
+            index_scope=ProjectIndexScope(2),
+        )
     assert coll.where == {
         "$and": [
             {"project_id": 2},
+            {"repo_id": -1},
             {"item_type": "memory"},
             {"category": "decision"},
         ]
@@ -58,7 +64,10 @@ def test_find_similar_excludes_via_query_nin():
     """C-1: exclude_ids를 ChromaDB where($nin)에 넣어 top-N 슬롯을 소모하지 않게 한다."""
     coll, cm = _patch_collection([])
     with cm:
-        memory_vector.find_similar_memories(1, "내용", category="decision", exclude_ids={5, 3})
+        memory_vector.find_similar_memories(
+            1, "내용", category="decision", exclude_ids={5, 3},
+            index_scope=ProjectIndexScope(1),
+        )
     assert {"memory_id": {"$nin": [3, 5]}} in coll.where["$and"]
 
 
@@ -66,8 +75,12 @@ def test_find_similar_without_category_uses_two_conditions():
     """category 미지정이면 project_id·item_type만으로 검색한다."""
     coll, cm = _patch_collection([])
     with cm:
-        memory_vector.find_similar_memories(2, "내용")
-    assert coll.where == {"$and": [{"project_id": 2}, {"item_type": "memory"}]}
+        memory_vector.find_similar_memories(
+            2, "내용", index_scope=ProjectIndexScope(2)
+        )
+    assert coll.where == {
+        "$and": [{"project_id": 2}, {"repo_id": -1}, {"item_type": "memory"}]
+    }
 
 
 def test_find_similar_empty_text_skips_query():

@@ -1,11 +1,12 @@
 import os
 import asyncio
+import json
 import subprocess
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pymysql
 import pytest
@@ -18,8 +19,10 @@ from backend.pipeline.models import MemoryItem
 from backend.pipeline import ingestor as ingestor_module
 from backend.api.project import delete_project
 from backend.api import project as project_module
-from backend.api.upload import _process_upload_locked
+from backend.api.documents import _process_upload_locked
 from backend.api import health as health_api
+from backend.api.repository import _set_repo_status
+from backend.api.suggestion import _suggestion_or_404
 from backend import quota as quota_module
 from backend.quota import (
     abandon_reservation,
@@ -119,6 +122,7 @@ def reset_database(monkeypatch, tmp_path):
                 "memory_suggestions",
                 "memory",
                 "documents",
+                "repositories",
                 "project_members",
                 "projects",
                 "users",
@@ -151,6 +155,182 @@ def test_v9_is_idempotent_and_manifest_is_closed():
         " ('size_bytes','uploaded_by','processing_token','lease_expires_at')"
     ) == 4
     assert scalar("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('upload_quota_reservations','storage_cleanup_pending')") == 2
+
+
+def test_v9_views_follow_published_repository_generation_and_allow_locking_reads():
+    """Staging rows stay invisible and active-memory reads remain lockable."""
+    conn = connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO repositories"
+                " (id,project_id,provider,repository_url,branch,status,active_sync_run_id)"
+                " VALUES (1,1,'github','https://github.com/o/r','main','indexed','run-a')"
+            )
+            cursor.execute(
+                "INSERT INTO memory(project_id,repo_id,repo_sync_run_id,category,content)"
+                " VALUES (1,1,'run-a','decision','generation A')"
+            )
+            generation_a = cursor.lastrowid
+            cursor.execute(
+                "INSERT INTO memory(project_id,repo_id,repo_sync_run_id,category,content)"
+                " VALUES (1,1,'run-b','decision','generation B')"
+            )
+            generation_b = cursor.lastrowid
+            cursor.execute(
+                "INSERT INTO memory(project_id,category,content,superseded_by)"
+                " VALUES (1,'decision','document decision',%s)",
+                (generation_b,),
+            )
+            document_memory = cursor.lastrowid
+            cursor.execute(
+                "INSERT INTO memory_suggestions"
+                " (project_id,memory_id,kind,evidence,rationale,confidence,status)"
+                " VALUES (1,%s,'supersede',%s,'test','high','pending')",
+                (
+                    generation_a,
+                    json.dumps(
+                        {
+                            "type": "supersede",
+                            "superseding_memory_id": document_memory,
+                        }
+                    ),
+                ),
+            )
+            suggestion_id = cursor.lastrowid
+        conn.commit()
+
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT id FROM published_memory WHERE project_id=1 ORDER BY id")
+            assert [row["id"] for row in cursor.fetchall()] == [
+                generation_a,
+                document_memory,
+            ]
+            cursor.execute("SELECT id FROM active_memory WHERE project_id=1 ORDER BY id")
+            assert [row["id"] for row in cursor.fetchall()] == [
+                generation_a,
+                document_memory,
+            ]
+            cursor.execute(
+                "SELECT id FROM active_memory WHERE id=%s FOR UPDATE",
+                (document_memory,),
+            )
+            assert cursor.fetchone()["id"] == document_memory
+            assert _suggestion_or_404(cursor, 1, suggestion_id)["id"] == suggestion_id
+            cursor.execute(
+                "UPDATE repositories SET active_sync_run_id='run-b' WHERE id=1"
+            )
+        conn.commit()
+
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT id FROM active_memory WHERE project_id=1 ORDER BY id")
+            assert [row["id"] for row in cursor.fetchall()] == [generation_b]
+    finally:
+        conn.close()
+
+
+def test_v9_publish_fence_switches_generation_and_retires_old_derivatives():
+    """Publishing is fenced and invalidates derivatives tied to the old snapshot."""
+    conn = connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO repositories"
+                " (id,project_id,provider,repository_url,branch,status,"
+                "  active_sync_run_id,current_sync_run_id)"
+                " VALUES (1,1,'github','https://github.com/o/r','main',"
+                " 'syncing','run-old','run-new')"
+            )
+            cursor.execute(
+                "INSERT INTO memory(project_id,repo_id,repo_sync_run_id,category,content)"
+                " VALUES (1,1,'run-old','decision','old generation')"
+            )
+            old_memory = cursor.lastrowid
+            cursor.execute(
+                "INSERT INTO memory(project_id,repo_id,repo_sync_run_id,category,content)"
+                " VALUES (1,1,'run-new','action','new generation action')"
+            )
+            new_memory = cursor.lastrowid
+            cursor.execute(
+                "INSERT INTO project_memory(project_id,summary)"
+                " VALUES (1,'old generation summary')"
+                " ON DUPLICATE KEY UPDATE summary=VALUES(summary)"
+            )
+            cursor.execute(
+                "INSERT INTO memory(project_id,category,content,superseded_by)"
+                " VALUES (1,'decision','published predecessor',%s)",
+                (old_memory,),
+            )
+            predecessor = cursor.lastrowid
+            cursor.execute(
+                "INSERT INTO memory_suggestions"
+                " (project_id,memory_id,kind,evidence,rationale,confidence,status)"
+                " VALUES (1,%s,'supersede',%s,'test','high','pending')",
+                (
+                    old_memory,
+                    json.dumps(
+                        {
+                            "type": "supersede",
+                            "superseding_memory_id": predecessor,
+                        }
+                    ),
+                ),
+            )
+            suggestion_id = cursor.lastrowid
+        conn.commit()
+    finally:
+        conn.close()
+
+    published, previous = _set_repo_status(
+        1,
+        "run-new",
+        "indexed",
+        commit_sha="abc123",
+        indexed_files=4,
+        last_error=None,
+        project_id=1,
+    )
+    assert published is True
+    assert previous == "run-old"
+
+    conn = connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT status,active_sync_run_id,current_sync_run_id,commit_sha"
+                " FROM repositories WHERE id=1"
+            )
+            repository = cursor.fetchone()
+            cursor.execute(
+                "SELECT superseded_by FROM memory WHERE id=%s",
+                (predecessor,),
+            )
+            predecessor_row = cursor.fetchone()
+            cursor.execute(
+                "SELECT status,resolved_at FROM memory_suggestions WHERE id=%s",
+                (suggestion_id,),
+            )
+            suggestion = cursor.fetchone()
+            cursor.execute("SELECT summary FROM project_memory WHERE project_id=1")
+            project_summary = cursor.fetchone()
+            cursor.execute("SELECT id FROM active_memory WHERE project_id=1 ORDER BY id")
+            active_ids = [row["id"] for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+    assert repository == {
+        "status": "indexed",
+        "active_sync_run_id": "run-new",
+        "current_sync_run_id": None,
+        "commit_sha": "abc123",
+    }
+    assert predecessor_row["superseded_by"] is None
+    assert suggestion["status"] == "rejected"
+    assert suggestion["resolved_at"] is not None
+    assert project_summary is None
+    # The document/manual predecessor is restored when its now-hidden old
+    # repository successor is retired; only the old repository row disappears.
+    assert active_ids == [new_memory, predecessor]
 
 
 def test_real_v8_upgrade_backfills_and_resumes_after_interruption(monkeypatch, tmp_path):
@@ -547,16 +727,7 @@ def test_schema_probe_rejects_stale_active_memory_view():
         with pytest.raises(RuntimeError, match="schema manifest mismatch"):
             health_api._schema_probe()
     finally:
-        conn = connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    "CREATE OR REPLACE VIEW active_memory AS"
-                    " SELECT * FROM memory WHERE superseded_by IS NULL"
-                )
-            conn.commit()
-        finally:
-            conn.close()
+        ensure_schema_v9()
     health_api._schema_probe()
 
 
@@ -596,6 +767,70 @@ def test_fenced_document_ingest_cannot_commit_with_stale_token():
             processing_token="wrong-token",
         )
     assert scalar("SELECT COUNT(*) FROM documents WHERE status='indexed'") == 0
+
+
+def test_due_date_ingest_persists_explicit_and_pending_candidate():
+    raw_text = (
+        "배포 문서는 2026년 8월 5일까지 작성한다. "
+        "회귀 테스트는 다음 주 금요일까지 끝낸다."
+    )
+    items = [
+        MemoryItem(
+            category="action",
+            content="배포 문서 작성",
+            date="2026-07-30",
+            due_date="2026-08-05",
+            due_date_text="2026년 8월 5일까지",
+        ),
+        MemoryItem(
+            category="action",
+            content="회귀 테스트 완료",
+            date="2026-07-30",
+            due_date="2026-08-07",
+            due_date_text="다음 주 금요일까지",
+            due_date_requires_confirmation=True,
+        ),
+    ]
+
+    with (
+        patch.object(ingestor_module, "upsert_memory_vectors"),
+        patch.object(ingestor_module, "get_collection", return_value=MagicMock()),
+    ):
+        ingest(
+            project_id=1,
+            doc_id=None,
+            items=items,
+            raw_text=raw_text,
+            source="due-date-integration.txt",
+            date="2026-07-30",
+            doc_type="text",
+        )
+
+    conn = connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT id,content,due_date FROM memory WHERE project_id=1 ORDER BY id"
+            )
+            rows = cursor.fetchall()
+            assert rows[0]["content"] == "배포 문서 작성"
+            assert str(rows[0]["due_date"]) == "2026-08-05"
+            assert rows[1]["content"] == "회귀 테스트 완료"
+            assert rows[1]["due_date"] is None
+
+            cursor.execute(
+                "SELECT memory_id,kind,status,evidence FROM memory_suggestions"
+                " WHERE project_id=1"
+            )
+            suggestion = cursor.fetchone()
+            assert suggestion["memory_id"] == rows[1]["id"]
+            assert suggestion["kind"] == "set_due_date"
+            assert suggestion["status"] == "pending"
+            evidence = json.loads(suggestion["evidence"])
+            assert evidence["suggested_due_date"] == "2026-08-07"
+            assert evidence["reference_date"] == "2026-07-30"
+    finally:
+        conn.close()
 
 
 class BarrierCollection:
@@ -808,7 +1043,7 @@ def test_post_finalize_cancel_at_first_memory_insert_releases_lock_and_accountin
         return CancellingConnection(real_get_connection())
 
     item = MemoryItem(category="issue", content="cancel at mysql insert")
-    with patch("backend.api.upload.extract", return_value=[item]), patch.object(
+    with patch("backend.api.documents.extract", return_value=[item]), patch.object(
         ingestor_module, "get_connection", side_effect=controlled_connection
     ):
         with pytest.raises(asyncio.CancelledError):
@@ -851,7 +1086,7 @@ def test_post_finalize_cancel_after_actual_chroma_write_removes_partial_vectors(
     collection = CancelAfterAddCollection(base_collection.collection)
     item = MemoryItem(category="issue", content="cancel after chroma write")
 
-    with patch("backend.api.upload.extract", return_value=[item]), patch(
+    with patch("backend.api.documents.extract", return_value=[item]), patch(
         "backend.pipeline.ingestor.get_collection", return_value=collection
     ), patch("backend.retriever.memory_vector.get_collection", return_value=collection):
         with pytest.raises(asyncio.CancelledError):

@@ -45,11 +45,11 @@
 - **`sources` 배열은 표시용 raw 목록**이다 — 검색된 출처 파일명의 사람이 읽는
   리스트이며, 저장소 파일의 `repo#N` 같은 충돌 방지 접미가 없어 마커와 1:1로
   일치하지 않을 수 있다. 정확 대조 용도로 쓰지 말고 요약 표시에만 쓰라.
-- **첨부(attachment) 질의는 예외**: 첨부 전용 질의의 답변 마커
+- **첨부(attachment) 질의는 예외**: 첨부 근거의 답변 마커
   `(출처: 첨부파일명)`은 `debug.mysql_rows`/`chroma_chunks`의 `source_label`이
-  아니라 **`debug.attachments`(첨부 파일명 배열)와 `sources`** 에만 등장한다.
-  따라서 첨부 route(`route: "semantic"`, `debug.router_stage: "attachment"`)에서는
-  `debug.attachments` ∪ `source_label` 집합으로 대조하라.
+  아니라 **`debug.attachments`(첨부 파일명 배열)와 `sources`** 에만 등장할 수 있다.
+  첨부도 동일 Agentic 실행(`route: "semantic"`, `debug.router_stage: "tool_agent"`)이므로
+  `debug.attachments` ∪ 검색 Tool의 `source_label` 집합으로 관대하게 대조하라.
 - 칩 클릭 시 원문 문서로 이동하려면 파일명↔문서 매핑이 필요하다 —
   문서 목록 API(`GET .../documents`)의 `filename`과 매칭한다.
 
@@ -60,12 +60,9 @@
 
 ## 4. 주의점
 
-- **적용 범위(응답 `route`별로 다름)**: 인라인 `(출처:)` 마커는 `route`가
-  `semantic`(RAG 검색)이거나 첨부(`attachments`) 질의일 때 **best-effort로만**
-  붙는다. `route: "filter_lookup"`(구조화 조회 템플릿)·`route: "overview"`
-  (프로젝트 조망 요약) 응답에는 **마커가 없을 수 있다** — 이 경로들은 답변을
-  템플릿/요약으로 구성하기 때문이다. 따라서 마커 부재를 오류로 처리하지 말고,
-  `route`를 확인해 마커가 없으면 `sources`(표시용)로 폴백하라.
+- **적용 범위**: 프로젝트 Q&A는 `route: "semantic"` 호환 값을 유지하지만, 어떤
+  Tool이 선택됐는지에 따라 인라인 `(출처:)` 마커가 없을 수 있다. 마커 부재를 오류로
+  처리하지 말고 `sources`(표시용)와 `debug.attachments`/`source_label`로 폴백하라.
 - **마커 파싱은 관대하게**: 답변 생성은 LLM이라 마커 형식이 100% 균일하지
   않을 수 있다(예: `(출처: 파일명 원문)`처럼 접미가 붙는 경우 관측됨).
   파싱 실패 시 마커를 그대로 두는 폴백을 두라.

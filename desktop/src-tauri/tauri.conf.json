@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "PaiM",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "identifier": "com.paim.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -28,7 +28,8 @@
     ],
     "macOSPrivateApi": true,
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; base-uri 'self'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' asset: http://asset.localhost blob: data: http: https:; media-src 'self' blob: data:; connect-src 'self' ipc: http://ipc.localhost http: https:",
+      "devCsp": null
     }
   },
   "bundle": {

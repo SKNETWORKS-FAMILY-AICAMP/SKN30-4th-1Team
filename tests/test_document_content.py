@@ -129,15 +129,15 @@ def _finalized():
 
 @pytest.mark.parametrize(("filename", "data", "valid", "expected"), DOCUMENT_CASES)
 def test_upload_applies_shared_fixture_before_db_and_storage(filename, data, valid, expected):
-    with patch("backend.api.upload.require_project_access"), patch(
-        "backend.api.upload.require_upload_user", return_value=1
+    with patch("backend.api.documents.require_project_access"), patch(
+        "backend.api.documents.require_upload_user", return_value=1
     ), patch(
-        "backend.api.upload.reserve_document", return_value=_reservation()
+        "backend.api.documents.reserve_document", return_value=_reservation()
     ) as reserve, patch(
-        "backend.api.upload.write_reserved_file"
+        "backend.api.documents.write_reserved_file"
     ) as write_file, patch(
-        "backend.api.upload.finalize_document", return_value=_finalized()
-    ), patch("backend.api.upload._process_upload") as process:
+        "backend.api.documents.finalize_document", return_value=_finalized()
+    ), patch("backend.api.documents._process_upload") as process:
         response = _client.post(
             "/api/v1/projects/1/documents",
             files={"file": (filename, data, "application/octet-stream")},
@@ -184,25 +184,25 @@ def test_query_applies_same_fixture_before_db_and_llm(filename, data, valid, exp
     with patch("backend.api.query.require_project_access"), patch(
         "backend.api.query.get_connection", return_value=conn
     ) as get_connection, patch(
-        "backend.api.query.run_qa", return_value={"answer": "ok", "debug": {}}
-    ) as run_qa:
+        "backend.api.query.run_agentic_qa", return_value={"answer": "ok", "debug": {}}
+    ) as run_agentic_qa:
         response = _client.post("/api/v1/projects/1/query", json=payload)
 
     if filename in CONVERSION_FAILURE_FILENAMES:
         # 검증을 통과한 파일의 변환 실패는 질의를 막지 않는다(관대한 첨부 정책).
         assert response.status_code == 200
         assert get_connection.called
-        run_qa.assert_called_once()
+        run_agentic_qa.assert_called_once()
     elif not valid:
         assert response.status_code == 415
         assert response.json()["detail"]["code"] == INVALID_DOCUMENT_CODE
         get_connection.assert_not_called()
-        run_qa.assert_not_called()
+        run_agentic_qa.assert_not_called()
     else:
         # query는 empty attachment를 명시적 placeholder로 유지하는 기존 계약이다.
         assert response.status_code == 200
         assert get_connection.called
-        run_qa.assert_called_once()
+        run_agentic_qa.assert_called_once()
 
 
 def test_sensitive_pdf_parser_warning_is_absent_from_shared_and_endpoint_logs(caplog):
@@ -213,12 +213,12 @@ def test_sensitive_pdf_parser_warning_is_absent_from_shared_and_endpoint_logs(ca
     caplog.clear()
     assert extract_document_text("sensitive.pdf", data) == "A"
 
-    with patch("backend.api.upload.require_project_access"), patch(
-        "backend.api.upload.require_upload_user", return_value=1
-    ), patch("backend.api.upload.reserve_document", return_value=_reservation()), patch(
-        "backend.api.upload.write_reserved_file"
-    ), patch("backend.api.upload.finalize_document", return_value=_finalized()), patch(
-        "backend.api.upload._process_upload"
+    with patch("backend.api.documents.require_project_access"), patch(
+        "backend.api.documents.require_upload_user", return_value=1
+    ), patch("backend.api.documents.reserve_document", return_value=_reservation()), patch(
+        "backend.api.documents.write_reserved_file"
+    ), patch("backend.api.documents.finalize_document", return_value=_finalized()), patch(
+        "backend.api.documents._process_upload"
     ):
         upload_response = _client.post(
             "/api/v1/projects/1/documents",
@@ -229,7 +229,7 @@ def test_sensitive_pdf_parser_warning_is_absent_from_shared_and_endpoint_logs(ca
     with patch("backend.api.query.require_project_access"), patch(
         "backend.api.query.get_connection", return_value=query_conn
     ), patch(
-        "backend.api.query.run_qa", return_value={"answer": "ok", "debug": {}}
+        "backend.api.query.run_agentic_qa", return_value={"answer": "ok", "debug": {}}
     ):
         query_response = _client.post(
             "/api/v1/projects/1/query",

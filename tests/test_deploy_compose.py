@@ -108,6 +108,14 @@ def test_backend_pins_jwt_auth_mode(prod: dict):
     assert prod["services"]["backend"]["environment"]["PAIM_AUTH_MODE"] == "jwt"
 
 
+def test_backend_pins_agentic_openai_contract(prod: dict):
+    env = prod["services"]["backend"]["environment"]
+    assert env["LLM_PROVIDER"] == "openai"
+    assert env["OPENAI_MODEL"] == "gpt-4.1-mini"
+    assert env["OPENAI_BASE_URL"] == ""
+    assert env["OPENAI_API_BASE"] == ""
+
+
 def test_backend_reads_env_file(prod: dict):
     """Compose의 .env는 YAML 보간용일 뿐 컨테이너 환경으로 자동 주입되지 않는다.
     이 선언이 없으면 PAIM_JWT_SECRET 누락으로 기동 자체가 실패한다."""

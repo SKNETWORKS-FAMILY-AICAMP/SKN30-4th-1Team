@@ -1,6 +1,6 @@
 {
   "name": "paim",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,6 +8,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "test:layout": "node scripts/layout-smoke.mjs",
+    "test:stt": "node --test scripts/stt-contract.test.mjs scripts/pending-document-deletes.test.mjs scripts/project-document-sync.test.mjs",
+    "test:workspace": "node --test scripts/workspace-route.test.mjs",
     "test:offline": "npm run build && node scripts/offline-bundle-smoke.mjs",
     "app:build": "tauri build",
     "app:build:mac": "tauri build --bundles app",

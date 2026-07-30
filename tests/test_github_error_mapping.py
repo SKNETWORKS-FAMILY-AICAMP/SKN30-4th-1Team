@@ -65,11 +65,17 @@ def test_connect_maps_github_failures(kind, status, code):
 def test_readme_404_is_normal_absence_and_empty_lists_are_success():
     with patch(
         "backend.api.repository._gh_get",
-        side_effect=[[], GitHubAPIError("not_found", "readme"), [], []],
+        side_effect=[
+            {"sha": "head-sha"},
+            [],
+            GitHubAPIError("not_found", "readme"),
+            [],
+            [],
+        ],
     ):
         sources, sha, warnings = _collect_repo_sources("o/r", "main")
     assert sources == {}
-    assert sha is None
+    assert sha == "head-sha"
     assert warnings == []
 
 
@@ -78,36 +84,53 @@ def test_readme_404_is_normal_absence_and_empty_lists_are_success():
     [
         ("not_found", "metadata", "GITHUB_REPOSITORY_NOT_FOUND:metadata"),
         ("not_found", "commits", "GITHUB_BRANCH_NOT_FOUND:commits"),
-        ("not_found", "issues", "GITHUB_SOURCE_NOT_FOUND:issues"),
-        ("not_found", "pulls", "GITHUB_SOURCE_NOT_FOUND:pulls"),
-        ("not_found", "merged_pulls", "GITHUB_SOURCE_NOT_FOUND:merged_pulls"),
         ("auth", "commits", "GITHUB_AUTH_FAILED:commits"),
-        ("permission", "issues", "GITHUB_PERMISSION_DENIED:issues"),
-        ("unavailable", "pulls", "GITHUB_UNAVAILABLE:pulls"),
     ],
 )
 def test_sync_fatal_fetch_preserves_index_and_records_stable_code(kind, source, expected):
     failure = GitHubAPIError(kind, source)
-    precheck = failure if source == "metadata" else None
-    collect_failure = failure if source not in {"metadata", "merged_pulls"} else None
-    merged_failure = failure if source == "merged_pulls" else None
-    with patch("backend.api.repository._precheck_repository", side_effect=precheck), patch(
+    with patch("backend.api.repository._require_sync_ownership"), patch(
         "backend.api.repository._get_last_reconciled_pr", return_value=7
     ), patch(
         "backend.api.repository._collect_repo_sources",
-        return_value=({"x": {"content": "x", "metadata": {}}}, "sha", []),
-        side_effect=collect_failure,
+        side_effect=failure,
     ), patch(
         "backend.api.repository._collect_merged_prs",
         return_value=[],
-        side_effect=merged_failure,
-    ), patch("backend.api.repository._clear_repo_indexed_data") as clear, patch(
-        "backend.api.repository._set_repo_status"
+    ), patch("backend.api.repository._set_repo_status"
     ) as status, patch("backend.api.repository.reconcile_repository_prs") as reconcile:
-        _sync_bg(1, 2, "o/r", "main", None)
-    clear.assert_not_called()
+        with patch("backend.api.repository._cleanup_repo_generation"):
+            _sync_bg(1, 2, "run-1", "o/r", "main", None)
     reconcile.assert_not_called()
-    status.assert_called_once_with(2, "failed", last_error=expected)
+    status.assert_called_once_with(2, "run-1", "failed", last_error=expected)
+
+
+@pytest.mark.parametrize(
+    ("kind", "source", "expected"),
+    [
+        ("unavailable", "readme", "GITHUB_UNAVAILABLE:readme"),
+        ("not_found", "issues", "GITHUB_SOURCE_NOT_FOUND:issues"),
+        ("permission", "issues", "GITHUB_PERMISSION_DENIED:issues"),
+        ("unavailable", "pulls", "GITHUB_UNAVAILABLE:pulls"),
+    ],
+)
+def test_optional_source_failure_returns_warning(kind, source, expected):
+    side_effect = [
+        {"sha": "head-sha"},
+        [{"sha": "head-sha", "commit": {"message": "latest", "author": {}}}],
+        {},
+        [],
+        [],
+    ]
+    source_call_index = {"readme": 2, "issues": 3, "pulls": 4}[source]
+    side_effect[source_call_index] = GitHubAPIError(kind, source)
+
+    with patch("backend.api.repository._gh_get", side_effect=side_effect):
+        sources, sha, warnings = _collect_repo_sources("o/r", "main")
+
+    assert sha == "head-sha"
+    assert "commits.txt" in sources
+    assert {"source_type": source, "reason": expected} in warnings
 
 
 @pytest.mark.parametrize(

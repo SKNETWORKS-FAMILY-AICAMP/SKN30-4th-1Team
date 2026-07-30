@@ -6,13 +6,12 @@ from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
 import tiktoken
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
+from backend.agentic_graph import run_agentic_qa
 from backend.db.mysql import get_connection
 from backend.security.session_crypto import get_session_crypto
 from backend.chat.session_store import SessionStore
 from backend.chat.context_builder import ContextBuilder
-from backend.llm.chat_model_factory import get_chat_model
 from backend.api.auth import get_current_user_id, require_project_access
 from backend.rate_limit import RATE_LIMIT_CHAT, authenticated_user_key, limiter
 
@@ -82,24 +81,51 @@ def _verify_session_ownership(cursor, project_id: int, session_id: str):
         raise HTTPException(status_code=404, detail="해당 프로젝트에서 요청하신 세션을 찾을 수 없습니다.")
 
 
-_ROLE_TO_LANGCHAIN_MESSAGE = {
-    "system": SystemMessage,
-    "assistant": AIMessage,
-    "user": HumanMessage,
-}
+def _to_agentic_prepared_context(
+    final_prompt_messages: List[dict], current_question: str
+) -> List[dict]:
+    """Keep the session context builder's budget and message order for Agentic Q&A.
 
-
-def _to_langchain_messages(final_prompt_messages: List[dict]):
-    """ContextBuilder.build_final_prompt()가 만든 role/content dict 목록을
-    LangChain 메시지 객체 목록으로 변환한다 (system/assistant/user 외 role은 user로 취급)."""
+    The Agentic runner owns its orchestrator system prompt and appends the
+    current question itself.  The remaining server-prepared summary, message
+    window, and optional RAG text must retain their original roles so a long
+    session does not silently lose its rolling summary.
+    """
+    context_messages = list(final_prompt_messages)
+    if context_messages and context_messages[0].get("role") == "system":
+        context_messages = context_messages[1:]
+    if (
+        context_messages
+        and context_messages[-1].get("role") == "user"
+        and context_messages[-1].get("content") == current_question
+    ):
+        context_messages = context_messages[:-1]
+    # The session handler has already appended this turn to recent_messages
+    # before ContextBuilder runs.  The Agentic runner appends ``question`` at
+    # the end, so remove that copied message as well instead of asking the
+    # orchestrator the same question twice.
+    for index in range(len(context_messages) - 1, -1, -1):
+        message = context_messages[index]
+        if (
+            message.get("role") == "user"
+            and message.get("content") == current_question
+        ):
+            del context_messages[index]
+            break
     return [
-        _ROLE_TO_LANGCHAIN_MESSAGE.get(m["role"], HumanMessage)(content=m["content"])
-        for m in final_prompt_messages
+        {"role": message["role"], "content": message["content"]}
+        for message in context_messages
+        if message.get("content")
     ]
 
 
 # --- [1] POST /projects/{project_id}/sessions (세션 생성) ---
-@router.post("", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=SessionResponse,
+    status_code=status.HTTP_201_CREATED,
+    deprecated=True,
+)
 def create_chat_session(project_id: int, request: SessionCreateRequest, db=Depends(get_db)):
     require_project_access(project_id, min_role="member")
     session_id = f"sess_{uuid.uuid4().hex[:12]}"
@@ -119,7 +145,7 @@ def create_chat_session(project_id: int, request: SessionCreateRequest, db=Depen
 
 
 # --- [2] GET /projects/{project_id}/sessions (세션 목록 조회) ---
-@router.get("", response_model=List[SessionResponse])
+@router.get("", response_model=List[SessionResponse], deprecated=True)
 def get_chat_session_list(project_id: int, db=Depends(get_db)):
     require_project_access(project_id)
     current_user_id = get_current_user_id()
@@ -141,7 +167,7 @@ def get_chat_session_list(project_id: int, db=Depends(get_db)):
 
 
 # --- [3] PATCH /projects/{project_id}/sessions/{session_id} (세션 수정) ---
-@router.patch("/{session_id}", response_model=SessionResponse)
+@router.patch("/{session_id}", response_model=SessionResponse, deprecated=True)
 def update_chat_session(project_id: int, session_id: str, request: SessionUpdateRequest, db=Depends(get_db)):
     require_project_access(project_id, min_role="member")
     with db.cursor() as cursor:
@@ -159,7 +185,11 @@ def update_chat_session(project_id: int, session_id: str, request: SessionUpdate
 
 
 # --- [4] DELETE /projects/{project_id}/sessions/{session_id} (세션 삭제) ---
-@router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{session_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    deprecated=True,
+)
 def delete_chat_session(project_id: int, session_id: str, db=Depends(get_db)):
     require_project_access(project_id, min_role="member")
     with db.cursor() as cursor:
@@ -174,7 +204,11 @@ def delete_chat_session(project_id: int, session_id: str, db=Depends(get_db)):
 
 
 # --- [5] GET /projects/{project_id}/sessions/{session_id}/messages (메시지 이력 조회) ---
-@router.get("/{session_id}/messages", response_model=List[MessageResponse])
+@router.get(
+    "/{session_id}/messages",
+    response_model=List[MessageResponse],
+    deprecated=True,
+)
 def get_session_message_history(project_id: int, session_id: str, db=Depends(get_db)):
     require_project_access(project_id)
     with db.cursor() as cursor:
@@ -292,10 +326,17 @@ def handle_session_query(
     )
     # -------------------------------------------------------------------------
 
-    # 실제 LLM 호출 (LLM_PROVIDER env로 openai/claude/google/local 중 선택 — llm/chat_model_factory.get_chat_model() 재사용)
+    # 세션의 암호화 이력·요약·임시 RAG 입력은 기존 ContextBuilder 예산을 그대로
+    # 적용한 뒤, 프로젝트 Q&A와 같은 Agentic 오케스트레이터에 전달한다.
     try:
-        llm_response = get_chat_model().invoke(_to_langchain_messages(final_prompt_messages))
-        llm_response_text = llm_response.content
+        agentic_result = run_agentic_qa(
+            project_id=project_id,
+            question=request.current_question,
+            prepared_context=_to_agentic_prepared_context(
+                final_prompt_messages, request.current_question
+            ),
+        )
+        llm_response_text = agentic_result["answer"]
     except Exception:
         logger.error("session_llm_failed", extra={"code": "SESSION_LLM_FAILED"})
         raise HTTPException(status_code=503, detail="LLM 응답 생성 중 오류가 발생했습니다. 서버 로그를 확인하세요.")
@@ -348,7 +389,7 @@ def handle_session_query(
     }
 
 
-@router.post("/{session_id}/query")
+@router.post("/{session_id}/query", deprecated=True)
 @limiter.limit(RATE_LIMIT_CHAT, key_func=authenticated_user_key)
 def rate_limited_session_query(
     request: Request,

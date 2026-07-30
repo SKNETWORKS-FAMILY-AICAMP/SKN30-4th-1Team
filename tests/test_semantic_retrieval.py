@@ -14,6 +14,11 @@ def test_multi_query_generation_falls_back_to_original(monkeypatch):
     assert qa_engine._generate_multi_queries("왜 PR AUC를 선택했어?") == ["왜 PR AUC를 선택했어?"]
 
 
+def test_multi_query_prompt_does_not_force_exactly_three_rewrites():
+    assert "2~3개" in qa_engine.MULTI_QUERY_PROMPT
+    assert "3개를 반환" not in qa_engine.MULTI_QUERY_PROMPT
+
+
 def test_memory_vector_upsert_and_delete():
     """memory_id 기준 ChromaDB upsert/delete 계약을 검증한다."""
     collection = MagicMock()

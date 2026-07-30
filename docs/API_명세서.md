@@ -1,7 +1,7 @@
 # PaiM FastAPI 명세서
 
 <!-- auth-mode: jwt-fail-closed -->
-<!-- updated: 2026-07-22 -->
+<!-- updated: 2026-07-29 -->
 
 **Base URL (로컬)**: `http://127.0.0.1:8000`  
 **API Prefix**: `/api/v1` (단, GitHub App 연동 엔드포인트는 prefix 없이 `/github/app/*`)  
@@ -62,7 +62,7 @@ prefix). CORS `OPTIONS` 프리플라이트도 통과.
 | `PATCH /api/v1/projects/{id}` | 인증 | member |
 | `DELETE /api/v1/projects/{id}` | 인증 | owner |
 | 문서·저장소·메모리 조회(`GET`) | 인증 | viewer |
-| 문서 업로드·삭제, 저장소 연결/sync/삭제 | 인증 | member |
+| 문서·음성 업로드·삭제, 저장소 연결/sync/삭제 | 인증 | member |
 | 메모리 `POST`·`PATCH`·`DELETE` | 인증 | member |
 | `POST /api/v1/projects/{id}/query` | 인증 | viewer |
 | `POST /api/v1/projects/{id}/git` | 인증 | member |
@@ -129,7 +129,7 @@ MySQL, schema, ChromaDB, upload 저장소의 준비 상태를 확인한다. 인�
 
 ### `GET /api/v1/capabilities`
 
-데스크톱 앱이 사용할 문서 형식과 업로드 크기 제한을 조회한다. 인증이 필요하다.
+데스크톱 앱이 사용할 문서 형식·업로드 제한과 로컬 채팅 정책을 조회한다. 인증이 필요하다.
 
 **응답 `200`**
 ```json
@@ -143,6 +143,11 @@ MySQL, schema, ChromaDB, upload 저장소의 준비 상태를 확인한다. 인�
     "extensions": ["docx", "md", "pdf", "txt"],
     "max_file_bytes": 8388608,
     "max_total_bytes": 8388608
+  },
+  "desktop_chat": {
+    "storage": "local_only",
+    "server_persistence": false,
+    "legacy_session_api": "deprecated"
   }
 }
 ```
@@ -462,6 +467,45 @@ MySQL, schema, ChromaDB, upload 저장소의 준비 상태를 확인한다. 인�
 ```
 
 > **처리 흐름**: 업로드 즉시 `processing` 반환 → 백그라운드 처리 완료 후 `indexed` 또는 `failed` 로 상태 갱신.
+
+---
+
+### `POST /api/v1/projects/{project_id}/audio`
+
+회의 녹음을 저장하고 STT 전사 → LLM 추출 → MySQL·Vector DB 적재 → Project
+Memory 갱신을 백그라운드로 수행한다. 최소 역할은 **member**이다.
+
+**요청** `multipart/form-data`
+
+| 필드 | 타입 | 필수 | 설명 |
+|------|------|------|------|
+| `file` | File | ✅ | `STT_PROVIDER`가 지원하는 오디오. OpenAI 25 MB, CLOVA 200 MB 상한 |
+| `date` | string | - | 회의 날짜 `YYYY-MM-DD` |
+
+**응답 `201`**
+```json
+{
+  "doc_id": 71,
+  "status": "processing",
+  "provider": "openai",
+  "diarization": false
+}
+```
+
+업로드 즉시 `processing`을 반환한다. `GET /documents/{doc_id}/status`로
+`indexed` 또는 `failed`를 폴링한다. 실패 상태에는 `STT_PROVIDER_ERROR`,
+`STT_MISSING_CREDENTIALS`, `STT_INGEST_FAILED` 등의 정규화된 `last_error`가 남는다.
+
+**요청 경계 오류**
+
+- `400`: 빈 오디오, 잘못된 파일명, 미지원 확장자
+- `403`: 프로젝트 member 미만
+- `413`: 현재 STT provider의 크기 상한 초과
+- `503`: 알 수 없는 `STT_PROVIDER` 설정
+
+**주요 설정**: `STT_PROVIDER=openai|clova`, `STT_MODEL`, `STT_LANGUAGE`,
+`STT_TIMEOUT_SECONDS`. CLOVA는 `CLOVA_SPEECH_INVOKE_URL`과 `CLOVA_SPEECH_SECRET`이
+필요하며 화자 분리를 지원한다.
 
 ---
 
@@ -789,6 +833,8 @@ Memory 항목 수동 추가.
 Memory 항목 수정. (최소 역할: member) 수정할 필드만 부분 전송한다(PATCH 시맨틱).
 의미 필드(`category`/`content`/`owner`/`date`/`due_date`/`topic`/`reason`)를 수정하면
 `is_user_verified: true`로 마킹되어 LLM 재처리 시 덮어쓰지 않는다.
+`due_date`를 직접 설정하거나 해제하면 해당 action에 남아 있던 pending
+`set_due_date` 제안은 자동으로 거절 처리된다.
 
 **요청 Body** (수정할 필드만 포함)
 ```json
@@ -938,7 +984,8 @@ Memory 항목 삭제.
 ## 제안 (Suggestions)
 
 LLM이 만든 메모리 변경 제안(pending)을 사람이 승인/거절한다. `kind`는
-`complete_action`(액션 완료) 또는 `supersede`(결정 번복). 상세 계약·에러는
+`complete_action`(액션 완료), `set_due_date`(상대 마감일 후보 확정) 또는
+`supersede`(결정 번복). 상세 supersede 계약·에러는
 [HANDOVER_SUPERSEDE_FRONTEND.md](HANDOVER_SUPERSEDE_FRONTEND.md).
 
 ### `GET /api/v1/projects/{project_id}/suggestions`
@@ -950,7 +997,7 @@ LLM이 만든 메모리 변경 제안(pending)을 사람이 승인/거절한다.
 | 파라미터 | 타입 | 기본 | 설명 |
 |---------|------|------|------|
 | `status` | string | `pending` | `pending`/`accepted`/`rejected` |
-| `kind` | string | `complete_action` | `complete_action`/`supersede`/`all`. 구 클라이언트 보호를 위해 기본은 `complete_action`만 |
+| `kind` | string | `complete_action` | `complete_action`/`set_due_date`/`supersede`/`all`. 구 클라이언트 보호를 위해 기본은 `complete_action`만 |
 
 **응답 `200`**
 ```json
@@ -971,6 +1018,23 @@ LLM이 만든 메모리 변경 제안(pending)을 사람이 승인/거절한다.
 ]
 ```
 
+`set_due_date`의 `evidence` 예:
+
+```json
+{
+  "type": "due_date",
+  "suggested_due_date": "2026-08-07",
+  "raw_text": "다음 주 금요일까지",
+  "reference_date": "2026-07-30",
+  "source": "회의록.md"
+}
+```
+
+연도·월·일이 원문에 모두 명시된 action 마감은 제안 없이 즉시 `memory.due_date`에
+저장된다. 상대 또는 연도 생략 표현은 기준일로 단일 날짜를 계산할 수 있고 원문 구절이
+실제 입력에 존재할 때만 `set_due_date` pending 제안이 생성된다. 단일 후보를 정할 수
+없는 표현은 날짜를 만들지 않고 action `content`에만 보존한다.
+
 **응답 `400`** — 잘못된 `status`/`kind`  
 **응답 `404`** — 프로젝트 없음
 
@@ -979,12 +1043,13 @@ LLM이 만든 메모리 변경 제안(pending)을 사람이 승인/거절한다.
 ### `POST /api/v1/projects/{project_id}/suggestions/{suggestion_id}/accept`
 
 제안 승인. (최소 역할: member) `complete_action`은 대상 action을 완료 처리,
+`set_due_date`는 아직 마감이 없는 action에 제안 날짜를 설정하고,
 `supersede`는 대상 decision을 번복 처리한다.
 
 **응답 `200`** — 갱신된 suggestion 객체(위 목록 항목과 동일 스키마, `status: "accepted"`)
 
 **응답 `400`** — 이미 해소된 제안 / 지원하지 않는 kind  
-**응답 `409`** — supersede 대상/대체 결정 충돌, 동시 경합 (상세: supersede 핸드오버 §4)  
+**응답 `409`** — 제안 생성 후 action 마감이 다른 값으로 변경됨, supersede 대상/대체 결정 충돌, 동시 경합 (상세: supersede 핸드오버 §4)
 **응답 `404`** — 제안 없음
 
 ---
@@ -1085,7 +1150,8 @@ Git 로그 텍스트를 동기 처리해 메모리로 추출·적재한다. (최
 
 ## 채팅 세션
 
-> **경로 확정 (2026-07-02)**: 세션 엔드포인트는 `/api/v1/projects/{id}/sessions/*` 로 확정되었습니다.
+> **Deprecated**: `/api/v1/projects/{id}/sessions/*`는 구형 클라이언트 호환용이다.
+> 현재 데스크톱은 이 API를 호출하지 않고 개인 채팅을 로컬에만 저장한다.
 
 ### `POST /api/v1/projects/{project_id}/sessions`
 
@@ -1187,7 +1253,7 @@ Git 로그 텍스트를 동기 처리해 메모리로 추출·적재한다. (최
 
 ### `POST /api/v1/projects/{project_id}/sessions/{session_id}/query`
 
-세션 기반 대화형 질의. 암호화된 대화 이력을 컨텍스트로 사용하며 롤링 요약을 자동 관리함.
+세션 기반 Agentic 대화형 질의. 암호화된 대화 이력과 롤링 요약을 컨텍스트로 사용하고, 프로젝트 질의와 같은 읽기 전용 근거 도구로 답변을 생성함.
 
 **요청 Body**
 ```json
@@ -1200,7 +1266,7 @@ Git 로그 텍스트를 동기 처리해 메모리로 추출·적재한다. (최
 | 필드 | 타입 | 설명 |
 |---|---|---|
 | `current_question` | string | 현재 질문 |
-| `rag_context` | string | RAG 검색 결과 평문 (선택, 프론트에서 먼저 `/query` 호출 후 전달 가능) |
+| `rag_context` | string | 이번 질의 전용 RAG 참고 평문 (선택, 저장하지 않음) |
 
 **응답 `200`**
 ```json
@@ -1224,6 +1290,9 @@ Git 로그 텍스트를 동기 처리해 메모리로 추출·적재한다. (최
 
 프로젝트 기반 자연어 질의. (최소 역할: viewer)
 
+요청에 포함된 `history`는 이번 답변 생성에만 사용하며 서버 채팅 테이블에 저장하지 않는다.
+OpenAPI operation에는 `x-paim-chat-persistence: none`이 표시된다.
+
 **요청 Body**
 ```json
 {
@@ -1244,8 +1313,9 @@ Git 로그 텍스트를 동기 처리해 메모리로 추출·적재한다. (최
 | `history` | array | - | `{role, content}` 대화 이력 |
 | `attachments` | array | - | 첨부 자료 `{filename, content_base64}`. `.md`/`.markdown`/`.txt`/`.docx`/`.pdf`, **파일당 최대 8 MB · 전체 합계 8 MB** |
 
-> **`attachments`**: 첨부가 있으면 라우터를 우회해 항상 `route: "semantic"`으로
-> 처리된다. 형식 미지원 시 **400**, 8 MB 초과 시 **413**.
+> **`attachments`**: 형식·크기를 검증하고 텍스트를 추출한 뒤, 같은 Agentic Q&A 실행의
+> 이번 질문 전용 임시 근거로 전달한다. 별도 라우트나 영구 저장 분기는 없다. 형식 미지원 시
+> **400**, 내용 불일치 시 **415**, 8 MB 초과 시 **413**.
 > 첨부 상한(`QUERY_ATTACHMENT_MAX_FILE_BYTES` = 8 MB)은 문서 업로드 상한
 > (`PROJECT_DOCUMENT_MAX_FILE_BYTES` = 10 MB)과 다른 값이다.
 
@@ -1253,13 +1323,13 @@ Git 로그 텍스트를 동기 처리해 메모리로 추출·적재한다. (최
 ```json
 {
   "answer": "현재 가장 큰 리스크는 API 계약 변경 가능성입니다. (출처: planning.pdf)",
-  "plan": [
-    "API 계약 변경 사항을 프론트엔드 팀과 공유한다",
-    "영향받는 엔드포인트 목록을 작성한다"
-  ],
+  "plan": [],
   "sources": ["planning.pdf", "meeting_notes.md"],
   "route": "semantic",
   "debug": {
+    "router_stage": "tool_agent",
+    "tools_used": ["search_project_evidence"],
+    "tool_rounds": 1,
     "filters": { "category": null },
     "mysql_rows": [
       { "category": "risk", "content": "...", "source": "planning.pdf", "source_label": "planning.pdf" }
@@ -1271,17 +1341,13 @@ Git 로그 텍스트를 동기 처리해 메모리로 추출·적재한다. (최
 }
 ```
 
-> **`route`**: 질문 분류 결과. `semantic`(RAG 검색·첨부) \| `filter_lookup`
-> (구조화 조회 템플릿) \| `overview`(프로젝트 조망 요약) 중 하나. (구 `both`
-> 값은 더 이상 사용하지 않는다.) 세 경로 모두 `answer`·`plan`·`sources`·
-> `route`·`debug`를 반환한다(필드 생략 없음). 다만 **route별로 내용이 다르다**:
-> `filter_lookup`·`overview`는 `plan`이 항상 빈 배열 `[]`이고, `debug`에
-> `mysql_rows`/`chroma_chunks`가 없으며(각각 `rows` 개수 / `overview` 통계),
-> 답변이 템플릿·요약이라 인라인 `(출처:)` 마커가 없을 수 있다. `semantic`만
-> `debug.mysql_rows`/`chroma_chunks`와 마커를 제공한다 — 상세는
-> [HANDOVER_CITATION_FRONTEND.md](HANDOVER_CITATION_FRONTEND.md).
+> **`route`**: 기존 클라이언트 호환을 위해 이 엔드포인트는 항상 `semantic`을 반환한다.
+> 질문 유형은 Agentic 오케스트레이터가 `search_project_evidence`,
+> `query_structured_memory`, `get_project_overview`를 필요에 따라 조합해 처리한다.
+> 사용한 도구와 라운드는 `debug.tools_used`/`debug.tool_rounds`에서 확인할 수 있으며,
+> 검색 도구에 따라 `debug.mysql_rows`/`debug.chroma_chunks`가 포함될 수 있다.
 >
-> **`plan`**: LLM이 답변을 근거로 생성한 다음 할 일 목록 (best-effort — 생성 실패 시 빈 배열 `[]` 반환).
+> **`plan`**: 하위호환을 위해 유지하는 필드이며 현재 기본 Agentic Q&A에서는 빈 배열 `[]`이다.
 >
 > **`answer` 출처 마커 (2026-07-22 추가)**: 답변 본문에 근거의 출처가
 > `(출처: 파일명)` 형태로 포함된다. 프론트는 이 마커를 파싱해 출처 칩/링크로
@@ -1462,8 +1528,7 @@ GitHub 설치 완료 후 리다이렉트되는 콜백. **공개(무인증)이나
 
 ## 구현 현황
 
-> 갱신: 2026-07-22 (TASK-010 반영 — 누락 20 operation·인증/권한·query
-> attachments·memory 필드 문서화. 전체 46 operation, origin/main `5240f40` 기준)
+> 갱신: 2026-07-29 (#9 STT 업로드 경로 반영. 전체 47 operation)
 
 | 엔드포인트 | 상태 |
 |-----------|------|
@@ -1474,6 +1539,7 @@ GitHub 설치 완료 후 리다이렉트되는 콜백. **공개(무인증)이나
 | `GET /api/v1/projects` | ✅ 구현 완료 (DEV user 시 membership JOIN 필터) |
 | `GET /api/v1/projects/{id}` | ✅ 구현 완료 |
 | `POST /api/v1/projects/{id}/documents` | ✅ 구현 완료 (BackgroundTask async) |
+| `POST /api/v1/projects/{id}/audio` | ✅ 구현 완료 (STT → Project Memory, BackgroundTask async) |
 | `GET /api/v1/projects/{id}/documents` | ✅ 구현 완료 |
 | `GET /api/v1/projects/{id}/documents/{doc_id}/status` | ✅ 구현 완료 (last_error 포함) |
 | `DELETE /api/v1/projects/{id}/documents/{doc_id}` | ✅ 구현 완료 (memory + chroma + file cleanup) |

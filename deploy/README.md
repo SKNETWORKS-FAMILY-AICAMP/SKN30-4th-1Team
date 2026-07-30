@@ -166,31 +166,34 @@ docker image prune -f          # 사용하지 않는 이미지 정리 (태그 �
 
 ### 항상 필수
 
-`PAIM_AUTH_MODE` `PAIM_JWT_SECRET` `OPENAI_API_KEY` `SESSION_MEMORY_KEY`
+`PAIM_AUTH_MODE` `PAIM_JWT_SECRET` `SESSION_MEMORY_KEY`, `LLM_PROVIDER`
+`OPENAI_API_KEY` `OPENAI_MODEL`,
 `DB_HOST` `DB_PORT` `DB_USER` `DB_PASSWORD` `DB_NAME`, 다섯 `RATE_LIMIT_*`,
 `FORWARDED_ALLOW_IPS`, `PAIM_PROXY_SUBNET`, `PAIM_CADDY_PROXY_IP`,
 `PAIM_BACKEND_PROXY_IP`가 필수다.
 
-`SESSION_MEMORY_KEY`와 `OPENAI_API_KEY`는 **lazy 경로**다. 누락돼도 서버는 뜨고
-`/health`도 200을 반환한 뒤, 채팅·문서 적재·검색에서야 실패한다. 그래서 preflight가
-기동 전에 잡는다.
-
-`OPENAI_API_KEY`는 `LLM_PROVIDER`와 **무관하게** 필요하다 — 벡터 임베딩 전용이다.
+`SESSION_MEMORY_KEY`와 `OPENAI_API_KEY`의 누락·placeholder 값도 preflight와
+non-dev 앱 시작에서 거부된다. 단, `OPENAI_API_KEY` 자체가 실제로 유효한지는
+외부 API를 호출해야 확인할 수 있다. 이 키는 Agentic Q&A와 벡터 임베딩 모두에
+사용한다.
 
 non-dev 시작 시 앱도 같은 계약을 DB/schema 작업보다 먼저 검증한다. DB 포트,
 32바이트 Base64 세션 키, placeholder, 승인된 요청 제한값과 Caddy `/32`가 맞지
 않으면 비밀값을 출력하지 않고 기동을 중단한다.
 
-### LLM provider
+### Agentic Q&A MVP 모델
 
-운영에서는 **`openai` 또는 `claude`만** 쓸 수 있다.
+운영은 **공식 OpenAI API + `gpt-4.1-mini`**로 고정한다.
 
-| provider | 운영 | 이유 |
-|---|---|---|
-| `openai` | ✅ | |
-| `claude` | ✅ | `ANTHROPIC_API_KEY` 필요 |
-| `google` | ❌ | 구조화 추출에서 `NotImplementedError` — 문서 적재 불가 |
-| `local` | ❌ | 추출 팩토리에 지원 분기 없음 — `ValueError` |
+| 설정 | 운영값 |
+|---|---|
+| `LLM_PROVIDER` | `openai` |
+| `OPENAI_MODEL` | `gpt-4.1-mini` |
+| `OPENAI_BASE_URL`, `OPENAI_API_BASE` | 미설정 또는 `https://api.openai.com/v1` |
+
+일반 LLM factory에 Claude·Google·local 분기가 남아 있어도 #18 Agentic Q&A의
+운영 지원 범위는 아니다. preflight, 앱 startup, `/health/ready`가 잘못된 조합을
+첫 사용자 요청 전에 거부한다.
 
 ### GitHub App
 

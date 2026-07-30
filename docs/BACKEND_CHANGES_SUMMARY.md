@@ -67,13 +67,13 @@ main 이후의 백엔드 작업은 크게 **두 덩어리**다:
 - **포인터 수명주기**: `migrate_v8.sql`(신규) self-FK `ON DELETE SET NULL` —
   신 결정 삭제 시 구 결정 자동 복귀. 삭제 경로 6곳 앱 코드는 무수정(DB가 소유).
 - **`active_memory` 뷰**(schema.sql·migrate_v8) — `superseded_by IS NULL` 필터의
-  중앙화. 요약 재생성(`graph.py`)·조망 집계(`query_intent.py`)·델타(`delta.py`)가
+  중앙화. 요약 재생성(`project_memory.py`)·조망 집계(`query_intent.py`)·델타(`delta.py`)가
   이 뷰를 읽는다. 잔여 raw `FROM memory` 조회는 전수 조사로 의도적임을 확인.
 - **벡터 수렴**(`memory_vector.py`) — 백필은 살아있는 row만 색인, 시작 시 cleanup이
   superseded 벡터 제거, PATCH는 superseded row면 upsert 대신 삭제.
 - **시작 시퀀스**(`startup.py`·`main.py`) — `ensure_schema_v8()`: 기존 DB 볼륨에도
   FK·뷰를 idempotent 자동 적용(수동 마이그레이션 불필요). lifespan 최선두 실행.
-- **제안 무효화** (`upload.py` update_memory) — 의미 필드(content 등) 수정 시 관련
+- **제안 무효화** (`memory.py` update_memory) — 의미 필드(content 등) 수정 시 관련
   pending supersede 제안 자동 reject(양쪽), 번복 관계를 깨는 category 변경은 409.
 - **경합 차단** — 해소 UPDATE `status='pending'` 조건부(+rowcount 409), 상호 승인
   순환은 `FOR UPDATE`로 차단, 데드락(1213)은 409로 변환.

@@ -201,6 +201,21 @@ ChromaDB metadata는 `str`/`int`/`float`/`bool`만 허용한다. `None`은 `-1`(
 - 리포지토리: `repo{repo_id}_{source_md5[:6]}_chunk{N}`
 - 그 외: `{source_md5[:6]}_chunk{N}`
 
+### Action 마감일 구조화
+
+문서·회의록·저장소 자료에서 action을 추출할 때 기록일(`date`)과 마감일
+(`due_date`)을 분리한다.
+
+- 원문에 연도·월·일이 모두 명시되고 추출 후보와 같은 날짜이면 `due_date`를 자동 저장한다.
+- 상대 날짜나 연도 생략 날짜는 업로드 기준일로 단일 날짜를 계산할 수 있을 때만
+  `set_due_date` suggestion으로 남긴다. 승인 전 `memory.due_date`는 `NULL`이다.
+- 원문 마감 구절이 실제 입력에 없거나 날짜가 유효하지 않으면 저장·제안하지 않는다.
+- “다음 주”, “빠른 시일 내”처럼 단일 날짜를 정할 수 없는 표현은 임의 변환하지 않는다.
+- 마감 표현은 추적을 위해 action `content`와 suggestion `evidence.raw_text`에 보존한다.
+
+이 정책은 DB v9의 기존 `memory.due_date`와 `memory_suggestions`를 사용하므로 추가
+마이그레이션이 필요 없다.
+
 ---
 
 ## 6. 포맷별 예외

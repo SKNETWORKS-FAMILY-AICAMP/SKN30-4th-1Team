@@ -222,7 +222,9 @@ fi
 require PAIM_JWT_SECRET    "backend/api/auth.py — 누락 시 기동 자체가 중단된다"
 # 아래 둘은 lazy 경로. 누락돼도 기동과 /health는 통과하고 실제 기능에서 터진다.
 require SESSION_MEMORY_KEY "backend/security/session_crypto.py 채팅 암복호화 (lazy)"
-require OPENAI_API_KEY     "backend/db/chroma.py 임베딩 — LLM_PROVIDER와 무관하게 필요 (lazy)"
+require LLM_PROVIDER       "Agentic Q&A MVP provider 고정"
+require OPENAI_API_KEY     "Agentic Q&A·임베딩에 필요 (lazy)"
+require OPENAI_MODEL       "Agentic Q&A MVP 모델 고정"
 require DB_HOST            "backend/db/mysql.py DB 접속"
 require DB_PORT            "backend/db/mysql.py DB 접속"
 require PAIM_AUTH_MODE     "운영 JWT 모드 고정"
@@ -272,45 +274,24 @@ for quota_key in PROJECT_STORAGE_QUOTA_BYTES USER_STORAGE_QUOTA_BYTES PROJECT_FI
   fi
 done
 
-# ── LLM provider 조건부 ──────────────────────────────────────────────────────
-#
-# 추출 경로(backend/pipeline/extractor.py → backend/llm/factory.py)와 Q&A 경로
-# (backend/llm/chat_model_factory.py)의 지원 집합이 다르다. 문서·저장소 적재는
-# 전자를 쓰는데 그쪽이 더 좁다:
-#   - local  → factory.py가 지원 분기에 없어 ValueError
-#   - google → google_client.py가 tool_schema 전달 시 NotImplementedError
-# 따라서 rollout에서는 openai·claude만 허용한다.
+# ── Agentic Q&A MVP 모델 계약 ───────────────────────────────────────────────
+# 일반 LLM factory에는 다른 provider가 남아 있지만, #18의 운영 Q&A는 공식
+# OpenAI API + gpt-4.1-mini만 지원한다. 여기서 막지 않으면 첫 Q&A에서 503이 난다.
 
 PROVIDER="$(env_get LLM_PROVIDER)"
-PROVIDER="${PROVIDER:-openai}"
+[[ "$PROVIDER" == "openai" ]] || ERRORS+=("LLM_PROVIDER는 openai여야 한다 — #18 Agentic Q&A MVP는 다른 provider를 지원하지 않는다")
 
-case "$PROVIDER" in
-  openai)
-    : # OPENAI_API_KEY는 이미 항상 필수
-    ;;
-  claude)
-    require ANTHROPIC_API_KEY "LLM_PROVIDER=claude"
-    ;;
-  google)
-    require GOOGLE_API_KEY "LLM_PROVIDER=google"
-    if [[ "$MODE" == "rollout" ]]; then
-      ERRORS+=("LLM_PROVIDER=google 은 rollout 불가 — backend/llm/google_client.py가 구조화 추출(tool_schema)에서 NotImplementedError를 던져 문서·저장소 적재가 실패한다. openai 또는 claude를 쓸 것")
-    else
-      WARNINGS+=("LLM_PROVIDER=google — 문서 적재(구조화 추출)는 동작하지 않는다")
-    fi
-    ;;
-  local)
-    require LOCAL_LLM_URL "LLM_PROVIDER=local"
-    if [[ "$MODE" == "rollout" ]]; then
-      ERRORS+=("LLM_PROVIDER=local 은 rollout 불가 — backend/llm/factory.py의 지원 분기에 없어 문서 적재 시 ValueError가 발생한다. openai 또는 claude를 쓸 것")
-    else
-      WARNINGS+=("LLM_PROVIDER=local — 문서 적재(get_llm_client)는 동작하지 않는다")
-    fi
-    ;;
-  *)
-    ERRORS+=("LLM_PROVIDER='$PROVIDER' 는 알 수 없는 값 — openai | claude | google | local")
-    ;;
-esac
+OPENAI_MODEL_VALUE="$(env_get OPENAI_MODEL)"
+[[ "$OPENAI_MODEL_VALUE" == "gpt-4.1-mini" ]] || ERRORS+=("OPENAI_MODEL은 gpt-4.1-mini여야 한다 — #18 Agentic Q&A MVP 모델 계약")
+
+for base_key in OPENAI_BASE_URL OPENAI_API_BASE; do
+  base_value="$(env_get "$base_key")"
+  if [[ -n "$base_value" ]]; then
+    normalized="${base_value%/}"
+    normalized="${normalized,,}"
+    [[ "$normalized" == "https://api.openai.com/v1" ]] || ERRORS+=("$base_key 는 공식 OpenAI endpoint(https://api.openai.com/v1)만 허용한다")
+  fi
+done
 
 # ── GitHub App 설정군 (all-or-nothing) ───────────────────────────────────────
 #

@@ -4,12 +4,14 @@ accept 경로(api/suggestion.py)와 조회 경로(retriever/mysql_search.py)가 
 쓰지만 같은 memory.superseded_by 컬럼을 통해 연결된다. 공유 인메모리 저장소를 두 경로에
 물려, accept가 superseded_by를 채우면 계층1 기본 조회가 그 decision을 실제로 제외함을 확인한다.
 """
+import json
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from backend.main import app
 from backend.retriever import mysql_search
+from backend.retriever.index_scope import ProjectIndexScope
 
 _client = TestClient(app, raise_server_exceptions=False)
 
@@ -55,7 +57,10 @@ class _Cursor:
     def execute(self, sql, params=None):
         params = params or []
         self.rowcount = 0
-        if "FROM memory_suggestions s" in sql and "JOIN memory m" in sql:
+        if (
+            "FROM memory_suggestions s" in sql
+            and ("JOIN memory m" in sql or "JOIN active_memory m" in sql)
+        ):
             sid = params[0]
             s = self.db.suggestion.get(sid)
             if not s:
@@ -66,7 +71,10 @@ class _Cursor:
                          "memory_category": m["category"],
                          "memory_completed_at": m["completed_at"],
                          "memory_superseded_by": m["superseded_by"]}
-        elif sql.strip().startswith("SELECT id FROM memory WHERE id"):
+        elif (
+            sql.strip().startswith("SELECT id FROM memory WHERE id")
+            or sql.strip().startswith("SELECT id FROM active_memory WHERE id")
+        ):
             # D-1/F-004: 대체(신) decision 검증 — 존재 + project + (SQL에 있으면)
             # category='decision' + superseded_by IS NULL(순환 가드)까지 해석한다.
             mid, pid = params
@@ -85,6 +93,29 @@ class _Cursor:
                 m["superseded_by"] = superseding_id
                 m["superseded_at"] = "2026-07-02 11:00:00"
                 self.rowcount = 1
+        elif "SET status='rejected'" in sql:
+            resolved_by, pid, current_sid, hidden_memory_id, _ = params
+            for sid, suggestion in self.db.suggestion.items():
+                if (
+                    sid == current_sid
+                    or suggestion["project_id"] != pid
+                    or suggestion["kind"] != "supersede"
+                    or suggestion["status"] != "pending"
+                ):
+                    continue
+                superseding_id = json.loads(suggestion["evidence"])[
+                    "superseding_memory_id"
+                ]
+                if (
+                    suggestion["memory_id"] == hidden_memory_id
+                    or superseding_id == hidden_memory_id
+                ):
+                    suggestion.update(
+                        status="rejected",
+                        resolved_by=resolved_by,
+                        resolved_at="2026-07-02 11:00:00",
+                    )
+                    self.rowcount += 1
         elif "UPDATE memory_suggestions SET status" in sql:
             status, resolved_by, sid, _pid = params
             s = self.db.suggestion[sid]
@@ -98,13 +129,13 @@ class _Cursor:
         elif "SELECT * FROM memory_suggestions WHERE id" in sql:
             self._one = dict(self.db.suggestion[params[0]])
         elif "FROM memory m" in sql and "LEFT JOIN memory_sources" in sql:
-            active_only = "m.superseded_by IS NULL" in sql
+            active_only = "NOT EXISTS (SELECT 1 FROM memory visible_successor" in sql
             want_category = params[1] if "m.category = %s" in sql else None
             rows = []
             for m in self.db.memory.values():
                 if m["project_id"] != params[0]:
                     continue
-                if active_only and m["superseded_by"] is not None:
+                if active_only and m["superseded_by"] in self.db.memory:
                     continue
                 if want_category is not None and m["category"] != want_category:
                     continue
@@ -144,14 +175,22 @@ class _Conn:
 
 
 def _search_ids(project_id=1, **kwargs):
-    return [r["id"] for r in mysql_search.search(project_id, category="decision", **kwargs)]
+    return [
+        r["id"]
+        for r in mysql_search.search(
+            project_id,
+            category="decision",
+            index_scope=ProjectIndexScope(project_id),
+            **kwargs,
+        )
+    ]
 
 
 def _accept(db, suggestion_id):
     with patch("backend.api.suggestion.require_project_access"), \
          patch("backend.api.suggestion.get_current_user_id", return_value=99), \
          patch("backend.retriever.memory_vector.delete_memory_vector"), \
-         patch("backend.graph.refresh_project_memory_after_delete"), \
+         patch("backend.project_memory.refresh_project_memory_after_delete"), \
          patch("backend.api.suggestion.get_connection", return_value=_Conn(db)):
         return _client.post(f"/api/v1/projects/1/suggestions/{suggestion_id}/accept")
 
@@ -168,7 +207,7 @@ def test_accept_supersede_then_layer1_search_excludes_old_decision():
     with patch("backend.api.suggestion.require_project_access"), \
          patch("backend.api.suggestion.get_current_user_id", return_value=99), \
          patch("backend.retriever.memory_vector.delete_memory_vector"), \
-         patch("backend.graph.refresh_project_memory_after_delete"), \
+         patch("backend.project_memory.refresh_project_memory_after_delete"), \
          patch("backend.api.suggestion.get_connection", return_value=_Conn(db)):
         resp = _client.post("/api/v1/projects/1/suggestions/8/accept")
     assert resp.status_code == 200

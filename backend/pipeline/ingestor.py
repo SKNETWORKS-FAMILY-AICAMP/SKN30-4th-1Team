@@ -1,5 +1,6 @@
 # 추출된 MemoryItem 목록을 MySQL(구조화)과 ChromaDB(벡터) 두 저장소에 적재하는 모듈.
 # MySQL은 카테고리별 검색, ChromaDB는 의미 유사도 검색에 사용.
+import json
 import logging
 import re
 from typing import List, Optional, Tuple
@@ -71,6 +72,90 @@ def _normalize_date(date_str: Optional[str]) -> Optional[str]:
     if m:
         return _validated(*m.groups())
     return None
+
+
+def _normalize_due_date(date_str: Optional[str]) -> Optional[str]:
+    """마감 후보를 엄격한 단일 달력 날짜로 정규화한다.
+
+    LLM 출력의 접두부만 맞는 문자열을 받아들이지 않도록 전체 문자열 일치를
+    요구한다. 상대 표현은 extractor가 기준일을 사용해 계산한 YYYY-MM-DD 후보만
+    이 경계를 통과한다.
+    """
+    from datetime import datetime as _dt
+
+    value = (date_str or "").strip()
+    if not value:
+        return None
+    patterns = (
+        r"(\d{4})-(\d{1,2})-(\d{1,2})",
+        r"(\d{4})[./](\d{1,2})[./](\d{1,2})",
+        r"(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일",
+    )
+    for pattern in patterns:
+        match = re.fullmatch(pattern, value)
+        if not match:
+            continue
+        try:
+            parsed = _dt(*(int(part) for part in match.groups()))
+        except ValueError:
+            return None
+        return parsed.strftime("%Y-%m-%d")
+    return None
+
+
+def _explicit_due_date_matches(raw_phrase: str, candidate: str) -> bool:
+    """원문 마감 표현에 연도까지 명시된 동일 날짜가 있는지 확인한다."""
+    patterns = (
+        r"(\d{4})-(\d{1,2})-(\d{1,2})",
+        r"(\d{4})[./](\d{1,2})[./](\d{1,2})",
+        r"(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, raw_phrase):
+            if _normalize_due_date("-".join(match.groups())) == candidate:
+                return True
+    return False
+
+
+def _due_date_plan(
+    item: MemoryItem,
+    raw_text: str,
+    source_date: str,
+) -> tuple[Optional[str], Optional[dict]]:
+    """(자동 저장값, 사용자 승인 후보 evidence)를 결정한다.
+
+    자동 저장은 원문에 연도까지 있는 절대 날짜로 제한한다. 상대·연도 생략
+    표현은 LLM이 기준일로 계산한 단일 후보가 있고 원문 구절이 실제 입력에
+    존재할 때만 suggestion으로 남긴다. 후보나 근거 구절을 만든 경우에는 조용히
+    저장하지 않는다.
+    """
+    if item.category != "action":
+        return None, None
+    candidate = _normalize_due_date(item.due_date)
+    phrase = (item.due_date_text or "").strip()
+    if not candidate or not phrase or phrase not in raw_text:
+        return None, None
+
+    if (
+        not item.due_date_requires_confirmation
+        and _explicit_due_date_matches(phrase, candidate)
+    ):
+        return candidate, None
+
+    reference_date = _normalize_date(item.date) or _normalize_date(source_date)
+    if reference_date is None:
+        # 상대·연도 생략 후보는 무엇을 기준으로 계산했는지 입증할 수 있어야 한다.
+        # repo 자료처럼 기준일이 없는 입력에서 모델이 만든 날짜는 승인 후보로도
+        # 노출하지 않는다.
+        return None, None
+
+    return None, {
+        "type": "due_date",
+        "suggested_due_date": candidate,
+        "raw_text": phrase,
+        "reference_date": reference_date,
+        "source": item.source,
+    }
 
 
 def _split_text(text: str) -> List[str]:
@@ -190,6 +275,25 @@ def _insert_memory_source(
     )
 
 
+def _insert_due_date_suggestion(
+    cursor,
+    project_id: int,
+    memory_id: int,
+    evidence: dict,
+) -> None:
+    cursor.execute(
+        "INSERT INTO memory_suggestions"
+        " (project_id, memory_id, kind, evidence, rationale, confidence, status)"
+        " VALUES (%s, %s, 'set_due_date', %s, %s, 'medium', 'pending')",
+        (
+            project_id,
+            memory_id,
+            json.dumps(evidence, ensure_ascii=False),
+            "상대 또는 연도 생략 마감 표현을 기준일로 계산한 후보입니다.",
+        ),
+    )
+
+
 def ingest(
     project_id: int,
     doc_id: Optional[int],
@@ -202,6 +306,7 @@ def ingest(
     source_metadata: Optional[dict] = None,
     converted: Optional[ConvertedDocument] = None,
     processing_token: Optional[str] = None,
+    repo_sync_run_id: Optional[str] = None,
 ):
     """추출 결과를 두 DB에 순서대로 저장.
     1단계: MySQL — items 각각을 memory + memory_sources 테이블에 INSERT (같은 트랜잭션)
@@ -234,6 +339,7 @@ def ingest(
                 # LLM 입력만이 아니라 행 자체에 보존해야, 이 항목이 미래 적재의 supersede
                 # 후보가 될 때 시간순서 검증(과거 문서가 최신 결정을 번복 못 함)이 유지된다.
                 item_date = _normalize_date(item.date) or _normalize_date(date)
+                due_date, due_date_suggestion = _due_date_plan(item, raw_text, date)
                 completed_sql, completed_params = _completed_at_sql(item, item_date, date)
                 completion_status = _completion_status(item)
                 completion_source = None
@@ -245,34 +351,41 @@ def ingest(
                     f"""
                     INSERT INTO memory
                         (project_id, doc_id, repo_id, category, content,
-                         reason, topic, owner, date, source, completed_at,
+                         reason, topic, owner, date, due_date, source, repo_sync_run_id, completed_at,
                          completion_status, completion_status_source)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                             {completed_sql}, %s, %s)
                     """,
                     [
-                        project_id, doc_id, repo_id,
-                        item.category, item.content,
+                        project_id, doc_id, repo_id, item.category, item.content,
                         item.reason, item.topic,
-                        item.owner, item_date,
-                        source,
+                        item.owner, item_date, due_date,
+                        source, repo_sync_run_id,
                     ] + completed_params + [completion_status, completion_source],
                 )
                 memory_id = cursor.lastrowid
                 completed_at = completed_params[0] if completed_params else "NOW"
                 _insert_memory_source(cursor, memory_id, doc_id, repo_id, source_metadata)
+                if due_date_suggestion is not None:
+                    _insert_due_date_suggestion(
+                        cursor,
+                        project_id,
+                        memory_id,
+                        due_date_suggestion,
+                    )
                 memory_rows.append({
                     "id": memory_id,
                     "project_id": project_id,
                     "doc_id": doc_id,
                     "repo_id": repo_id,
+                    "repo_sync_run_id": repo_sync_run_id,
                     "category": item.category,
                     "content": item.content,
                     "reason": item.reason,
                     "topic": item.topic,
                     "owner": item.owner,
                     "date": item_date,
-                    "due_date": None,
+                    "due_date": due_date,
                     "completed_at": completed_at if item.completed else None,
                     "completion_status": completion_status,
                     "completion_status_source": completion_source,
@@ -297,7 +410,8 @@ def ingest(
             import hashlib
             src_hash = hashlib.md5(source.encode()).hexdigest()[:6]
             if repo_id is not None:
-                chunk_prefix = f"repo{repo_id}_{src_hash}"
+                run_prefix = f"_{repo_sync_run_id}" if repo_sync_run_id else ""
+                chunk_prefix = f"repo{repo_id}{run_prefix}_{src_hash}"
             elif doc_id is not None:
                 chunk_prefix = f"doc{doc_id}"
             else:
@@ -312,6 +426,8 @@ def ingest(
                     "project_id": project_id,
                     "doc_id": doc_id if doc_id is not None else _NO_ID,
                     "repo_id": repo_id if repo_id is not None else _NO_ID,
+                    "repo_sync_run_id": repo_sync_run_id or "",
+                    "repo_sync_staging": bool(repo_id is not None and repo_sync_run_id),
                     "source": source,
                     "item_type": "document",
                     "date": date or "",
@@ -360,7 +476,9 @@ def ingest(
         for r in memory_rows
         if r["category"] == "decision"
     ]
-    if new_decisions:
+    # Repository rows are invisible while staged. Supersede detection is
+    # deferred until the repository generation is atomically published.
+    if new_decisions and repo_sync_run_id is None:
         try:
             from ..reconciler.supersede import detect_supersede
             detect_supersede(project_id, new_decisions)

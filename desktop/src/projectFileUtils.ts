@@ -149,7 +149,7 @@ export function getProjectFileVisualMeta(name: string): ProjectFileVisualMeta {
   const lowerName = name.toLowerCase();
 
   if (lowerName === ".gitignore" || lowerName === ".gitattributes") {
-    return { Icon: GitBranch, color: "#f05033" };
+    return { Icon: GitBranch, color: "var(--risk-fg)" };
   }
 
   if (lowerName === ".ds_store") {
@@ -161,14 +161,14 @@ export function getProjectFileVisualMeta(name: string): ProjectFileVisualMeta {
   }
 
   if (lowerName.endsWith(".python-version")) {
-    return { Icon: FileCode2, color: "#4b8bbe" };
+    return { Icon: FileCode2, color: "var(--action-fg)" };
   }
 
   const extension = lowerName.includes(".") ? lowerName.split(".").pop() : "";
   const extensionMeta: Record<string, ProjectFileVisualMeta> = {
-    py: { Icon: FileCode2, color: "#4b8bbe" },
+    py: { Icon: FileCode2, color: "var(--action-fg)" },
     md: { Icon: FileText, color: "var(--decision-fg)" },
-    txt: { Icon: FileText, color: "#9aa0b5" },
+    txt: { Icon: FileText, color: "var(--muted)" },
     json: { Icon: FileJson, color: "var(--issue-fg)" },
     toml: { Icon: Settings, color: "var(--accent-purple)" },
     yaml: { Icon: Settings, color: "var(--accent-purple)" },
@@ -182,17 +182,22 @@ export function getProjectFileVisualMeta(name: string): ProjectFileVisualMeta {
     svg: { Icon: Image, color: "var(--issue-fg)" },
     csv: { Icon: Table, color: "var(--decision-fg)" },
     xlsx: { Icon: Table, color: "var(--decision-fg)" },
-    pdf: { Icon: FileText, color: "#e24b4a" },
-    m4a: { Icon: Music, color: "#d4537e" },
-    mp3: { Icon: Music, color: "#d4537e" },
-    wav: { Icon: Music, color: "#d4537e" },
-    js: { Icon: Braces, color: "#efd81d" },
-    ts: { Icon: Braces, color: "#378add" },
-    jsx: { Icon: CodeXml, color: "#61dafb" },
-    tsx: { Icon: CodeXml, color: "#61dafb" },
-    html: { Icon: CodeXml, color: "#d85a30" },
-    css: { Icon: CodeXml, color: "#378add" },
-    sh: { Icon: Terminal, color: "#97c459" },
+    pdf: { Icon: FileText, color: "var(--risk-fg)" },
+    aac: { Icon: Music, color: "var(--accent-purple)" },
+    ac3: { Icon: Music, color: "var(--accent-purple)" },
+    m4a: { Icon: Music, color: "var(--accent-purple)" },
+    mp3: { Icon: Music, color: "var(--accent-purple)" },
+    mp4: { Icon: Music, color: "var(--accent-purple)" },
+    ogg: { Icon: Music, color: "var(--accent-purple)" },
+    flac: { Icon: Music, color: "var(--accent-purple)" },
+    wav: { Icon: Music, color: "var(--accent-purple)" },
+    js: { Icon: Braces, color: "var(--issue-fg)" },
+    ts: { Icon: Braces, color: "var(--action-fg)" },
+    jsx: { Icon: CodeXml, color: "var(--action-fg)" },
+    tsx: { Icon: CodeXml, color: "var(--action-fg)" },
+    html: { Icon: CodeXml, color: "var(--risk-fg)" },
+    css: { Icon: CodeXml, color: "var(--action-fg)" },
+    sh: { Icon: Terminal, color: "var(--decision-fg)" },
     ipynb: { Icon: NotebookTabs, color: "var(--issue-fg)" },
     sql: { Icon: Database, color: "var(--action-fg)" },
   };

@@ -13,7 +13,8 @@ from fastapi.testclient import TestClient
 
 from backend.main import app
 from backend.github import router as github_api
-from backend.api.upload import _infer_doc_type
+from backend.api.documents import _infer_doc_type
+from backend.retriever.index_scope import ProjectIndexScope
 
 _client = TestClient(app, raise_server_exceptions=False)
 
@@ -134,9 +135,9 @@ def test_upload_oversized_file_returns_413():
     비구성원은 크기 검사에 이르기 전에 403 으로 거부되며, 그것이 의도된 동작이다.
     """
     big_data = b"x" * (10 * 1024 * 1024 + 1)
-    with patch("backend.api.upload.require_upload_user", return_value=1), \
-         patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload.get_connection",
+    with patch("backend.api.documents.require_upload_user", return_value=1), \
+         patch("backend.api.documents.require_project_access"), \
+         patch("backend.api.documents.get_connection",
                side_effect=_conn_seq_upload({"id": 1}, {"id": 1})):
         resp = _client.post(
             "/api/v1/projects/1/documents",
@@ -172,7 +173,9 @@ def test_memory_get_includes_todo_fields_and_sort_order():
         },
     ]
     conn, cur = _conn_for_memory_rows(rows)
-    with patch("backend.api.upload.require_project_access"), \
+    with patch("backend.api.memory.require_project_access"), \
+         patch("backend.retriever.mysql_search.load_project_index_scope",
+               return_value=ProjectIndexScope(project_id=1)), \
          patch("backend.retriever.mysql_search.get_connection", return_value=conn):
         resp = _client.get("/api/v1/projects/1/memory")
 
@@ -196,9 +199,9 @@ def test_memory_patch_completed_true_sets_completed_at_without_verifying():
     }
     conn, cur = _conn_for_memory_patch(row)
     cur.fetchone.side_effect = [{"category": "action"}, row]
-    with patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload._upsert_memory_vector_best_effort"), \
-         patch("backend.api.upload.get_connection", return_value=conn):
+    with patch("backend.api.memory.require_project_access"), \
+         patch("backend.api.memory._upsert_memory_vector_best_effort"), \
+         patch("backend.api.memory.get_connection", return_value=conn):
         resp = _client.patch("/api/v1/projects/1/memory/10", json={"completed": True})
 
     assert resp.status_code == 200
@@ -222,9 +225,9 @@ def test_memory_patch_completed_false_clears_completed_at():
     }
     conn, cur = _conn_for_memory_patch(row)
     cur.fetchone.side_effect = [{"category": "action"}, row]
-    with patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload._upsert_memory_vector_best_effort"), \
-         patch("backend.api.upload.get_connection", return_value=conn):
+    with patch("backend.api.memory.require_project_access"), \
+         patch("backend.api.memory._upsert_memory_vector_best_effort"), \
+         patch("backend.api.memory.get_connection", return_value=conn):
         resp = _client.patch("/api/v1/projects/1/memory/10", json={"completed": False})
 
     assert resp.status_code == 200
@@ -252,10 +255,10 @@ def test_memory_patch_category_change_normalizes_action_completion_status():
         {"superseded_by": None},
         action_row,
     ]
-    with patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload._upsert_memory_vector_best_effort"), \
-         patch("backend.api.upload.get_current_user_id", return_value=1), \
-         patch("backend.api.upload.get_connection", return_value=action_conn):
+    with patch("backend.api.memory.require_project_access"), \
+         patch("backend.api.memory._upsert_memory_vector_best_effort"), \
+         patch("backend.api.memory.get_current_user_id", return_value=1), \
+         patch("backend.api.memory.get_connection", return_value=action_conn):
         action_resp = _client.patch(
             "/api/v1/projects/1/memory/10", json={"category": "action"}
         )
@@ -274,10 +277,10 @@ def test_memory_patch_category_change_normalizes_action_completion_status():
         "completed_at": None, "completion_status": "unknown", "sort_order": None,
     }
     decision_conn, decision_cur = _conn_for_memory_patch(decision_row)
-    with patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload._upsert_memory_vector_best_effort"), \
-         patch("backend.api.upload.get_current_user_id", return_value=1), \
-         patch("backend.api.upload.get_connection", return_value=decision_conn):
+    with patch("backend.api.memory.require_project_access"), \
+         patch("backend.api.memory._upsert_memory_vector_best_effort"), \
+         patch("backend.api.memory.get_current_user_id", return_value=1), \
+         patch("backend.api.memory.get_connection", return_value=decision_conn):
         decision_resp = _client.patch(
             "/api/v1/projects/1/memory/10", json={"category": "decision"}
         )
@@ -295,7 +298,7 @@ def test_memory_patch_category_change_normalizes_action_completion_status():
 
 def test_memory_patch_rejects_completed_for_non_action_category():
     """PATCH에서 비action category와 completed를 함께 지정할 수 없다."""
-    with patch("backend.api.upload.require_project_access"):
+    with patch("backend.api.memory.require_project_access"):
         resp = _client.patch(
             "/api/v1/projects/1/memory/10",
             json={"category": "decision", "completed": True},
@@ -313,8 +316,8 @@ def test_memory_patch_rejects_completed_only_for_existing_non_action():
     }
     conn, cur = _conn_for_memory_patch(row)
 
-    with patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload.get_connection", return_value=conn):
+    with patch("backend.api.memory.require_project_access"), \
+         patch("backend.api.memory.get_connection", return_value=conn):
         resp = _client.patch(
             "/api/v1/projects/1/memory/10", json={"completed": True}
         )
@@ -335,9 +338,9 @@ def test_memory_patch_sort_order_allows_int_and_null_without_verifying():
         "completed_at": None, "sort_order": 3,
     }
     int_conn, int_cur = _conn_for_memory_patch(int_row)
-    with patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload._upsert_memory_vector_best_effort"), \
-         patch("backend.api.upload.get_connection", return_value=int_conn):
+    with patch("backend.api.memory.require_project_access"), \
+         patch("backend.api.memory._upsert_memory_vector_best_effort"), \
+         patch("backend.api.memory.get_connection", return_value=int_conn):
         int_resp = _client.patch("/api/v1/projects/1/memory/10", json={"sort_order": 3})
 
     assert int_resp.status_code == 200
@@ -352,9 +355,9 @@ def test_memory_patch_sort_order_allows_int_and_null_without_verifying():
         "completed_at": None, "sort_order": None,
     }
     null_conn, null_cur = _conn_for_memory_patch(null_row)
-    with patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload._upsert_memory_vector_best_effort"), \
-         patch("backend.api.upload.get_connection", return_value=null_conn):
+    with patch("backend.api.memory.require_project_access"), \
+         patch("backend.api.memory._upsert_memory_vector_best_effort"), \
+         patch("backend.api.memory.get_connection", return_value=null_conn):
         resp = _client.patch("/api/v1/projects/1/memory/10", json={"sort_order": None})
 
     assert resp.status_code == 200
@@ -372,9 +375,9 @@ def test_memory_patch_category_change_rejected_when_row_supersedes_another():
     cur = conn.cursor.return_value.__enter__.return_value
     cur.rowcount = 1
     cur.fetchone.return_value = {"1": 1}  # 참조 존재 확인 SELECT가 행을 돌려줌
-    with patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload._upsert_memory_vector_best_effort"), \
-         patch("backend.api.upload.get_connection", return_value=conn):
+    with patch("backend.api.memory.require_project_access"), \
+         patch("backend.api.memory._upsert_memory_vector_best_effort"), \
+         patch("backend.api.memory.get_connection", return_value=conn):
         resp = _client.patch("/api/v1/projects/1/memory/42", json={"category": "action"})
 
     assert resp.status_code == 409
@@ -393,9 +396,9 @@ def test_memory_patch_category_change_allowed_when_not_referenced():
     cur.rowcount = 1
     # 참조 없음 → 자신도 번복 안 됨(J-001) → 최종 SELECT
     cur.fetchone.side_effect = [None, {"superseded_by": None}, row]
-    with patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload._upsert_memory_vector_best_effort"), \
-         patch("backend.api.upload.get_connection", return_value=conn):
+    with patch("backend.api.memory.require_project_access"), \
+         patch("backend.api.memory._upsert_memory_vector_best_effort"), \
+         patch("backend.api.memory.get_connection", return_value=conn):
         resp = _client.patch("/api/v1/projects/1/memory/42", json={"category": "action"})
 
     assert resp.status_code == 200
@@ -410,9 +413,9 @@ def test_memory_patch_category_change_rejected_when_row_is_superseded():
     cur = conn.cursor.return_value.__enter__.return_value
     cur.rowcount = 1
     cur.fetchone.side_effect = [None, {"superseded_by": 42}]  # 참조 없음 → 자신이 번복됨
-    with patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload._upsert_memory_vector_best_effort"), \
-         patch("backend.api.upload.get_connection", return_value=conn):
+    with patch("backend.api.memory.require_project_access"), \
+         patch("backend.api.memory._upsert_memory_vector_best_effort"), \
+         patch("backend.api.memory.get_connection", return_value=conn):
         resp = _client.patch("/api/v1/projects/1/memory/10", json={"category": "action"})
 
     assert resp.status_code == 409
@@ -432,9 +435,9 @@ def test_memory_patch_category_change_auto_rejects_pending_supersede_suggestions
     cur = conn.cursor.return_value.__enter__.return_value
     cur.rowcount = 1
     cur.fetchone.side_effect = [None, {"superseded_by": None}, row]
-    with patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload._upsert_memory_vector_best_effort"), \
-         patch("backend.api.upload.get_connection", return_value=conn):
+    with patch("backend.api.memory.require_project_access"), \
+         patch("backend.api.memory._upsert_memory_vector_best_effort"), \
+         patch("backend.api.memory.get_connection", return_value=conn):
         resp = _client.patch("/api/v1/projects/1/memory/42", json={"category": "action"})
 
     assert resp.status_code == 200
@@ -460,9 +463,9 @@ def test_memory_patch_content_change_auto_rejects_pending_supersede_suggestions(
         "completed_at": None, "sort_order": None,
     }
     conn, cur = _conn_for_memory_patch(row)
-    with patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload._upsert_memory_vector_best_effort"), \
-         patch("backend.api.upload.get_connection", return_value=conn):
+    with patch("backend.api.memory.require_project_access"), \
+         patch("backend.api.memory._upsert_memory_vector_best_effort"), \
+         patch("backend.api.memory.get_connection", return_value=conn):
         resp = _client.patch("/api/v1/projects/1/memory/42", json={"content": "전혀 다른 방침"})
 
     assert resp.status_code == 200
@@ -481,9 +484,9 @@ def test_memory_patch_owner_change_keeps_pending_supersede_suggestions():
         "completed_at": None, "sort_order": None,
     }
     conn, cur = _conn_for_memory_patch(row)
-    with patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload._upsert_memory_vector_best_effort"), \
-         patch("backend.api.upload.get_connection", return_value=conn):
+    with patch("backend.api.memory.require_project_access"), \
+         patch("backend.api.memory._upsert_memory_vector_best_effort"), \
+         patch("backend.api.memory.get_connection", return_value=conn):
         resp = _client.patch("/api/v1/projects/1/memory/42", json={"owner": "박제섭"})
 
     assert resp.status_code == 200
@@ -499,10 +502,10 @@ def test_memory_patch_superseded_row_deletes_vector_instead_of_upsert():
         "completed_at": None, "sort_order": None, "superseded_by": 42,
     }
     conn, cur = _conn_for_memory_patch(row)
-    with patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload._upsert_memory_vector_best_effort") as mock_upsert, \
-         patch("backend.api.upload._delete_memory_vector_best_effort") as mock_delete, \
-         patch("backend.api.upload.get_connection", return_value=conn):
+    with patch("backend.api.memory.require_project_access"), \
+         patch("backend.api.memory._upsert_memory_vector_best_effort") as mock_upsert, \
+         patch("backend.api.memory._delete_memory_vector_best_effort") as mock_delete, \
+         patch("backend.api.memory.get_connection", return_value=conn):
         resp = _client.patch("/api/v1/projects/1/memory/10", json={"content": "옛 결정(수정)"})
 
     assert resp.status_code == 200
@@ -517,14 +520,17 @@ def test_memory_patch_due_date_sets_value_and_marks_verified():
         "due_date": "2026-07-10", "is_user_verified": 1,
     }
     conn, cur = _conn_for_memory_patch(row)
-    with patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload._upsert_memory_vector_best_effort"), \
-         patch("backend.api.upload.get_connection", return_value=conn):
+    with patch("backend.api.memory.require_project_access"), \
+         patch("backend.api.memory._upsert_memory_vector_best_effort"), \
+         patch("backend.api.memory.get_connection", return_value=conn):
         resp = _client.patch("/api/v1/projects/1/memory/10", json={"due_date": "2026-07-10"})
 
     assert resp.status_code == 200
     assert resp.json()["due_date"] == "2026-07-10"
-    update_call = cur.execute.call_args_list[0]
+    update_call = next(
+        call for call in cur.execute.call_args_list
+        if "UPDATE memory SET" in call.args[0]
+    )
     assert "due_date = %s" in update_call.args[0]
     assert "is_user_verified = %s" in update_call.args[0]
     assert update_call.args[1][0] == "2026-07-10"
@@ -537,14 +543,17 @@ def test_memory_patch_due_date_null_clears_without_verifying():
         "due_date": None, "is_user_verified": 0,
     }
     conn, cur = _conn_for_memory_patch(row)
-    with patch("backend.api.upload.require_project_access"), \
-         patch("backend.api.upload._upsert_memory_vector_best_effort"), \
-         patch("backend.api.upload.get_connection", return_value=conn):
+    with patch("backend.api.memory.require_project_access"), \
+         patch("backend.api.memory._upsert_memory_vector_best_effort"), \
+         patch("backend.api.memory.get_connection", return_value=conn):
         resp = _client.patch("/api/v1/projects/1/memory/10", json={"due_date": None})
 
     assert resp.status_code == 200
     assert resp.json()["due_date"] is None
-    update_call = cur.execute.call_args_list[0]
+    update_call = next(
+        call for call in cur.execute.call_args_list
+        if "UPDATE memory SET" in call.args[0]
+    )
     assert "due_date = %s" in update_call.args[0]
     assert "is_user_verified" not in update_call.args[0]
     assert update_call.args[1][0] is None
