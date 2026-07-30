@@ -156,7 +156,6 @@ import {
   loadPaimSettings,
   normalizePaimServerUrl,
   normalizePaimSettings,
-  resolvePaimApiRootUrl,
   savePaimSettings,
   type LanguageSetting,
   type PaiMSettings,
@@ -545,11 +544,6 @@ type SubmitQuestionOptions = {
   sessionTitle?: string;
   since?: string;
 };
-type ServerTestState = {
-  message: string;
-  status: "idle" | "testing" | "ok" | "error";
-};
-
 type ActionMenuOrigin = "bottom-left" | "bottom-right" | "top-left" | "top-right";
 
 type ActionMenuState = {
@@ -1946,7 +1940,6 @@ export function App() {
               <LazyAuthScreen
                 initialMessage={authState.message}
                 onAuthenticated={handleAuthenticated}
-                serverUrl={getPaimApiRootUrl()}
               />
             </>
           </Suspense>
@@ -2097,15 +2090,9 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     setProjectManagementSection,
   } = useWorkspaceRoute();
   const [settings, setSettingsState] = useState(loadPaimSettings);
-  const [serverUrlDraft, setServerUrlDraft] = useState(settings.serverUrl);
   const t = (key: string, vars?: Record<string, number | string>) =>
     translate(settings.language, key, vars);
-  const [serverTestState, setServerTestState] = useState<ServerTestState>({
-    message: "",
-    status: "idle",
-  });
   const [isSettingsResetConfirming, setIsSettingsResetConfirming] = useState(false);
-  const [isServerApplyConfirming, setIsServerApplyConfirming] = useState(false);
   const [appVersion, setAppVersion] = useState(`개발 모드 ${packageJson.version}`);
   const [latestReleaseTag, setLatestReleaseTag] = useState("");
   const [projectFileTreeWidth, setProjectFileTreeWidth] = useState(
@@ -2140,7 +2127,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   const [capabilities, setCapabilities] = useState<PaimCapabilities | null>(null);
   const [capabilitiesError, setCapabilitiesError] = useState("");
   const [capabilitiesRevision, setCapabilitiesRevision] = useState(0);
-  const serverUrlSyncRef = useRef(settings.serverUrl);
   const projectPanelReopenModeRef = useRef<VisibleProjectPanelMode>("open");
   const sidebarResizeRef = useRef<{
     pointerId: number | null;
@@ -2935,63 +2921,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     updateSettings({ language });
   }
 
-  async function handleTestServerConnection() {
-    const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 3000);
-    const nextServerUrl = resolvePaimApiRootUrl(serverUrlDraft);
-
-    setServerTestState({ message: "연결 확인 중", status: "testing" });
-
-    try {
-      const response = await fetch(`${nextServerUrl}/health`, {
-        headers: { Accept: "application/json" },
-        signal: controller.signal,
-      });
-      if (!response.ok) {
-        throw new Error(`서버가 ${response.status} 상태를 반환했습니다`);
-      }
-      const health = (await response.json()) as ApiHealthResponse;
-
-      if (health.status !== "ok") {
-        throw new Error("서버 상태가 ok가 아닙니다");
-      }
-
-      setServerTestState({ message: "새 주소에 연결할 수 있습니다", status: "ok" });
-    } catch {
-      setServerTestState({ message: "연결 실패", status: "error" });
-    } finally {
-      window.clearTimeout(timeoutId);
-    }
-  }
-
-  function handleApplyServerUrl() {
-    const nextSettings = normalizePaimSettings({ ...settings, serverUrl: serverUrlDraft });
-    const nextServerUrl = resolvePaimApiRootUrl(nextSettings.serverUrl);
-    const willChangeProjectScope =
-      getProjectStorageKey(authUser, canLogout, nextServerUrl) !== projectStorageKey;
-
-    if (willChangeProjectScope && !isServerApplyConfirming) {
-      setIsServerApplyConfirming(true);
-      return;
-    }
-
-    savePaimSettings(nextSettings);
-    setSettingsState(nextSettings);
-    setServerUrlDraft(nextSettings.serverUrl);
-    setIsServerApplyConfirming(false);
-
-    if (willChangeProjectScope) {
-      // 새 서버의 프로젝트와 인증 범위를 섞지 않도록 저장 후 다시 마운트한다.
-      window.location.reload();
-      return;
-    }
-
-    if (serverTestState.status === "ok") {
-      setServerStatus("online");
-    }
-    void syncProjectsWithServer(false);
-  }
-
   function handleResetAppSettings() {
     if (!isSettingsResetConfirming) {
       setIsSettingsResetConfirming(true);
@@ -3362,21 +3291,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     projectPanelView,
     projectPanelWidth,
   ]);
-
-  useEffect(() => {
-    setServerTestState({ message: "", status: "idle" });
-
-    if (serverUrlSyncRef.current === settings.serverUrl) {
-      return;
-    }
-
-    serverUrlSyncRef.current = settings.serverUrl;
-    const timeoutId = window.setTimeout(() => {
-      void syncProjectsWithServer(false);
-    }, 450);
-
-    return () => window.clearTimeout(timeoutId);
-  }, [settings.serverUrl]);
 
   useEffect(() => {
     setCapabilities(null);
@@ -9731,11 +9645,11 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
               <dd>{formatAccountCreatedAt(authUser?.created_at, settings.language)}</dd>
             </div>
             <div>
-              <dt>{t("서버 상태")}</dt>
+              <dt>{t("서비스 상태")}</dt>
               <dd>
                 <span className="profile-connection" data-status={serverStatus}>
                   <span aria-hidden="true" className="profile-connection-dot" />
-                  {serverStatus === "online" ? t("서버 연결됨") : t("서버 오프라인")}
+                  {serverStatus === "online" ? t("연결됨") : t("오프라인")}
                 </span>
               </dd>
             </div>
@@ -9743,7 +9657,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
           {authUser ? (
             <p className="profile-note">
-              {t("계정 정보는 현재 연결된 PaiM 서버에서 관리됩니다.")}
+              {t("계정 정보는 PaiM에서 안전하게 관리됩니다.")}
             </p>
           ) : (
             <Banner
@@ -9757,14 +9671,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   }
 
   function renderSettingsPage() {
-    const effectiveServerUrl = settings.serverUrl || getPaimApiRootUrl() || DEFAULT_PAIM_API_ROOT_URL;
-    const normalizedServerUrlDraft = normalizePaimServerUrl(serverUrlDraft);
-    const isServerUrlDirty = normalizedServerUrlDraft !== normalizePaimServerUrl(settings.serverUrl);
-    const draftServerUrl = resolvePaimApiRootUrl(normalizedServerUrlDraft);
-    const willServerApplyReload =
-      isServerUrlDirty &&
-      getProjectStorageKey(authUser, canLogout, draftServerUrl) !== projectStorageKey;
-
     return (
       <WorkspacePageLayout
         ariaLabel={t("설정")}
@@ -9845,85 +9751,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
             </SegmentedControl>
           </section>
 
-          <section className="settings-group" aria-label={t("서버 주소")}>
-            <div className="settings-copy">
-              <h2>{t("서버 주소")}</h2>
-              <p>{t("비우면 기본 주소 {url}로 돌아갑니다.", { url: DEFAULT_PAIM_API_ROOT_URL })}</p>
-            </div>
-            <div className="settings-control-stack">
-              <div className="settings-inline-control">
-                <TextInput
-                  isLabelHidden
-                  label={t("PaiM 서버 주소")}
-                  onChange={(value) => {
-                    setServerUrlDraft(value);
-                    setServerTestState({ message: "", status: "idle" });
-                    setIsServerApplyConfirming(false);
-                  }}
-                  placeholder={DEFAULT_PAIM_API_ROOT_URL}
-                  value={serverUrlDraft}
-                  width="100%"
-                />
-              </div>
-              <div className="settings-server-actions">
-                <Button
-                  isLoading={serverTestState.status === "testing"}
-                  label={t("연결 테스트")}
-                  onClick={() => void handleTestServerConnection()}
-                  variant="secondary"
-                />
-                {isServerApplyConfirming ? (
-                  <Button
-                    label={t("취소")}
-                    onClick={() => setIsServerApplyConfirming(false)}
-                    variant="secondary"
-                  />
-                ) : null}
-                <Button
-                  isDisabled={!isServerUrlDirty || serverTestState.status === "testing"}
-                  label={
-                    isServerApplyConfirming
-                      ? t("전환하고 다시 시작")
-                      : willServerApplyReload
-                        ? t("서버 전환 적용")
-                        : t("주소 적용")
-                  }
-                  onClick={handleApplyServerUrl}
-                  variant={isServerApplyConfirming ? "primary" : "secondary"}
-                />
-              </div>
-              <p
-                className="settings-status"
-                aria-atomic="true"
-                role="status"
-              >
-                <StatusDot
-                  label={serverStatus === "online" ? t("서버 연결됨") : t("서버 오프라인")}
-                  variant={serverStatus === "online" ? "success" : "error"}
-                />
-                {t(serverStatus === "online" ? "현재 연결됨 · {url}{message}" : "현재 오프라인 · {url}{message}", {
-                  message: "",
-                  url: effectiveServerUrl,
-                })}
-              </p>
-              {isServerUrlDirty ? (
-                <p
-                  aria-live="polite"
-                  className="settings-draft-status"
-                  data-status={isServerApplyConfirming ? "warning" : serverTestState.status}
-                >
-                  {isServerApplyConfirming
-                    ? t("적용하면 앱이 다시 시작되고 새 서버의 프로젝트로 전환됩니다.")
-                    : serverTestState.message
-                      ? t(serverTestState.message)
-                      : willServerApplyReload
-                        ? t("새 서버 주소입니다. 연결을 확인한 뒤 적용하세요.")
-                        : t("적용하지 않은 변경 사항이 있습니다.")}
-                </p>
-              ) : null}
-            </div>
-          </section>
-
           <section className="settings-group" aria-label={t("완료 제안 민감도")}>
             <div className="settings-copy">
               <h2>{t("완료 제안 민감도")}</h2>
@@ -9972,7 +9799,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
               <p aria-live="polite">
                 {isSettingsResetConfirming
                   ? t("계속하려면 초기화를 확인하세요. 화면·언어·분석 표시와 패널 배치만 기본값으로 되돌립니다.")
-                  : t("프로젝트·대화·계정·서버 주소는 유지하고 앱 설정만 기본값으로 되돌립니다.")}
+                  : t("프로젝트·대화·계정은 유지하고 앱 설정만 기본값으로 되돌립니다.")}
               </p>
             </div>
             <div className="settings-confirm-actions">
