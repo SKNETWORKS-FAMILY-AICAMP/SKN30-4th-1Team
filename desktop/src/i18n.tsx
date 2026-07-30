@@ -194,6 +194,12 @@ const en: Record<string, string> = {
   "삭제": "Delete",
   "다시 삭제": "Delete again",
   "한 번 더 누르면 이 채팅과 대화 기록을 삭제합니다": "Press again to delete this chat and its conversation history",
+  "한 번 더 누르면 이 기기에 저장된 채팅과 대화 기록을 삭제합니다":
+    "Press again to delete this chat and its conversation history from this device",
+  "로컬 저장 공간이 부족해 최신 대화를 저장하지 못했습니다":
+    "Local storage is full, so the latest conversation could not be saved",
+  "로컬 저장 공간이 부족해 최신 초안을 저장하지 못했습니다":
+    "Local storage is full, so the latest draft could not be saved",
   "다시 연결": "Reconnect",
   "오프라인 · 저장된 프로젝트 사용 중": "Offline · using saved projects",
   "PaiM 서버에 연결할 수 없습니다 — 마지막 저장 상태를 표시 중": "Cannot connect to the PaiM server — showing the last saved state",

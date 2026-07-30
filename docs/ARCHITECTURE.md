@@ -69,10 +69,10 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 │   │   ├── delta.py                 # "지난 확인 이후" 델타 브리핑 조회/생성
 │   │   └── query.py                 # Q&A 질의 엔드포인트 (+첨부파일 임시 컨텍스트)
 │   │
-│   ├── chat/                        # 세션형 대화 (암호화 대화 이력)
-│   │   ├── router.py                # /projects/{id}/sessions — 세션 CRUD, 세션 내 질의
-│   │   ├── session_store.py         # 세션·메시지 암호화 저장/조회
-│   │   └── context_builder.py       # tiktoken 기반 프롬프트 컨텍스트 조립(토큰 예산 관리)
+│   ├── chat/                        # deprecated 서버 세션 호환 계층 (구형 클라이언트용)
+│   │   ├── router.py                # /projects/{id}/sessions — deprecated 세션 CRUD·질의
+│   │   ├── session_store.py         # 레거시 세션·메시지 암호화 저장/조회
+│   │   └── context_builder.py       # 레거시 세션 질의의 토큰 예산 관리
 │   │
 │   ├── pipeline/                    # 문서 → 구조화 메모리 변환
 │   │   ├── extractor.py             # LLM 추출 — 소스 타입(회의록/README/커밋/이슈-PR)별 지침 분기, 청크 분할·중복 제거
@@ -187,8 +187,8 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 | `repository.py` | `POST /projects/{id}/repositories`, `.../sync` | GitHub repo 연결, 동기화 트리거 |
 | `suggestion.py` | `.../suggestions/{id}/accept|reject` | 완료 제안 승인/거절 (상태 변경은 항상 사람) |
 | `delta.py` | `GET/POST /projects/{id}/delta`, `.../briefing/delta` | 델타 브리핑 |
-| `query.py` | `POST /projects/{id}/query` | 1회성 Q&A 질의 (첨부파일 임시 컨텍스트 지원) |
-| `chat/router.py` | `/projects/{id}/sessions/...` | 세션 CRUD, 세션 내 질의(`.../{session_id}/query`) — 암호화 대화 이력 |
+| `query.py` | `POST /projects/{id}/query` | 현재 데스크톱의 비영속 Q&A (로컬 최근 대화·첨부를 요청 컨텍스트로만 사용) |
+| `chat/router.py` | `/projects/{id}/sessions/...` | 구형 클라이언트용 deprecated 세션 CRUD·질의 — 암호화 서버 이력 |
 | `github/router.py` | `/github/app/sessions`, `/callback` | GitHub App 설치 플로우, JWT 서명, repo preview |
 | `auth.py` | — | 개발용 임시 사용자 인증 (`DEV_USER_ID`) |
 
@@ -235,11 +235,12 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 - 문서·Git 적재는 `documents.py`의 백그라운드/동기 처리로 실행하며, 별도 ingest 그래프는 두지 않습니다.
 - 기존 라우터 분기·검증·재기획 그래프는 [archive/legacy_qa_v1](../archive/legacy_qa_v1/README.md)의 비교 기준선으로만 보존합니다.
 
-### 3.7 chat — 암호화 세션 대화
+### 3.7 chat — 데스크톱 local-only 기본 경로와 레거시 호환
 
-- `session_store.py`: 세션·메시지를 `security/session_crypto.py`(AES-256-GCM, `SESSION_MEMORY_KEY`)로 암호화 저장
-- `context_builder.py`: tiktoken으로 토큰 수를 계산해 시스템 프롬프트+요약+최근 메시지를 토큰 예산 안에서 조립
-- 세션 질의 API도 같은 Agentic Q&A를 사용합니다. 기존 컨텍스트 예산·암호화 이력·롤링 요약은 API 전처리에서 만들고, Agentic 도구 오케스트레이터가 답변을 생성한 뒤 기존 저장·응답 형식을 유지합니다.
+- 현재 데스크톱은 채팅 제목·질문·답변·작성 중 초안을 계정·서버 범위의 WebView `localStorage`에 저장하고, `POST /projects/{id}/query`에 최근 대화를 요청 컨텍스트로 전달합니다.
+- `/query`가 받은 질문과 최근 대화는 답변 생성 중 PaiM 서버와 설정된 외부 LLM에 전달될 수 있지만, `chat_sessions`, `chat_messages`, `chat_summaries`에는 저장하지 않습니다.
+- `chat/router.py`, `session_store.py`, `context_builder.py`는 deprecated `/sessions/*`를 사용하는 구형 클라이언트 호환용입니다. 이 경로는 `security/session_crypto.py`로 서버 세션을 암호화 저장하며 현재 데스크톱의 기본 저장 경로가 아닙니다.
+- WebView `localStorage`는 현재 앱 전용 암호화 저장소가 아닙니다. 안전한 전용 저장소 이전은 별도 후속 범위입니다.
 
 ### 3.8 llm — 프로바이더 추상화
 
@@ -298,7 +299,7 @@ Tauri 2(Rust 셸) 위에 React 19 + TypeScript로 구성된 공식 사용자 UI�
 - `memory.date` = 회의/문서의 기록 날짜, `memory.due_date` = 마감일 (별개 컬럼, migrate_v4)
 - `memory.is_user_verified` = 사용자가 수정한 기록 보호 플래그 — LLM 재처리가 덮어쓰지 않음
 - `memory_suggestions` = Reconciler가 만든 완료 제안, 근거·승인 이력과 함께 보존 (migrate_v5)
-- `chat_sessions`/`chat_messages`/`chat_summaries` = AES-256-GCM 암호화 세션 대화
+- `chat_sessions`/`chat_messages`/`chat_summaries` = deprecated 서버 세션 API의 구형 클라이언트 호환 테이블 (AES-256-GCM 암호화)
 - `project_memory` = 조망형 질문에 쓰이는 응축 요약
 
 ## 8. 핵심 흐름
@@ -329,16 +330,18 @@ repo 연결/동기화 (api/repository.py: POST .../sync)
 
 ```
 프로젝트 Q&A (api/query.py)
+  → 데스크톱의 로컬 최근 대화를 요청 history로 전달 (서버 chat 테이블에는 저장하지 않음)
   → 첨부 검증·텍스트 추출 (있을 때만, 임시 근거)
   → agentic_graph.py: 오케스트레이터 LLM
       → search_project_evidence / query_structured_memory / get_project_overview
       → 도구 근거 반환 → 필요한 경우 다음 도구 호출
   → 최종 답변 + 출처 반환 (`route`는 호환성상 `semantic`)
+  → 데스크톱이 질문·답변을 로컬 대화에 저장
 
-세션 질의 (chat/router.py)
+레거시 세션 질의 (chat/router.py, deprecated)
   → context_builder.py 로 암호화 대화 이력과 함께 컨텍스트 조립
   → Agentic Q&A (프로젝트 질의·Streamlit과 동일한 도구 오케스트레이터)
-  → 기존 세션 저장·롤링 요약·응답 형식 유지
+  → 구형 클라이언트 호환을 위해 서버 세션 저장·롤링 요약·응답 형식 유지
 ```
 
 ### 8.4 델타 브리핑
@@ -355,7 +358,7 @@ repo 연결/동기화 (api/repository.py: POST .../sync)
 - **정확도 > 재현율**: Reconciler의 완료 매칭은 애매하면 보고하지 않음(high/medium 확신 + 근거 필수). 놓친 제안은 다음 동기화나 사람이 잡을 수 있지만, 틀린 완료 처리는 신뢰를 무너뜨림.
 - **파괴적 변경은 제안-승인, 추가는 자동**: 메모리 적재는 자동이지만 완료 처리처럼 상태를 바꾸는 일은 반드시 사람의 승인을 거침 (human-in-the-loop).
 - **근거 우선 Agentic Q&A**: 오케스트레이터는 읽기 전용 도구를 하나 이상 호출해 근거를 확인한 뒤 답한다. 검증·재계획 같은 안전장치는 평가 결과가 필요할 때만 추가한다.
-- **로컬 우선 + 암호화**: 백엔드는 `127.0.0.1`에만 바인딩, 세션 대화는 AES-256-GCM 암호화 저장.
+- **데스크톱 채팅은 local-only**: 새 데스크톱은 대화와 초안을 현재 WebView `localStorage`에 저장합니다. `/query`에는 답변 생성에 필요한 최근 대화를 전송하지만 서버 chat 테이블에는 저장하지 않으며, 암호화 서버 세션은 deprecated 호환 경로에만 남아 있습니다.
 
 ## 10. CI/CD
 
