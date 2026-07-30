@@ -12,7 +12,7 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 - **처리**: LLM이 결정(decision)·액션(action)·이슈(issue)·리스크(risk)로 구조화 추출 → MySQL + ChromaDB에 이중 저장
 - **관찰**: repo sync 시 머지된 PR과 열린 액션을 LangGraph 기반 Reconciler가 대조해 완료 제안 생성 (승인은 항상 사람)
 - **질의**: 프로젝트 Q&A는 Agentic 오케스트레이터가 SQL 상태·하이브리드 근거·프로젝트 조망 도구를 필요에 따라 호출
-- **UI**: Tauri + React 데스크톱 앱 (macOS/Windows), Streamlit 프로토타입 UI는 레거시로 유지
+- **UI**: Tauri + React 데스크톱 앱 (macOS/Windows)
 
 ```
                          ┌─────────────────────────┐
@@ -130,7 +130,7 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 │   └── fixtures/*.md, *.golden.json # 문서 유형별(짧은 회의록/표 위주 등) 정답 청크 세트
 │
 ├── data/samples/                    # 수동 업로드 데모/실험용 샘플 회의록 (코드에서 참조되지 않음)
-├── meeting_notes/                   # tests/test_frontend_contract.py 가 사용하는 고정 테스트 fixture 회의록
+├── meeting_notes/                   # 수동 검증용 합성 회의록 샘플 (현재 코드에서 직접 참조하지 않음)
 │
 ├── desktop/                         # 데스크톱 앱 (Tauri 2 + React 19 + TypeScript) — 공식 사용자 UI
 │   ├── src/                         # React 프론트엔드
@@ -151,12 +151,6 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 │   ├── assets/                      # 앱 아이콘(app_icon), README용 스크린샷(readme), 기타(github)
 │   ├── scripts/                     # 빌드 스모크 테스트 스크립트 (레이아웃/오프라인 번들)
 │   └── .env.production              # 공개 빌드 설정 (OAuth client ID 등)
-│
-├── frontend/                        # ⚠ 레거시 — Streamlit 프로토타입 UI (초기 검증용, README·로드맵에는 미반영)
-│   │                                 #   공식 사용자 UI는 desktop/(Tauri)이며 이 폴더는 대체되었습니다.
-│   ├── app.py                       # Streamlit 진입점 — 사이드바 프로젝트 선택 + 페이지 네비게이션
-│   ├── views/                       # 업로드/대시보드/채팅/타임라인 페이지
-│   └── components/                  # 메모리 카드, 타임라인 등 재사용 위젯
 │
 ├── docs/                            # 프로젝트 문서
 │   ├── README.md                    # 문서 정본·보관 자료 인덱스
@@ -276,11 +270,7 @@ Tauri 2(Rust 셸) 위에 React 19 + TypeScript로 구성된 공식 사용자 UI�
 - `src-tauri/`는 네이티브 윈도우/트레이/권한(capabilities)을 구성하는 Rust 셸로, 실제 비즈니스 로직은 담지 않습니다.
 - CI(`.github/workflows/release.yml`)가 태그 push 시 이 앱을 macOS/Windows용으로 빌드해 릴리즈합니다.
 
-## 5. 레거시: `frontend/` (Streamlit)
-
-`frontend/`는 Streamlit 기반 초기 프로토타입 UI입니다. 현재 README·로드맵 어디에도 언급되지 않으며 공식 사용자 UI는 `desktop/`(Tauri)로 대체되었습니다. `pyproject.toml`의 `tool.hatch.build.targets.wheel.packages`에는 여전히 포함되어 패키징되고 있고, `tests/test_frontend_contract.py`가 `meeting_notes/` fixture로 계약 테스트를 유지하고 있어 완전히 죽은 코드는 아니지만, 신규 기능 개발은 `desktop/`을 기준으로 이루어집니다.
-
-## 6. 테스트·평가 자산
+## 5. 테스트·평가 자산
 
 세 디렉토리가 목적이 다른 테스트/평가 도구입니다.
 
@@ -290,9 +280,9 @@ Tauri 2(Rust 셸) 위에 React 19 + TypeScript로 구성된 공식 사용자 UI�
 | `backend/test/` | RAGAS 기반 하이브리드 검색(리트리버) 품질 수동 평가 — 파라미터 튜닝용 | `python backend/test/rag_eval.py` (환경변수로 K/거리 임계값 조정) |
 | `evals/` | 문서 청킹 품질 평가 — golden fixture 대비 청크 분할 정확도 검증 | `python -m evals.eval_chunking` |
 
-샘플 데이터도 목적이 나뉩니다: `meeting_notes/`는 `tests/test_frontend_contract.py`가 참조하는 고정 테스트 fixture이고, `data/samples/`는 코드에서 참조되지 않는 수동 업로드 데모/실험용 샘플입니다.
+`meeting_notes/`와 `data/samples/`는 현재 코드에서 직접 참조하지 않는 수동 업로드·검증용 샘플입니다.
 
-## 7. 데이터 모델 핵심
+## 6. 데이터 모델 핵심
 
 | 카테고리 | 설명 |
 | --- | --- |
@@ -307,9 +297,9 @@ Tauri 2(Rust 셸) 위에 React 19 + TypeScript로 구성된 공식 사용자 UI�
 - `chat_sessions`/`chat_messages`/`chat_summaries` = deprecated 서버 세션 API의 구형 클라이언트 호환 테이블 (AES-256-GCM 암호화)
 - `project_memory` = 조망형 질문에 쓰이는 응축 요약
 
-## 8. 핵심 흐름
+## 7. 핵심 흐름
 
-### 8.1 문서 업로드 → 기억 적재
+### 7.1 문서 업로드 → 기억 적재
 
 ```
 사용자 업로드 (api/documents.py)
@@ -319,7 +309,7 @@ Tauri 2(Rust 셸) 위에 React 19 + TypeScript로 구성된 공식 사용자 UI�
   → 문서 상태(status)를 polling(api/documents.py: GET .../documents/{id}/status)으로 확인
 ```
 
-### 8.2 GitHub repo 동기화 → 완료 제안
+### 7.2 GitHub repo 동기화 → 완료 제안
 
 ```
 repo 연결/동기화 (api/repository.py: POST .../sync)
@@ -331,7 +321,7 @@ repo 연결/동기화 (api/repository.py: POST .../sync)
   → 승인 시에만 memory.completed_at 갱신
 ```
 
-### 8.3 질문 → 답변
+### 7.3 질문 → 답변
 
 ```
 프로젝트 Q&A (api/query.py)
@@ -345,11 +335,11 @@ repo 연결/동기화 (api/repository.py: POST .../sync)
 
 레거시 세션 질의 (chat/router.py, deprecated)
   → context_builder.py 로 암호화 대화 이력과 함께 컨텍스트 조립
-  → Agentic Q&A (프로젝트 질의·Streamlit과 동일한 도구 오케스트레이터)
+  → Agentic Q&A (프로젝트 질의와 동일한 도구 오케스트레이터)
   → 구형 클라이언트 호환을 위해 서버 세션 저장·롤링 요약·응답 형식 유지
 ```
 
-### 8.4 델타 브리핑
+### 7.4 델타 브리핑
 
 ```
 앱 재오픈 (api/delta.py: GET/POST .../delta, .../briefing/delta)
@@ -358,13 +348,13 @@ repo 연결/동기화 (api/repository.py: POST .../sync)
   → LLM이 스탠드업 대체 브리핑으로 요약 (약 8문장)
 ```
 
-## 9. 설계 원칙
+## 8. 설계 원칙
 
 - **정확도 > 재현율**: Reconciler의 완료 매칭은 애매하면 보고하지 않음(high/medium 확신 + 근거 필수). 놓친 제안은 다음 동기화나 사람이 잡을 수 있지만, 틀린 완료 처리는 신뢰를 무너뜨림.
 - **파괴적 변경은 제안-승인, 추가는 자동**: 메모리 적재는 자동이지만 완료 처리처럼 상태를 바꾸는 일은 반드시 사람의 승인을 거침 (human-in-the-loop).
 - **근거 우선 Agentic Q&A**: 오케스트레이터는 읽기 전용 도구를 하나 이상 호출해 근거를 확인한 뒤 답한다. 검증·재계획 같은 안전장치는 평가 결과가 필요할 때만 추가한다.
 - **데스크톱 채팅은 local-only**: 새 데스크톱은 대화와 초안을 현재 WebView `localStorage`에 저장합니다. `/query`에는 답변 생성에 필요한 최근 대화를 전송하지만 서버 chat 테이블에는 저장하지 않으며, 암호화 서버 세션은 deprecated 호환 경로에만 남아 있습니다.
 
-## 10. CI/CD
+## 9. CI/CD
 
 `.github/workflows/release.yml`이 버전 태그(`v*`) push 시 `desktop/`(Tauri) 앱을 macOS `.dmg`, Windows `-setup.exe`/`.msi`로 빌드해 GitHub Releases에 게시합니다. 백엔드는 별도 CI 없이 로컬(`docker compose` + `uv run uvicorn`) 또는 `start-paim.bat`(Windows 원클릭)으로 구동합니다.

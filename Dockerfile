@@ -18,16 +18,11 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-# 2단계: 소스 복사 후 프로젝트 자체를 설치한다.
-#
-# frontend/를 복사하는 이유: pyproject.toml의 hatch.build.targets.wheel이
-# packages = ["backend", "frontend"] 를 요구해 디렉터리가 없으면 빌드가 실패한다.
-# 내용은 수정하지 않고 실행하지도 않는다(Streamlit 레거시 UI, 서버 배포 대상 아님).
+# 2단계: 백엔드 소스 복사 후 프로젝트 자체를 설치한다.
 #
 # 리포지토리 루트를 통째로 COPY하지 않는다 — .dockerignore가 있어도 명시적 복사가
 # 비밀 파일 유입에 대한 더 강한 보장이다.
 COPY backend/ ./backend/
-COPY frontend/ ./frontend/
 RUN uv sync --frozen --no-dev
 
 ENV PATH="/app/.venv/bin:$PATH"
