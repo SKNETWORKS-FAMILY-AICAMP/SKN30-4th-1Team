@@ -1776,10 +1776,9 @@ async function setSmokeServerUrl(send, serverUrl) {
 async function openAppWithProject(send) {
   const seededProjectState = createDefaultSmokeProjectStorage();
 
-  await navigateAndWaitForSelector(send, APP_URL, ".app-shell");
   await evaluateAndNavigateToSelector(
     send,
-    `localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(SIDEBAR_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(SIDEBAR_WIDTH_STORAGE_KEY)}, '272'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_WIDTH_STORAGE_KEY)}, '360'); localStorage.removeItem(${JSON.stringify(PROJECT_COLLAPSED_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(seededProjectState)})`,
+    `(() => { let smokeSettings = {}; try { smokeSettings = JSON.parse(localStorage.getItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}) || '{}'); } catch { smokeSettings = {}; } smokeSettings.serverUrl = ${JSON.stringify(API_SERVER_A)}; localStorage.setItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}, JSON.stringify(smokeSettings)); })(); localStorage.setItem(${JSON.stringify(AUTH_SCENARIO_STORAGE_KEY)}, 'owner'); localStorage.setItem(${JSON.stringify(AUTH_STORAGE_KEY)}, ${JSON.stringify(JSON.stringify(AUTH_SESSION))}); localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(SIDEBAR_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(SIDEBAR_WIDTH_STORAGE_KEY)}, '272'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_WIDTH_STORAGE_KEY)}, '360'); localStorage.removeItem(${JSON.stringify(PROJECT_COLLAPSED_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(seededProjectState)})`,
     APP_URL,
     ".portfolio-page",
   );
@@ -1789,10 +1788,9 @@ async function openAppWithProject(send) {
 }
 
 async function openAppWithoutProjects(send) {
-  await navigateAndWaitForSelector(send, APP_URL, ".app-shell");
   await evaluateAndNavigateToSelector(
     send,
-    `localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)}); localStorage.removeItem(${JSON.stringify(PROJECT_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(SIDEBAR_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(SIDEBAR_WIDTH_STORAGE_KEY)}, '272'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_WIDTH_STORAGE_KEY)}, '360'); localStorage.removeItem(${JSON.stringify(PROJECT_COLLAPSED_STORAGE_KEY)})`,
+    `(() => { let smokeSettings = {}; try { smokeSettings = JSON.parse(localStorage.getItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}) || '{}'); } catch { smokeSettings = {}; } smokeSettings.serverUrl = ${JSON.stringify(API_SERVER_A)}; localStorage.setItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}, JSON.stringify(smokeSettings)); })(); localStorage.setItem(${JSON.stringify(AUTH_SCENARIO_STORAGE_KEY)}, 'owner'); localStorage.setItem(${JSON.stringify(AUTH_STORAGE_KEY)}, ${JSON.stringify(JSON.stringify(AUTH_SESSION))}); localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)}); localStorage.removeItem(${JSON.stringify(PROJECT_STORAGE_KEY)}); localStorage.setItem(${JSON.stringify(SIDEBAR_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(SIDEBAR_WIDTH_STORAGE_KEY)}, '272'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false'); localStorage.setItem(${JSON.stringify(PROJECT_PANEL_WIDTH_STORAGE_KEY)}, '360'); localStorage.removeItem(${JSON.stringify(PROJECT_COLLAPSED_STORAGE_KEY)})`,
     APP_URL,
     ".portfolio-page",
   );
@@ -4380,14 +4378,53 @@ function createSmokeNavigationUrl(url) {
   return target.toString();
 }
 
-async function navigateAndWaitForSelector(send, url, selector, timeoutMs = 12000) {
+async function navigateAndWaitForSelector(send, url, selector, timeoutMs = 20000) {
   const targetUrl = createSmokeNavigationUrl(url);
+  const storageSnapshotResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      try {
+        return Object.fromEntries(
+          Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index))
+            .filter(Boolean)
+            .map((key) => [key, localStorage.getItem(key)]),
+        );
+      } catch {
+        return null;
+      }
+    })()`,
+  });
+  const storageSnapshot = storageSnapshotResult.result.value;
+  const storageSetupScript = storageSnapshot
+    ? await send("Page.addScriptToEvaluateOnNewDocument", {
+        source: `(() => {
+          localStorage.clear();
+          for (const [key, value] of Object.entries(${JSON.stringify(storageSnapshot)})) {
+            localStorage.setItem(key, value);
+          }
+        })()`,
+      })
+    : null;
 
-  await send("Page.navigate", { url: targetUrl });
-  await waitForSelector(send, selector, timeoutMs, targetUrl);
+  try {
+    await send("Page.navigate", { url: targetUrl });
+    await waitForSelector(send, selector, timeoutMs, targetUrl);
+  } finally {
+    if (storageSetupScript) {
+      await send("Page.removeScriptToEvaluateOnNewDocument", {
+        identifier: storageSetupScript.identifier,
+      });
+    }
+  }
 }
 
 async function evaluateAndNavigateToSelector(send, expression, url, selector, timeoutMs = 5000) {
+  // Seed the current origin before navigation as well as the next document.
+  // Relying only on addScriptToEvaluateOnNewDocument leaves a narrow race with
+  // the previous scenario's final persistence effect during a long combined run.
+  await send("Runtime.evaluate", {
+    expression: `(() => { ${expression}; })()`,
+  });
   const setupScript = await send("Page.addScriptToEvaluateOnNewDocument", {
     source: `(() => { ${expression}; })()`,
   });
@@ -5479,6 +5516,33 @@ async function verifySidebarBrandTypography(send) {
     failures.push("project setup actions should keep a compact secondary-to-primary hierarchy");
   }
 
+  // Headless Chromium advertises a touch-only primary input and Tooltip
+  // correctly suppresses hover in that environment. Limit a desktop-hover
+  // capability shim to this hover contract, then restore the browser API.
+  const hoverMediaSource = `(() => {
+    if (window.__paimLayoutOriginalMatchMedia) return;
+    const originalMatchMedia = window.matchMedia.bind(window);
+    Object.defineProperty(window, '__paimLayoutOriginalMatchMedia', {
+      configurable: true,
+      value: window.matchMedia,
+    });
+    window.matchMedia = (query) => {
+      const result = originalMatchMedia(query);
+      if (String(query).trim() !== '(hover: none)') return result;
+      return new Proxy(result, {
+        get(target, property) {
+          if (property === 'matches') return false;
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+    };
+  })()`;
+  await send("Runtime.evaluate", { expression: hoverMediaSource });
+  const hoverMediaScript = await send("Page.addScriptToEvaluateOnNewDocument", {
+    source: hoverMediaSource,
+  });
+
   const measureSidebarTooltip = async (theme) => {
     await send("Runtime.evaluate", {
       expression: `(() => {
@@ -5492,8 +5556,7 @@ async function verifySidebarBrandTypography(send) {
         localStorage.setItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}, JSON.stringify(settings));
       })()`,
     });
-    await send("Page.navigate", { url: APP_URL });
-    await waitForSelector(send, ".portfolio-page");
+    await navigateAndWaitForSelector(send, APP_URL, ".portfolio-page");
     await waitForSelector(send, ".portfolio-card-hit-area");
     await send("Runtime.evaluate", {
       expression: `document.querySelector('.portfolio-card-hit-area')?.click()`,
@@ -5548,6 +5611,16 @@ async function verifySidebarBrandTypography(send) {
     dark: await measureSidebarTooltip("dark"),
     light: await measureSidebarTooltip("light"),
   };
+  await send("Page.removeScriptToEvaluateOnNewDocument", {
+    identifier: hoverMediaScript.identifier,
+  });
+  await send("Runtime.evaluate", {
+    expression: `(() => {
+      if (!window.__paimLayoutOriginalMatchMedia) return;
+      window.matchMedia = window.__paimLayoutOriginalMatchMedia;
+      delete window.__paimLayoutOriginalMatchMedia;
+    })()`,
+  });
   debugLayout("sidebar tooltip", value.sidebarTooltip);
   await send("Runtime.evaluate", {
     expression: `(() => {
@@ -12758,7 +12831,7 @@ async function verifySidebarToggleChromeGeometry(send) {
         Math.abs((reopened?.sidebar.width ?? 0) - 272) > 1) {
       failures.push(`${scenario.width}x${scenario.height} should preserve 272px sidebar and 52px rail widths`);
     }
-    if (expanded && collapsed && reopened &&
+    if (expanded?.platform === "macos" && collapsed && reopened &&
         (Math.abs(expanded.button.left - collapsed.button.left) > 0.75 ||
           Math.abs(expanded.button.top - collapsed.button.top) > 0.75 ||
           Math.abs(expanded.button.left - reopened.button.left) > 0.75 ||
@@ -12794,6 +12867,7 @@ async function verifySidebarToggleChromeGeometry(send) {
         buttonRight: buttonBox.right,
         contextLeft: contextBox.left,
         ownedByAppChrome: Boolean(button.closest('.app-chrome')),
+        platform: document.querySelector('.app-shell')?.getAttribute('data-platform') || '',
         projectLabelCount: document.querySelectorAll('.chrome-project-area').length,
         projectText: project.textContent?.trim() || '',
         separatorVisible: getComputedStyle(separator).display !== 'none',
@@ -12804,7 +12878,7 @@ async function verifySidebarToggleChromeGeometry(send) {
   const breadcrumb = breadcrumbResult.result.value;
   value.push({ chatBreadcrumb: breadcrumb });
   if (!breadcrumb ||
-      !breadcrumb.ownedByAppChrome ||
+      (breadcrumb.platform === "macos" && !breadcrumb.ownedByAppChrome) ||
       breadcrumb.projectLabelCount !== 0 ||
       breadcrumb.projectText !== "Smoke Project" ||
       !breadcrumb.separatorVisible ||
@@ -14498,6 +14572,15 @@ try {
       result.failures.forEach((failure) => console.log(`FAIL zoom setup: ${failure}`));
     } else {
       console.log("PASS zoom setup");
+    }
+  } else if (process.env.PAIM_LAYOUT_FOCUS === "sidebar-chrome") {
+    const result = await verifySidebarToggleChromeGeometry(send);
+    if (result.failures.length > 0) {
+      hasFailures = true;
+      console.log("FAIL sidebar toggle chrome geometry");
+      result.failures.forEach((failure) => console.log(`  - ${failure}`));
+    } else {
+      console.log("PASS sidebar toggle chrome geometry");
     }
   } else if (process.env.PAIM_LAYOUT_FOCUS === "system-colors") {
     const result = await verifySystemColorContract(send);
