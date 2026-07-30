@@ -899,6 +899,10 @@ def _build_context(
          "date": (metas[i] or {}).get("date", "")}
         for i, info in kept
     ]
+    # 공개 debug에서는 제거하고, 동일 프로세스의 평가 실행기만 실제 LLM 입력 단위로 수집한다.
+    debug["retrieved_contexts"] = mysql_lines + [
+        f"(출처: {_chunk_source_label(metas[i])}) {texts[i]}" for i, _ in kept
+    ]
 
     parts = [p for p in [mysql_ctx, chroma_ctx] if p]
     return "\n\n".join(parts), sources, debug
