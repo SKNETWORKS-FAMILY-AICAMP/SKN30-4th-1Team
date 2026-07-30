@@ -222,9 +222,8 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 
 | 도구 | 처리 |
 | --- | --- |
-| `search_project_evidence` | `qa_engine.py`의 멀티쿼리·BM25(한국어 형태소) + dense RRF로 특정 사실·이유·변경 이력을 검색 |
-| `query_structured_memory` | `mysql_search.py`로 제한된 구조화 상태 목록·개수를 조회 |
-| `get_project_overview` | `sql_project_state.py`로 프로젝트 요약과 유효 Action Plan을 근거로 제공 |
+| `search_hybrid_vector_rag` | `qa_engine.py`의 멀티쿼리·BM25(한국어 형태소) + dense RRF로 특정 사실·이유·변경 이력을 검색 |
+| `query_sql_state` | `mysql_search.py`로 제한된 구조화 상태 목록·개수를 조회하고, `operation=overview`에서 프로젝트 요약과 유효 Action Plan을 제공 |
 
 `memory_vector.py`는 `memory` 테이블 행이 생성/수정될 때 ChromaDB에도 보조 인덱싱해 하이브리드 검색이 구조화 데이터도 커버하도록 합니다.
 
@@ -331,7 +330,7 @@ repo 연결/동기화 (api/repository.py: POST .../sync)
 프로젝트 Q&A (api/query.py)
   → 첨부 검증·텍스트 추출 (있을 때만, 임시 근거)
   → agentic_graph.py: 오케스트레이터 LLM
-      → search_project_evidence / query_structured_memory / get_project_overview
+      → search_hybrid_vector_rag / query_sql_state
       → 도구 근거 반환 → 필요한 경우 다음 도구 호출
   → 최종 답변 + 출처 반환 (`route`는 호환성상 `semantic`)
 

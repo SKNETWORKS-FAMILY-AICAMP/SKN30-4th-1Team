@@ -53,6 +53,9 @@ def test_does_not_detect_regular_questions(question):
 def test_is_deictic_whitelist():
     assert history_intent.is_deictic("그건 왜 바뀌었어?")
     assert history_intent.is_deictic("그 결정 말이야, 원래 뭐였어?")
+    assert history_intent.is_deictic("그 뒤에는 어떻게 바뀌었어?")
+    assert history_intent.is_deictic("나중에 이 계획이 바뀌었어?")
+    assert history_intent.is_deictic("최종 결과에서는 어떻게 달라졌어?")
     assert not history_intent.is_deictic("배포 주기가 왜 바뀌었어?")
     assert not history_intent.is_deictic("")
 
