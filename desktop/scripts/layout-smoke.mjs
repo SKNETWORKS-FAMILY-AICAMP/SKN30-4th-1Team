@@ -2994,7 +2994,7 @@ async function verifySidebarChatRowsHaveNoDecorativeIcon(send) {
   return { value, failures };
 }
 
-// 연결 테스트는 초안을 검사만 하고, 앱 설정 초기화는 사용자 데이터와 서버 범위를 보존한다.
+// 운영 UI는 서버 선택을 숨기고, 앱 설정 초기화는 사용자 데이터와 서버 범위를 보존한다.
 async function verifySettingsConnectionAndResetSafety(send) {
   await send("Emulation.setDeviceMetricsOverride", {
     width: 1280,
@@ -3027,7 +3027,7 @@ async function verifySettingsConnectionAndResetSafety(send) {
   const beforeResult = await send("Runtime.evaluate", {
     returnByValue: true,
     expression: `(() => {
-      window.__paimSettingsSafetyMarker = 'before-connection-test';
+      window.__paimSettingsSafetyMarker = 'before-settings-reset';
       return {
         authRaw: localStorage.getItem(${JSON.stringify(AUTH_STORAGE_KEY)}),
         href: location.href,
@@ -3037,47 +3037,16 @@ async function verifySettingsConnectionAndResetSafety(send) {
     })()`,
   });
 
-  await send("Runtime.evaluate", {
-    expression: `(() => {
-      const input = document.querySelector('.settings-group[aria-label="서버 주소"] input');
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      setter.call(input, ${JSON.stringify(API_SERVER_B)});
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-    })()`,
-  });
-  await send("Runtime.evaluate", {
-    expression: `Array.from(document.querySelectorAll('.settings-server-actions button'))
-      .find((button) => button.textContent.trim() === '연결 테스트')?.click()`,
-  });
-
-  const connectionStartedAt = Date.now();
-  while (Date.now() - connectionStartedAt < 4000) {
-    const statusResult = await send("Runtime.evaluate", {
-      returnByValue: true,
-      expression: `document.querySelector('.settings-draft-status')?.textContent?.includes('새 주소에 연결할 수 있습니다') === true`,
-    });
-    if (statusResult.result.value) {
-      break;
-    }
-    await sleep(50);
-  }
-
   const afterConnectionResult = await send("Runtime.evaluate", {
     returnByValue: true,
     expression: `(() => {
-      const requests = window.__paimLayoutApiRequests || [];
       return {
-        applyLabel: Array.from(document.querySelectorAll('.settings-server-actions button'))
-          .find((button) => button.textContent.includes('적용'))?.textContent.trim() || '',
         authRaw: localStorage.getItem(${JSON.stringify(AUTH_STORAGE_KEY)}),
-        draftStatus: document.querySelector('.settings-draft-status')?.textContent.trim() || '',
-        draftValue: document.querySelector('.settings-group[aria-label="서버 주소"] input')?.value || '',
         href: location.href,
         marker: window.__paimSettingsSafetyMarker || '',
         projectRaw: localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}),
-        serverBHealthRequested: requests.some((request) =>
-          request.serverOrigin === ${JSON.stringify(API_SERVER_B)} && request.call === 'GET /health'
-        ),
+        serverAddressVisible: Boolean(document.querySelector('.settings-group[aria-label="서버 주소"]')),
+        serverUrlVisible: document.body.innerText.includes(${JSON.stringify(API_SERVER_A)}),
         settingsPage: Boolean(document.querySelector('.settings-page')),
         settingsRaw: localStorage.getItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}),
       };
@@ -3111,7 +3080,7 @@ async function verifySettingsConnectionAndResetSafety(send) {
     try {
       const markerResult = await send("Runtime.evaluate", {
         returnByValue: true,
-        expression: `window.__paimSettingsSafetyMarker !== 'before-connection-test' && Boolean(document.querySelector('.app-shell'))`,
+        expression: `window.__paimSettingsSafetyMarker !== 'before-settings-reset' && Boolean(document.querySelector('.app-shell'))`,
       });
       if (markerResult.result.value) {
         didReload = true;
@@ -3168,21 +3137,19 @@ async function verifySettingsConnectionAndResetSafety(send) {
   const failures = [];
 
   if (!value.afterConnection.settingsPage ||
-      value.afterConnection.marker !== "before-connection-test" ||
+      value.afterConnection.marker !== "before-settings-reset" ||
       value.afterConnection.href !== value.before.href ||
       value.afterConnection.settingsRaw !== value.before.settingsRaw ||
       value.afterConnection.projectRaw !== value.before.projectRaw ||
       value.afterConnection.authRaw !== value.before.authRaw ||
-      value.afterConnection.draftValue !== API_SERVER_B ||
-      value.afterConnection.applyLabel !== "서버 전환 적용" ||
-      !value.afterConnection.draftStatus.includes("새 주소에 연결할 수 있습니다") ||
-      !value.afterConnection.serverBHealthRequested) {
-    failures.push("connection test should only validate the draft URL without saving, applying, or reloading");
+      value.afterConnection.serverAddressVisible ||
+      value.afterConnection.serverUrlVisible) {
+    failures.push("settings should hide server selection and connection details");
   }
 
   if (!value.firstResetPress.resetLabels.includes("취소") ||
       !value.firstResetPress.resetLabels.includes("설정 초기화") ||
-      value.firstResetPress.marker !== "before-connection-test" ||
+      value.firstResetPress.marker !== "before-settings-reset" ||
       value.firstResetPress.settingsRaw !== value.before.settingsRaw ||
       value.firstResetPress.projectRaw !== value.before.projectRaw ||
       value.firstResetPress.authRaw !== value.before.authRaw) {
@@ -4017,7 +3984,7 @@ async function verifyAccountMenuContract(send) {
       value.profile.initials !== "SO" ||
       value.profile.details.length !== 2 ||
       !value.profile.details.some((detail) => detail.label === "가입일" && !detail.value.includes("확인할 수 없음")) ||
-      !value.profile.details.some((detail) => detail.label === "서버 상태" && detail.value.includes("서버")) ||
+      !value.profile.details.some((detail) => detail.label === "서비스 상태" && detail.value === "연결됨") ||
       value.profile.menuVisible) {
     failures.push("Profile should show the authenticated identity and focus its heading");
   }

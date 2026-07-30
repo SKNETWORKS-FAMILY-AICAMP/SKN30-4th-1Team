@@ -2560,8 +2560,7 @@ button:not(:disabled):not([aria-disabled="true"]) {
 }
 
 .auth-header h1,
-.auth-header p,
-.auth-server {
+.auth-header p {
   margin: 0;
 }
 
@@ -2580,7 +2579,6 @@ button:not(:disabled):not([aria-disabled="true"]) {
 }
 
 .auth-header p,
-.auth-server,
 .auth-switch {
   color: var(--color-text-secondary);
   font-size: 13px;
@@ -2602,16 +2600,6 @@ button:not(:disabled):not([aria-disabled="true"]) {
   align-items: center;
   justify-content: center;
   gap: 4px;
-}
-
-.auth-server {
-  overflow: hidden;
-  color: var(--color-text-secondary);
-  font-family: var(--code-font-family);
-  font-size: 11px;
-  text-align: center;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .panel-loading-state {
@@ -4145,12 +4133,6 @@ button:not(:disabled):not([aria-disabled="true"]) {
 .settings-inline-control {
   display: flex;
   min-width: 0;
-  gap: 8px;
-}
-
-.settings-server-actions {
-  display: flex;
-  justify-content: flex-end;
   gap: 8px;
 }
 
@@ -7121,7 +7103,7 @@ button:not(:disabled):not([aria-disabled="true"]) {
   white-space: normal;
 }
 
-.app-shell[data-high-zoom-layout="true"] :is(.settings-server-actions, .settings-confirm-actions) {
+.app-shell[data-high-zoom-layout="true"] .settings-confirm-actions {
   justify-content: flex-start;
   flex-wrap: wrap;
 }

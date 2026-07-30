@@ -12,10 +12,9 @@ type AuthField = "email" | "name" | "password";
 type AuthScreenProps = {
   initialMessage?: string;
   onAuthenticated: (response: PaimAuthResponse) => void;
-  serverUrl: string;
 };
 
-export function AuthScreen({ initialMessage = "", onAuthenticated, serverUrl }: AuthScreenProps) {
+export function AuthScreen({ initialMessage = "", onAuthenticated }: AuthScreenProps) {
   const { language, t } = useI18n();
   const [mode, setMode] = useState<AuthMode>("login");
   const [email, setEmail] = useState("");
@@ -185,8 +184,6 @@ export function AuthScreen({ initialMessage = "", onAuthenticated, serverUrl }: 
             variant="ghost"
           />
         </div>
-
-        <p className="auth-server">{t("서버: {url}", { url: serverUrl })}</p>
       </section>
     </main>
   );
