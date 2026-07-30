@@ -88,39 +88,52 @@ PaiM은 회의록, 문서, 음성 기록과 GitHub 활동을 하나의 **프로�
 ## 작동 방식
 
 ```mermaid
-flowchart LR
-    subgraph Sources["프로젝트 소스"]
+flowchart TB
+    subgraph Sources["1 · 프로젝트 정보 입력"]
+        direction LR
         DOC["문서 · 회의 음성"]
         GH["GitHub 저장소"]
     end
 
-    subgraph Processing["수집 및 분석"]
+    subgraph Processing["2 · 수집 및 구조화"]
+        direction LR
         EXTRACT["텍스트 변환<br/>구조화 추출"]
         SYNC["README · 커밋<br/>Issue · PR 동기화"]
     end
 
-    MEMORY[("프로젝트 메모리")]
-    INSIGHT["근거 기반 Q&A<br/>델타 브리핑"]
+    subgraph Knowledge["3 · 프로젝트 지식 저장"]
+        MEMORY[("프로젝트 메모리")]
+    end
 
     DOC --> EXTRACT
     GH --> SYNC
     EXTRACT --> MEMORY
     SYNC --> MEMORY
-    MEMORY --> INSIGHT
 
-    subgraph Reconcile["완료 감지"]
-        PR["머지된 PR"]
+    subgraph Services["4 · 프로젝트 지식 활용"]
+        direction LR
+        QNA["근거 기반 Q&A"]
+        BRIEF["델타 브리핑"]
         MATCH["진행 중 액션과 대조"]
-        SUGGEST["완료 제안"]
-        REVIEW{"사용자 검토"}
     end
 
-    PR --> MATCH
+    MEMORY --> QNA
+    MEMORY --> BRIEF
     MEMORY --> MATCH
+    GH -->|"머지된 PR"| MATCH
+
+    subgraph Decision["5 · Human-in-the-loop"]
+        direction LR
+        SUGGEST["완료 제안"]
+        REVIEW{"사용자 검토"}
+        APPLY["프로젝트 상태 반영"]
+        REJECT["기존 상태 유지"]
+    end
+
     MATCH --> SUGGEST
     SUGGEST --> REVIEW
-    REVIEW -->|승인| MEMORY
-    REVIEW -->|거절| REJECT["변경 없음"]
+    REVIEW -->|승인| APPLY
+    REVIEW -->|거절| REJECT
 
     classDef source fill:#EAF2FF,stroke:#4F7CAC,color:#172A3A,stroke-width:2px
     classDef process fill:#F2ECFF,stroke:#7C3AED,color:#3B1768,stroke-width:2px
@@ -129,16 +142,18 @@ flowchart LR
     classDef review fill:#FFF4D6,stroke:#D97706,color:#78350F,stroke-width:2px
     classDef reject fill:#FDECEC,stroke:#DC2626,color:#7F1D1D,stroke-width:2px
 
-    class DOC,GH,PR source
+    class DOC,GH source
     class EXTRACT,SYNC,MATCH process
     class MEMORY core
-    class INSIGHT,SUGGEST outcome
+    class QNA,BRIEF,SUGGEST,APPLY outcome
     class REVIEW review
     class REJECT reject
 
     style Sources fill:#F8FAFC,stroke:#CBD5E1,stroke-width:1px
     style Processing fill:#FAF8FF,stroke:#D8B4FE,stroke-width:1px
-    style Reconcile fill:#FFFBEB,stroke:#FCD34D,stroke-width:1px
+    style Knowledge fill:#F5F3FF,stroke:#8B5CF6,stroke-width:2px
+    style Services fill:#F0FDFA,stroke:#5EEAD4,stroke-width:1px
+    style Decision fill:#FFFBEB,stroke:#FCD34D,stroke-width:1px
     linkStyle default stroke:#94A3B8,stroke-width:2px
 ```
 
@@ -150,62 +165,73 @@ PaiM은 질문 유형을 미리 고정하는 라우터 대신, 하나의 **Agent
 
 ```mermaid
 flowchart TB
-    subgraph Ingestion["프로젝트 지식 수집"]
+    subgraph Inputs["1 · Knowledge Sources"]
+        direction LR
         INPUT["문서 · PDF · DOCX<br/>회의 음성"]
+        REPO["README · 커밋<br/>Issue · PR"]
+    end
+
+    subgraph Ingestion["2 · Ingestion & Indexing"]
+        direction LR
         CONVERT["텍스트 변환 · 청킹"]
         EXTRACT["Extractor LLM<br/>결정 · 액션 · 이슈 · 리스크"]
-        INPUT --> CONVERT --> EXTRACT
-    end
-
-    subgraph GitHub["GitHub 동기화"]
-        REPO["README · 커밋<br/>Issue · PR"]
         INDEX["소스별 규칙으로<br/>정규화 · 인덱싱"]
-        REPO --> INDEX
     end
 
-    MYSQL[("MySQL<br/>구조화 상태 · 권한 · 이력")]
-    CHROMA[("ChromaDB<br/>문서 · 코드 근거 벡터")]
+    INPUT --> CONVERT --> EXTRACT
+    REPO --> INDEX
 
-    EXTRACT --> MYSQL
-    EXTRACT --> CHROMA
-    INDEX --> MYSQL
-    INDEX --> CHROMA
+    subgraph Storage["3 · Project Memory"]
+        direction LR
+        MYSQL[("MySQL<br/>구조화 상태 · 권한 · 이력")]
+        CHROMA[("ChromaDB<br/>문서 · 코드 근거 벡터")]
+    end
 
-    subgraph QA["Agentic Q&A"]
+    EXTRACT --> MYSQL & CHROMA
+    INDEX --> MYSQL & CHROMA
+
+    subgraph Request["4 · Runtime Request"]
+        direction LR
         QUESTION["사용자 질문<br/>+ 임시 첨부"]
+        MERGED["머지된 PR"]
+    end
+
+    subgraph Orchestration["5 · AI Orchestration"]
+        direction LR
         AGENT["LangGraph<br/>Agentic 오케스트레이터"]
+        RECONCILER["Reconciler LLM<br/>진행 중 액션과 대조"]
+    end
+
+    QUESTION --> AGENT
+    MERGED --> RECONCILER
+
+    subgraph Tools["6 · Evidence Tools"]
+        direction LR
         SQL_TOOL["Structured Memory<br/>정확한 목록 · 상태 · 개수"]
         SEARCH_TOOL["Hybrid Evidence Search<br/>BM25 + Vector RRF"]
         OVERVIEW_TOOL["Project Overview<br/>요약 · Action Plan"]
-        ANSWER["근거와 출처가 있는 답변"]
-
-        QUESTION --> AGENT
-        AGENT --> SQL_TOOL
-        AGENT --> SEARCH_TOOL
-        AGENT --> OVERVIEW_TOOL
-        SQL_TOOL --> AGENT
-        SEARCH_TOOL --> AGENT
-        OVERVIEW_TOOL --> AGENT
-        AGENT --> ANSWER
     end
 
-    MYSQL --> SQL_TOOL
-    MYSQL --> OVERVIEW_TOOL
-    MYSQL --> SEARCH_TOOL
+    AGENT --> SQL_TOOL & SEARCH_TOOL & OVERVIEW_TOOL
+    MYSQL --> SQL_TOOL & SEARCH_TOOL & OVERVIEW_TOOL
     CHROMA --> SEARCH_TOOL
+    MYSQL --> RECONCILER
 
-    subgraph Reconciler["상태 변경 제어"]
-        MERGED["머지된 PR"]
-        MATCH["Reconciler LLM<br/>진행 중 액션과 대조"]
+    subgraph Results["7 · Result & Control"]
+        direction LR
+        ANSWER["근거와 출처가 있는 답변"]
         INBOX["완료 제안 Inbox<br/>PR 링크 · 판단 근거"]
         APPROVAL{"사용자 승인"}
-
-        MERGED --> MATCH --> INBOX --> APPROVAL
+        APPLY["프로젝트 상태 반영"]
+        KEEP["기존 상태 유지"]
     end
 
-    MYSQL --> MATCH
-    APPROVAL -->|승인| MYSQL
-    APPROVAL -->|거절| KEEP["기존 상태 유지"]
+    SQL_TOOL --> ANSWER
+    SEARCH_TOOL --> ANSWER
+    OVERVIEW_TOOL --> ANSWER
+    RECONCILER --> INBOX --> APPROVAL
+    APPROVAL -->|승인| APPLY
+    APPROVAL -->|거절| KEEP
 
     classDef input fill:#EAF2FF,stroke:#4F7CAC,color:#172A3A,stroke-width:2px
     classDef transform fill:#F2ECFF,stroke:#7C3AED,color:#3B1768,stroke-width:2px
@@ -217,18 +243,21 @@ flowchart TB
     classDef reject fill:#FDECEC,stroke:#DC2626,color:#7F1D1D,stroke-width:2px
 
     class INPUT,REPO,QUESTION,MERGED input
-    class CONVERT,EXTRACT,INDEX,MATCH transform
+    class CONVERT,EXTRACT,INDEX,RECONCILER transform
     class MYSQL,CHROMA datastore
     class AGENT agent
     class SQL_TOOL,SEARCH_TOOL,OVERVIEW_TOOL tool
-    class ANSWER,INBOX success
+    class ANSWER,INBOX,APPLY success
     class APPROVAL approval
     class KEEP reject
 
+    style Inputs fill:#F8FAFC,stroke:#CBD5E1,stroke-width:1px
     style Ingestion fill:#F8FAFC,stroke:#CBD5E1,stroke-width:1px
-    style GitHub fill:#F8FAFC,stroke:#CBD5E1,stroke-width:1px
-    style QA fill:#FAF8FF,stroke:#C4B5FD,stroke-width:2px
-    style Reconciler fill:#FFFBEB,stroke:#FCD34D,stroke-width:1px
+    style Storage fill:#F5F3FF,stroke:#8B5CF6,stroke-width:2px
+    style Request fill:#EFF6FF,stroke:#93C5FD,stroke-width:1px
+    style Orchestration fill:#FAF8FF,stroke:#C4B5FD,stroke-width:2px
+    style Tools fill:#F5F3FF,stroke:#C4B5FD,stroke-width:1px
+    style Results fill:#FFFBEB,stroke:#FCD34D,stroke-width:1px
     linkStyle default stroke:#94A3B8,stroke-width:2px
 ```
 
