@@ -88,81 +88,33 @@ PaiM은 회의록, 문서, 음성 기록과 GitHub 활동을 하나의 **프로�
 ## 작동 방식
 
 ```mermaid
-flowchart TB
-    subgraph Sources["1 · 프로젝트 정보 입력"]
-        direction LR
-        DOC["문서 · 회의 음성"]
-        GH["GitHub 저장소"]
-    end
+flowchart LR
+    CONNECT["1 · 연결<br/>회의 · 문서 · GitHub"]
+    REMEMBER["2 · 기억<br/>결정 · 할 일 · 이슈 · 리스크"]
+    ASSIST["3 · 도움<br/>Q&A · 브리핑 · 완료 제안"]
+    DECIDE["4 · 사용자 결정<br/>검토 · 승인 · 거절"]
 
-    subgraph Processing["2 · 수집 및 구조화"]
-        direction LR
-        EXTRACT["텍스트 변환<br/>구조화 추출"]
-        SYNC["README · 커밋<br/>Issue · PR 동기화"]
-    end
+    CONNECT --> REMEMBER --> ASSIST --> DECIDE
 
-    subgraph Knowledge["3 · 프로젝트 지식 저장"]
-        MEMORY[("프로젝트 메모리")]
-    end
+    classDef connect fill:#EAF2FF,stroke:#4F7CAC,color:#172A3A,stroke-width:2px
+    classDef remember fill:#6D28D9,stroke:#4C1D95,color:#FFFFFF,stroke-width:3px
+    classDef assist fill:#E7F8F2,stroke:#159A80,color:#075E54,stroke-width:2px
+    classDef decide fill:#FFF4D6,stroke:#D97706,color:#78350F,stroke-width:2px
 
-    DOC --> EXTRACT
-    GH --> SYNC
-    EXTRACT --> MEMORY
-    SYNC --> MEMORY
-
-    subgraph QAFlow["4-A · 사용자가 질문하거나 브리핑을 요청할 때"]
-        direction LR
-        REQUEST["질문 · 브리핑 요청"]
-        QNA["근거 검색 · 상태 조회"]
-        RESPONSE["근거 기반 답변<br/>델타 브리핑"]
-    end
-
-    REQUEST --> QNA --> RESPONSE
-    MEMORY --> QNA
-
-    subgraph ReconcileFlow["4-B · GitHub PR이 머지됐을 때"]
-        direction LR
-        MERGED["PR 머지 이벤트"]
-        MATCH["진행 중 액션과 대조"]
-        SUGGEST["완료 제안"]
-        REVIEW{"사용자 검토"}
-        APPLY["프로젝트 상태 반영"]
-        REJECT["기존 상태 유지"]
-    end
-
-    GH --> MERGED
-    MEMORY --> MATCH
-    MERGED --> MATCH --> SUGGEST --> REVIEW
-    REVIEW -->|승인| APPLY
-    REVIEW -->|거절| REJECT
-
-    classDef source fill:#EAF2FF,stroke:#4F7CAC,color:#172A3A,stroke-width:2px
-    classDef process fill:#F2ECFF,stroke:#7C3AED,color:#3B1768,stroke-width:2px
-    classDef core fill:#6D28D9,stroke:#4C1D95,color:#FFFFFF,stroke-width:3px
-    classDef outcome fill:#E7F8F2,stroke:#159A80,color:#075E54,stroke-width:2px
-    classDef review fill:#FFF4D6,stroke:#D97706,color:#78350F,stroke-width:2px
-    classDef reject fill:#FDECEC,stroke:#DC2626,color:#7F1D1D,stroke-width:2px
-
-    class DOC,GH,REQUEST,MERGED source
-    class EXTRACT,SYNC,MATCH process
-    class MEMORY core
-    class QNA,RESPONSE,SUGGEST,APPLY outcome
-    class REVIEW review
-    class REJECT reject
-
-    style Sources fill:#F8FAFC,stroke:#CBD5E1,stroke-width:1px
-    style Processing fill:#FAF8FF,stroke:#D8B4FE,stroke-width:1px
-    style Knowledge fill:#F5F3FF,stroke:#8B5CF6,stroke-width:2px
-    style QAFlow fill:#F0FDFA,stroke:#5EEAD4,stroke-width:2px
-    style ReconcileFlow fill:#FFFBEB,stroke:#FCD34D,stroke-width:2px
-    linkStyle default stroke:#94A3B8,stroke-width:2px
+    class CONNECT connect
+    class REMEMBER remember
+    class ASSIST assist
+    class DECIDE decide
+    linkStyle default stroke:#94A3B8,stroke-width:3px
 ```
 
-두 기능은 동시에 실행되지 않습니다. Q&A는 사용자의 요청으로, 완료 감지는 GitHub의 PR 머지 이벤트로 각각 독립 실행되며 프로젝트 메모리만 공유합니다. PaiM은 액션 완료처럼 기존 상태를 바꾸는 일은 근거를 제시한 뒤 사람의 승인을 받습니다.
+사용자는 프로젝트 자료를 연결하고, PaiM은 그 안의 핵심 맥락을 기억합니다. 이후 질문·브리핑·완료 제안을 통해 업무 판단을 돕되, 프로젝트 상태를 바꾸는 최종 결정은 사용자에게 남겨 둡니다.
 
 ## AI 아키텍처
 
 PaiM은 질문 유형을 미리 고정하는 라우터 대신, 하나의 **Agentic 오케스트레이터**가 질문에 필요한 읽기 전용 도구를 직접 선택합니다. 정답이 명확해야 하는 상태 정보는 MySQL에서 조회하고, 문서의 맥락은 키워드와 벡터를 결합한 하이브리드 검색으로 찾습니다.
+
+아래 구조에서 Q&A는 사용자의 요청으로, 완료 감지는 GitHub의 PR 머지 이벤트로 각각 독립 실행되며 프로젝트 메모리만 공유합니다.
 
 ```mermaid
 flowchart TB
