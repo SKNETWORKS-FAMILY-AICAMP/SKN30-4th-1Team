@@ -1206,7 +1206,6 @@ def test_physical_expiry_and_cleanup_failure_keep_accounting(tmp_path):
 @pytest.mark.parametrize("failure_point", ["open", "partial_write", "fsync", "replace", "cancel"])
 def test_physical_write_failures_converge_through_cleanup_ledger(failure_point):
     reservation = reserve_document(1, 1, 4, "physical", filename="failure.txt")
-    real_open = os.open
     real_write = os.write
     write_calls = {"count": 0}
 

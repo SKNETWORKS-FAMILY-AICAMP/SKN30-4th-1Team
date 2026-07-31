@@ -603,8 +603,8 @@ def test_duplicate_chunks_deduped_before_ranking(monkeypatch):
     ]
     dense_map = {q: ["알파 내용 회의록", "베타 내용 회의록"]}
 
-    ctx_fwd, _, debug_fwd = _build_chunks(q, [q], chunks, dense_map, monkeypatch)
-    ctx_rev, _, debug_rev = _build_chunks(q, [q], list(reversed(chunks)), dense_map, monkeypatch)
+    _, _, debug_fwd = _build_chunks(q, [q], chunks, dense_map, monkeypatch)
+    _, _, debug_rev = _build_chunks(q, [q], list(reversed(chunks)), dense_map, monkeypatch)
 
     texts_fwd = [c["text"] for c in debug_fwd["chroma_chunks"]]
     assert texts_fwd.count("알파 내용 회의록") == 1

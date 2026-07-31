@@ -794,8 +794,7 @@ def _sync_bg(
             _cleanup_repo_generation(repo_id, run_id)
             return
 
-        import json as _json
-        sync_warning = _json.dumps(warnings, ensure_ascii=False) if warnings else None
+        sync_warning = json.dumps(warnings, ensure_ascii=False) if warnings else None
         if warnings:
             logger.warning(
                 "repository_sync_partial",

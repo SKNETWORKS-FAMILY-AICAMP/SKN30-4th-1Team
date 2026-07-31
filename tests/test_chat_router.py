@@ -182,15 +182,12 @@ def test_create_and_query_session(fake_conn):
     assert result["session_id"] == session_id
 
 
-def test_session_context_is_preserved_for_agentic_without_persisting_rag_context(
-    fake_conn, fake_agentic_qa
-):
-    """요약·복호화 이력·임시 RAG 텍스트가 Agentic 입력으로만 전달되어야 한다."""
+def test_session_context_is_preserved_for_agentic(fake_conn, fake_agentic_qa):
+    """요약과 복호화 이력은 비신뢰 대화 컨텍스트로 전달되어야 한다."""
     from backend.chat.router import (
         QueryRequest,
         SessionCreateRequest,
         create_chat_session,
-        get_session_message_history,
         handle_session_query,
     )
     from backend.chat.session_store import SessionStore
@@ -205,11 +202,10 @@ def test_session_context_is_preserved_for_agentic_without_persisting_rag_context
         source_message_id=0,
     )
 
-    temporary_rag = "이 텍스트는 세션 저장소에 남으면 안 됩니다."
     result = handle_session_query(
         1,
         session_id,
-        QueryRequest(current_question="후속 질문", rag_context=temporary_rag),
+        QueryRequest(current_question="후속 질문"),
         db=fake_conn,
     )
 
@@ -218,20 +214,67 @@ def test_session_context_is_preserved_for_agentic_without_persisting_rag_context
         "session_id": session_id,
         "answer": "테스트용 Agentic 응답입니다.",
     }
-    prepared_context = fake_agentic_qa.calls[0]["prepared_context"]
-    assert {"role": "system", "content": "[이전 대화 요약]: 이전 대화의 핵심 결론"} in prepared_context
-    assert {"role": "user", "content": "이전 질문"} in prepared_context
-    assert {"role": "assistant", "content": "이전 답변"} in prepared_context
-    assert {
-        "role": "system",
-        "content": "[참고 프로젝트 RAG 지식 - MySQL/ChromaDB 검색 결과]:\n" + temporary_rag,
-    } in prepared_context
-    assert all(message["content"] != "후속 질문" for message in prepared_context)
+    history = fake_agentic_qa.calls[0]["history"]
+    assert history == [
+        {"role": "user", "content": "이전 질문"},
+        {"role": "assistant", "content": "이전 답변"},
+        {
+            "role": "user",
+            "content": (
+                "[이전 대화 요약 — 최근 대화보다 앞선 내용]: "
+                "이전 대화의 핵심 결론"
+            ),
+        },
+    ]
+    assert all(message["content"] != "후속 질문" for message in history)
 
-    persisted_messages = get_session_message_history(1, session_id, db=fake_conn)
-    assert all(temporary_rag not in message["text"] for message in persisted_messages)
-    persisted_summary, _, _ = store.get_session_context(session_id)
-    assert temporary_rag not in persisted_summary
+
+def test_session_summary_survives_a_full_recent_history_budget(
+    fake_conn, fake_agentic_qa
+):
+    from backend.agentic_graph import _history_messages
+    from backend.chat.router import (
+        QueryRequest,
+        SessionCreateRequest,
+        create_chat_session,
+        handle_session_query,
+    )
+    from backend.chat.session_store import SessionStore
+
+    session_id = create_chat_session(
+        1, SessionCreateRequest(title="s"), db=fake_conn
+    )["id"]
+    store = SessionStore(fake_conn, project_id=1)
+    for index in range(5):
+        store.save_message(
+            session_id,
+            role="user",
+            text=f"최근 대화 {index}: " + ("긴내용" * 1_000),
+            token_count=1_500,
+        )
+    store.save_or_update_summary(
+        session_id,
+        summary_text="반드시 유지할 이전 결론",
+        source_message_id=0,
+    )
+
+    handle_session_query(
+        1,
+        session_id,
+        QueryRequest(current_question="후속 질문"),
+        db=fake_conn,
+    )
+
+    selected = _history_messages(fake_agentic_qa.calls[0]["history"])
+    assert selected[-1].content.endswith("반드시 유지할 이전 결론")
+
+
+def test_session_query_schema_has_no_client_supplied_rag_context():
+    from backend.chat.router import QueryRequest
+
+    schema = QueryRequest.model_json_schema()
+
+    assert set(schema["properties"]) == {"current_question"}
 
 
 def test_message_history_roundtrip_through_encryption(fake_conn):
@@ -353,7 +396,7 @@ def test_query_answer_uses_agentic_result_not_placeholder(fake_conn, fake_agenti
     call = fake_agentic_qa.calls[0]
     assert call["project_id"] == 1
     assert call["question"] == "질문"
-    assert call["prepared_context"] == []
+    assert call["history"] == []
 
 
 def test_query_agentic_failure_returns_503_not_raw_exception(fake_conn, fake_agentic_qa):
@@ -403,7 +446,7 @@ def test_session_store_allows_correct_project_id(fake_conn):
     session_id = create_chat_session(1, SessionCreateRequest(title="s"), db=fake_conn)["id"]
     store = SessionStore(fake_conn, project_id=1)
 
-    summary, messages, last_id = store.get_session_context(session_id)
+    summary, messages, _ = store.get_session_context(session_id)
     assert summary == ""
     assert messages == []
 

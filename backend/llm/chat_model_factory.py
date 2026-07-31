@@ -69,24 +69,19 @@ def get_agentic_qa_model(temperature: float = 0):
     )
 
 
-def get_chat_model(tier: str = "quality", temperature: float = 0):
+def get_chat_model(temperature: float = 0):
     """LLM_PROVIDER 환경변수에 따라 LangChain 채팅 모델 반환.
-    tier="fast"는 OpenAI에서 OPENAI_MODEL_FAST가 있을 때만 더 저렴한 모델을 쓴다.
     - openai  : OpenAI API
     - claude  : Anthropic API
     - google  : Google Gemini API
     - local   : OpenAI 호환 로컬 서버 (Ollama / vLLM / LM Studio / llama.cpp 등)
                 LOCAL_LLM_URL, LOCAL_LLM_MODEL 환경변수로 엔드포인트·모델 지정
     """
-    if tier not in {"quality", "fast"}:
-        raise ValueError("tier는 quality 또는 fast여야 합니다.")
-
     p = os.getenv("LLM_PROVIDER", "openai").lower()
     if p == "openai":
         from langchain_openai import ChatOpenAI
-        quality_model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
-        model = os.getenv("OPENAI_MODEL_FAST") if tier == "fast" else quality_model
-        return ChatOpenAI(model=model or quality_model, temperature=temperature)
+        model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+        return ChatOpenAI(model=model, temperature=temperature)
     if p == "claude":
         from langchain_anthropic import ChatAnthropic
         return ChatAnthropic(model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"), temperature=temperature)

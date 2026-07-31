@@ -373,8 +373,6 @@ def test_malformed_zip_directory_does_not_leak_500():
     가드 추가 전에는 docx.Document() 주변의 넓은 except가 흡수하던 입력이라,
     여기서 잡지 않으면 400이어야 할 응답이 500으로 누출된다.
     """
-    import zipfile
-
     data = bytearray(_ordinary_docx())
     # 중앙 디렉터리 시그니처(PK\x01\x02) 뒤의 extraction version을 비정상 값으로 변조.
     index = data.rfind(b"PK\x01\x02")
@@ -1069,8 +1067,6 @@ def test_empty_document_message_unchanged_without_warnings():
 
 def test_depth_limit_reason_still_reaches_user():
     """R401 수정이 R301의 깊이 상한 사유 전달을 깨지 않는다."""
-    import docx
-
     def build(document):
         cell = document.add_table(rows=1, cols=1).cell(0, 0)
         for _ in range(5):

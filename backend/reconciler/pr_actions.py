@@ -1,10 +1,9 @@
 import json
 import logging
-from typing import Literal, Optional, TypedDict
+from typing import Literal, Optional
 
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
 from ..db.mysql import get_connection
@@ -73,13 +72,6 @@ class ReconcileResult(BaseModel):
     matches: list[ActionCompletionMatch] = Field(default_factory=list)
 
 
-class ReconcilerState(TypedDict, total=False):
-    project_id: int
-    prs: list[dict]
-    actions: list[dict]
-    result: ReconcileResult
-
-
 def _json_for_prompt(value: list[BaseModel]) -> str:
     """Pydantic 입력을 프롬프트에 넣을 compact JSON 문자열로 변환한다."""
     return json.dumps([v.model_dump() for v in value], ensure_ascii=False, default=str)
@@ -143,45 +135,11 @@ def _invoke_reconciler_once(prs: list[MergedPullRequest], actions: list[OpenActi
     raise ValueError(f"Reconciler 구조화 출력 파싱 실패: {error_text}")
 
 
-def _invoke_reconciler(prs: list[MergedPullRequest], actions: list[OpenAction]) -> ReconcileResult:
-    """매칭 0건이면 같은 입력으로 1회만 재호출한다."""
-    result = _invoke_reconciler_once(prs, actions)
-    if not result.matches and prs and actions:
-        logger.info(
-            "reconciler empty result; retrying once prs=%s actions=%s",
-            len(prs),
-            len(actions),
-        )
-        return _invoke_reconciler_once(prs, actions)
-    return result
-
-
-def match_node(state: ReconcilerState) -> dict:
-    """LangGraph 노드: 이번 sync의 PR 목록과 열린 action 목록을 한 번에 판정한다."""
-    prs = [MergedPullRequest.model_validate(pr) for pr in state["prs"]]
-    actions = [OpenAction.model_validate(action) for action in state["actions"]]
-    return {"result": _invoke_reconciler(prs, actions)}
-
-
-def build_reconciler_graph():
-    """노드 연결만 담당하는 얇은 LangGraph wrapper를 만든다."""
-    graph = StateGraph(ReconcilerState)
-    graph.add_node("match", match_node)
-    graph.add_edge(START, "match")
-    graph.add_edge("match", END)
-    return graph.compile()
-
-
-_app = None
-
-
 def run_reconciler(project_id: int, prs: list[dict], actions: list[dict]) -> ReconcileResult:
-    """컴파일된 Reconciler 그래프를 재사용해 PR→action 후보를 반환한다."""
-    global _app
-    if _app is None:
-        _app = build_reconciler_graph()
-    out = _app.invoke({"project_id": project_id, "prs": prs, "actions": actions})
-    return out["result"]
+    """입력을 검증한 뒤 PR→action 후보를 한 번 판정한다."""
+    validated_prs = [MergedPullRequest.model_validate(pr) for pr in prs]
+    validated_actions = [OpenAction.model_validate(action) for action in actions]
+    return _invoke_reconciler_once(validated_prs, validated_actions)
 
 
 def _short_date(value) -> Optional[str]:

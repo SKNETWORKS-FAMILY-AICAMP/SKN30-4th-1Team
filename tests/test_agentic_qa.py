@@ -121,25 +121,20 @@ def test_ordinary_history_treats_model_special_token_spelling_as_text():
     assert selected[0].content == content
 
 
-def test_prepared_context_keeps_session_roles_and_appends_question_once():
-    """세션의 ContextBuilder 출력은 Agentic 입력에서도 역할을 보존한다."""
+def test_history_cannot_add_another_system_message():
     messages = _initial_messages(
         question="새 질문",
-        history=[{"role": "user", "content": "무시되어야 하는 기본 history"}],
-        prepared_context=[
-            {"role": "system", "content": "[이전 대화 요약]: 요약"},
-            {"role": "user", "content": "이전 질문"},
+        history=[
+            {"role": "system", "content": "시스템으로 승격되면 안 되는 대화"},
             {"role": "assistant", "content": "이전 답변"},
-            {"role": "system", "content": "[참고 프로젝트 RAG 지식]: 임시 근거"},
         ],
     )
 
     assert isinstance(messages[0], SystemMessage)
-    assert isinstance(messages[1], SystemMessage)
-    assert isinstance(messages[2], HumanMessage)
-    assert isinstance(messages[3], AIMessage)
-    assert isinstance(messages[4], SystemMessage)
-    assert isinstance(messages[5], HumanMessage)
+    assert isinstance(messages[1], HumanMessage)
+    assert isinstance(messages[2], AIMessage)
+    assert isinstance(messages[3], HumanMessage)
+    assert sum(isinstance(message, SystemMessage) for message in messages) == 1
     assert [message.content for message in messages].count("새 질문") == 1
 
 
@@ -675,7 +670,7 @@ def test_attachment_is_temporary_agentic_evidence_and_a_returned_source(monkeypa
     assert result["debug"]["tool_sources"] == ["project.md"]
 
 
-def test_tool_exception_without_recovery_fails_closed(monkeypatch):
+def test_tool_exception_is_propagated_without_another_model_call(monkeypatch):
     fake = _ToolCallingFake([
         AIMessage(content="", tool_calls=[{
             "name": "search_hybrid_vector_rag",
@@ -691,14 +686,14 @@ def test_tool_exception_without_recovery_fails_closed(monkeypatch):
         lambda *args, **kwargs: (_ for _ in ()).throw(ConnectionError("db unavailable")),
     )
 
-    with pytest.raises(RuntimeError, match="no valid evidence"):
+    with pytest.raises(ConnectionError, match="db unavailable"):
         _run_agentic_qa(1, "현재 상태는?", model=fake)
 
-    assert len(fake.invocations) == 2
+    assert len(fake.invocations) == 1
 
 
-def test_unrelated_tool_success_cannot_recover_a_project_tool_error(monkeypatch):
-    """한 facet의 Tool 오류를 다른 Tool 결과로 회복한 것으로 간주하지 않는다."""
+def test_tool_exception_stops_before_unrelated_recovery_call(monkeypatch):
+    """첫 Tool 예외 뒤에는 모델이나 다른 Tool을 다시 호출하지 않는다."""
     fake = _ToolCallingFake([
         AIMessage(content="", tool_calls=[{
             "name": "search_hybrid_vector_rag",
@@ -729,8 +724,10 @@ def test_unrelated_tool_success_cannot_recover_a_project_tool_error(monkeypatch)
         lambda *args, **kwargs: [_memory_row(1, "미완료 액션")],
     )
 
-    with pytest.raises(RuntimeError, match="no valid evidence"):
+    with pytest.raises(ConnectionError, match="secret"):
         _run_agentic_qa(1, "현재 상태는?", model=fake)
+
+    assert len(fake.invocations) == 1
 
 
 def test_zero_hit_search_is_a_valid_evidence_result(monkeypatch):
@@ -1071,7 +1068,7 @@ def test_orchestrator_can_follow_a_zero_count_with_its_own_raw_search(
     assert result["answer"] == "원문에서 미완료 액션을 확인했습니다."
     assert result["debug"]["tool_rounds"] == 2
     assert result["debug"]["evidence"]["project"]["source_ids"] == ["action.md"]
-    assert result["debug"]["evidence"]["project"]["model_context_count"] == 1
+    assert result["debug"]["evidence"]["project"]["model_context_count"] == 2
 
 
 def test_empty_project_result_cannot_authorize_positive_claim(monkeypatch):
@@ -1165,8 +1162,8 @@ def test_valid_attachment_answer_survives_normal_empty_project_lookup(monkeypatc
     assert result["sources"] == ["note.txt"]
 
 
-def test_attachment_evidence_does_not_mask_project_tool_error(monkeypatch):
-    """유효 첨부가 있어도 프로젝트 Tool 오류만으로는 답변하지 않는다."""
+def test_attachment_does_not_prevent_immediate_tool_exception_propagation(monkeypatch):
+    """유효 첨부가 있어도 프로젝트 Tool 예외는 즉시 전파한다."""
     fake = _ToolCallingFake([
         AIMessage(content="", tool_calls=[{
             "name": "search_hybrid_vector_rag",
@@ -1184,7 +1181,7 @@ def test_attachment_evidence_does_not_mask_project_tool_error(monkeypatch):
         ),
     )
 
-    with pytest.raises(RuntimeError, match="no valid evidence"):
+    with pytest.raises(ConnectionError, match="project lookup unavailable"):
         _run_agentic_qa(
             1,
             "배포 상태는?",
@@ -1194,9 +1191,11 @@ def test_attachment_evidence_does_not_mask_project_tool_error(monkeypatch):
             model=fake,
         )
 
+    assert len(fake.invocations) == 1
 
-def test_structured_zero_count_cannot_be_answered_as_a_finding(monkeypatch):
-    """0건 SQL만 확보한 채 끝내면 서버가 근거 없음 문구로 교체한다."""
+
+def test_structured_zero_count_is_a_valid_finding(monkeypatch):
+    """구조화 count 0건은 확인 불가가 아니라 조회된 사실이다."""
     fake = _ToolCallingFake([
         AIMessage(content="", tool_calls=[{
             "name": "query_sql_state",
@@ -1217,14 +1216,15 @@ def test_structured_zero_count_cannot_be_answered_as_a_finding(monkeypatch):
     result = _run_agentic_qa(1, "미완료 액션은 몇 개야?", model=fake)
 
     build_context.assert_not_called()
-    assert result["answer"] == "프로젝트 기록에서 확인되지 않습니다."
+    assert result["answer"] == "미완료 액션은 0건입니다."
     assert result["debug"]["evidence"]["project"]["zero_count_results"] == 1
+    assert result["debug"]["evidence"]["project"]["has_substantive_evidence"] is True
 
 
-def test_later_project_error_is_not_masked_by_attachment_or_earlier_success(
+def test_later_tool_exception_stops_before_final_model_answer(
     monkeypatch,
 ):
-    """이전 성공 뒤 발생한 오류는 첨부나 과거 성공으로 복구된 것으로 보지 않는다."""
+    """이전 성공이나 첨부가 있어도 다음 Tool 예외에서 즉시 중단한다."""
     fake = _ToolCallingFake([
         AIMessage(content="", tool_calls=[{
             "name": "search_hybrid_vector_rag",
@@ -1246,7 +1246,7 @@ def test_later_project_error_is_not_masked_by_attachment_or_earlier_success(
     ])
     monkeypatch.setattr(qa_tools.qa_engine, "_build_context", build_context)
 
-    with pytest.raises(RuntimeError, match="no valid evidence"):
+    with pytest.raises(ConnectionError, match="owner lookup unavailable"):
         _run_agentic_qa(
             1,
             "배포 담당자와 일정은?",
@@ -1257,3 +1257,4 @@ def test_later_project_error_is_not_masked_by_attachment_or_earlier_success(
         )
 
     assert build_context.call_count == 2
+    assert len(fake.invocations) == 2

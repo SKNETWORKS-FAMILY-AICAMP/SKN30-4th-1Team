@@ -14,7 +14,6 @@ import hashlib
 import html
 import json
 import statistics
-import subprocess
 from collections import Counter, defaultdict
 from pathlib import Path
 

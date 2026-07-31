@@ -51,12 +51,12 @@ def test_conflicting_due_filters_are_rejected(monkeypatch):
     assert artifact["status"] == "invalid_query"
 
 
-def test_zero_count_is_reported_as_empty(monkeypatch):
+def test_zero_count_is_reported_as_valid_evidence(monkeypatch):
     content, artifact, search = _invoke_count(monkeypatch)
 
     search.assert_called_once()
     assert json.loads(content)["count"] == 0
-    assert artifact["status"] == "empty"
+    assert artifact["status"] == "ok"
     assert artifact["model_contexts"] == [content]
     assert artifact["sources"] == []
 

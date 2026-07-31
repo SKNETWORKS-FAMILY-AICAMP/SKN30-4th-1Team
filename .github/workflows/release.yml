@@ -53,6 +53,9 @@ jobs:
       - name: Install desktop dependencies
         run: npm ci --prefix desktop
 
+      - name: Test desktop contracts
+        run: npm test --prefix desktop
+
       - name: Build and upload installers
         uses: tauri-apps/tauri-action@v1
         env:

@@ -161,8 +161,7 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 │
 ├── docker-compose.yml                # MySQL 컨테이너 (schema.sql 자동 적용)
 ├── start-paim.bat                    # Windows 원클릭 실행 (Docker·백엔드·앱 자동 기동)
-├── pyproject.toml / uv.lock          # Python 패키지·의존성 (uv)
-└── requirements.txt                  # pip 호환용 의존성 목록
+└── pyproject.toml / uv.lock          # Python 패키지·의존성 (uv)
 ```
 
 ## 3. 백엔드 아키텍처
@@ -207,7 +206,7 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 
 ### 3.4 reconciler — 기억이 스스로 갱신
 
-`pr_actions.py`가 LangGraph 그래프(`build_reconciler_graph`)로 머지된 PR과 열린 액션을 배치 대조합니다.
+`pr_actions.py`가 머지된 PR과 열린 액션을 한 번의 구조화 LLM 호출로 배치 대조합니다.
 
 - 저장소별 `last_reconciled_pr` 워터마크로 증분 처리(이미 본 PR 재검사 방지)
 - LLM 매칭은 `high`/`medium` 확신 + 한 줄 근거가 있을 때만 제안 생성 — 애매하면 보고하지 않음(정확도 > 재현율)
@@ -227,7 +226,7 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 ### 3.6 LangGraph 사용 지점
 
 - `agentic_graph.py` Q&A 그래프: 질문(+ 임시 첨부 근거) → 오케스트레이터 LLM → Tool 호출/결과 반환 반복 → 근거 기반 최종 답변
-- `reconciler/pr_actions.py` 그래프: 머지 PR ↔ 열린 Action 대조 → 확신도·근거가 있는 완료 제안만 생성
+- Reconciler는 단일 노드 그래프를 두지 않고 구조화 LLM 호출 결과를 직접 검증합니다.
 - 문서·Git 적재는 `documents.py`의 백그라운드/동기 처리로 실행하며, 별도 ingest 그래프는 두지 않습니다.
 - 기존 라우터 분기·검증·재기획 그래프는 [archive/legacy_qa_v1](../archive/legacy_qa_v1/README.md)의 비교 기준선으로만 보존합니다.
 
@@ -235,7 +234,7 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 
 - 현재 데스크톱은 채팅 제목·질문·답변·작성 중 초안을 계정·서버 범위의 WebView `localStorage`에 저장하고, `POST /projects/{id}/query`에 최근 대화를 요청 컨텍스트로 전달합니다.
 - `/query`가 받은 질문과 최근 대화는 답변 생성 중 PaiM 서버와 설정된 외부 LLM에 전달될 수 있지만, `chat_sessions`, `chat_messages`, `chat_summaries`에는 저장하지 않습니다.
-- `chat/router.py`, `session_store.py`는 deprecated `/sessions/*`를 사용하는 구형 클라이언트 호환용입니다. 이 경로는 `security/session_crypto.py`로 서버 세션을 암호화 저장하며 현재 데스크톱의 기본 저장 경로가 아닙니다. 토큰 예산은 `router.py`가 tiktoken으로 직접 계산해 롤링 요약+최근 메시지를 잘라냅니다.
+- `chat/router.py`, `session_store.py`는 deprecated `/sessions/*`를 사용하는 구형 클라이언트 호환용입니다. 이 경로는 `security/session_crypto.py`로 서버 세션을 암호화 저장하며 현재 데스크톱의 기본 저장 경로가 아닙니다. 요약은 제한된 비신뢰 recap으로 `history`에 들어가고, 최종 입력 절단은 일반 `/query`와 같은 `agentic_graph._history_messages()`의 토큰 예산을 따릅니다.
 - WebView `localStorage`는 현재 앱 전용 암호화 저장소가 아닙니다. 안전한 전용 저장소 이전은 별도 후속 범위입니다.
 
 ### 3.8 llm — 프로바이더 추상화
@@ -243,7 +242,7 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 두 개의 별도 팩토리가 존재합니다 (용도가 다름):
 
 - `factory.py` (`get_llm_client`): 구조화 추출 전용, Anthropic/OpenAI/Google SDK를 직접 래핑 (`ClaudeClient`/`OpenAIClient`/`GoogleClient`)
-- `chat_model_factory.py` (`get_chat_model`): 자유 대화형 Q&A/RAG용 LangChain `BaseChatModel` 반환, `LLM_PROVIDER` 환경변수로 openai/claude/google/local 선택, `tier="fast"|"quality"` 티어링 지원 (local은 Ollama/vLLM 등 OpenAI 호환 서버)
+- `chat_model_factory.py` (`get_chat_model`): 자유 대화형 Q&A/RAG용 LangChain `BaseChatModel` 반환, `LLM_PROVIDER` 환경변수로 openai/claude/google/local 선택 (local은 Ollama/vLLM 등 OpenAI 호환 서버)
 
 Google Gemini는 중첩 스키마 구조화 출력을 지원하지 않아 구조화 추출에는 사용하지 않고 Q&A에만 사용합니다.
 

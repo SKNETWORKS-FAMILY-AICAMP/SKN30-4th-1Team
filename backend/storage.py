@@ -4,7 +4,6 @@
 추후 S3 등 클라우드 스토리지로 교체할 때는 이 모듈만 수정하면 된다.
 """
 import os
-import shutil
 import stat
 from pathlib import Path
 
@@ -206,38 +205,6 @@ def safe_upload_name(filename: str) -> str:
     return "/".join(parts)
 
 
-def save_file(project_id: int, filename: str, data: bytes) -> str:
-    """파일을 저장하고 저장된 경로(문자열)를 반환한다."""
-    safe_name = safe_upload_name(filename)
-    dest_dir = _project_dir(project_id)
-    dest = dest_dir / safe_name
-    _ensure_real_directory(dest.parent)
-    _assert_components_safe(dest, must_exist=False, regular_target=False)
-    flags = os.O_CREAT | os.O_TRUNC | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(dest, flags, 0o600)
-    try:
-        view = memoryview(data)
-        while view:
-            written = os.write(fd, view)
-            if written <= 0:
-                raise OSError("upload write made no progress")
-            view = view[written:]
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    return str(dest)
-
-
-def delete_file(file_path: str, strict: bool = False) -> None:
-    """저장된 파일을 삭제한다. strict=True이면 삭제 실패를 호출자에게 알린다."""
-    try:
-        Path(file_path).unlink(missing_ok=True)
-    except Exception:
-        if strict:
-            raise
-        pass
-
-
 def delete_managed_file(file_path: str, project_id: int) -> None:
     path = validate_managed_file(
         file_path,
@@ -248,11 +215,3 @@ def delete_managed_file(file_path: str, project_id: int) -> None:
     if path.exists():
         _assert_components_safe(path, must_exist=True, regular_target=True)
     path.unlink(missing_ok=True)
-
-
-def delete_project_dir(project_id: int) -> None:
-    """프로젝트 전체 업로드 디렉터리를 삭제한다."""
-    try:
-        shutil.rmtree(_project_dir(project_id), ignore_errors=True)
-    except Exception:
-        pass

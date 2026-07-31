@@ -457,31 +457,10 @@ def _initial_messages(
     question: str,
     history: Optional[list],
     attachment_context: str = "",
-    prepared_context: Optional[list] = None,
 ) -> list[BaseMessage]:
-    """Build the orchestrator input without widening the public Q&A contract.
-
-    ``prepared_context`` is an internal, server-created message sequence for
-    callers that already applied their own context budget (the encrypted
-    session API).  Unlike client-supplied ``history``, it preserves explicit
-    system messages such as the rolling session summary.  Normal Q&A callers
-    continue to use the existing, bounded history path.
-    """
+    """Build one bounded message path for ordinary and deprecated-session Q&A."""
     messages: list[BaseMessage] = [SystemMessage(content=ORCHESTRATOR_SYSTEM_PROMPT)]
-    if prepared_context is not None:
-        for item in prepared_context:
-            content = str(item.get("content", "")).strip()
-            if not content:
-                continue
-            role = item.get("role")
-            if role == "system":
-                messages.append(SystemMessage(content=content))
-            elif role == "assistant":
-                messages.append(AIMessage(content=content))
-            else:
-                messages.append(HumanMessage(content=content))
-    else:
-        messages.extend(_history_messages(history))
+    messages.extend(_history_messages(history))
     if attachment_context.strip():
         messages.append(HumanMessage(content=(
             "[임시 첨부 근거]\n"
@@ -519,7 +498,6 @@ def _collect_result(
     project_error_results = 0
     project_invalid_results = 0
     project_contextless_ok_results = 0
-    search_empty_results = 0
     search_lookup_completed = False
     project_source_ids: list[str] = []
     project_model_contexts: list[str] = []
@@ -611,8 +589,6 @@ def _collect_result(
                     project_zero_count_results += 1
                 if status == "empty":
                     project_empty_results += 1
-                    if message.name == "search_hybrid_vector_rag":
-                        search_empty_results += 1
                 elif is_substantive:
                     project_has_substantive_evidence = True
                     for source in artifact_sources:
@@ -729,7 +705,6 @@ def run_agentic_qa(
     attachment_context: str = "",
     attachment_sources: Optional[list[str]] = None,
     attachment_evidence: Optional[list[dict]] = None,
-    prepared_context: Optional[list] = None,
     *,
     model=None,
     max_tool_rounds: Optional[int] = None,
@@ -754,7 +729,6 @@ def run_agentic_qa(
             question,
             history,
             attachment_context,
-            prepared_context=prepared_context,
         ),
         "tool_rounds": 0,
     })

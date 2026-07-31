@@ -6,6 +6,11 @@
 - 감사일: 2026-07-31
 - 범위: 실제 HTTP 진입점, Agentic graph, Tool schema와 실행, 검색기, 세션 호환 경로, 평가 근거
 
+> 후속 적용(PR #41): 아래 감사에서 지적한 세션 신뢰 경계를 해소하기 위해
+> `ContextBuilder`, 클라이언트 제공 `rag_context`, 세션 전용 `prepared_context`
+> 우회 경로를 제거했다. 세션도 일반 Q&A와 동일한 bounded `history` 경로를
+> 사용한다. 아래 본문은 감사 당시의 기준 커밋을 설명하는 기록으로 보존한다.
+
 ## 결론
 
 정본 API인 `/api/v1/projects/{id}/query`는 **Agentic 단일 답변 생성 경로**다.
@@ -35,7 +40,7 @@
 | `PAIM_QUERY_ROUTING_MODE` | 읽기·경고·예시 설정·tracked 평가 runner 설정을 제거했다. |
 | 첨부 호환 wrapper | 테스트를 실제 evidence/render 함수로 이관하고 `_prepare_attachment_context()`를 제거했다. |
 | route 중복 대입 | API 계층의 중복 덮어쓰기를 제거했다. 응답 필드는 Agentic 결과가 계속 제공한다. |
-| 세션·안전 정책 | 사용자 요청에 따라 `ContextBuilder`, rolling summary, Tool 재시도 fail-closed, 검색 admission gate, SQL 0건 치환은 변경하지 않았다. |
+| 세션 입력 조립 | `rag_context`, `ContextBuilder`, `prepared_context`를 제거하고 일반 Q&A의 bounded `history` 경로로 일원화했다. |
 
 구조 회귀 검사는 production `qa_engine`에 `SYSTEM_QA`, `_get_chain()`,
 `_generate_multi_queries()` 등이 다시 생기지 않는지 확인하고, backend 운영 모듈이
@@ -194,9 +199,10 @@ Agentic 일반 경로는 retrieval 모듈의 `MAX_HISTORY=10`을 직접 참조�
 전달되던 문제였다. 이번 변경에서 Agentic 소유의 4,000토큰 예산으로 옮겼다.
 짧은 메시지는 10개를 넘어도 예산 안에서 모두 보존하고, 매우 긴 경계 메시지는
 오래된 앞부분을 생략하고 최신 끝부분을 남긴다. 데스크톱의 별도 20개 선행 절단도
-제거해 백엔드 토큰 예산을 단일 기준으로 삼았다. 세션용 `prepared_context`는 변경하지
-않았다. 사용자가 붙여 넣은 `<|endoftext|>` 같은 모델 특수 토큰 표기도 일반 텍스트로
-계산해 입력 오류를 내지 않는다.
+제거해 백엔드 토큰 예산을 단일 기준으로 삼았다. 후속 PR #41에서는 세션 전용
+`prepared_context`도 제거해 같은 `history` 경로로 일원화했다. 사용자가 붙여 넣은
+`<|endoftext|>` 같은 모델 특수 토큰 표기도 일반 텍스트로 계산해 입력 오류를 내지
+않는다.
 
 ### P3 — 운영에 쓰이지 않는 레거시와 no-op 설정 — 해결
 

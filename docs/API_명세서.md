@@ -1258,15 +1258,13 @@ Git 로그 텍스트를 동기 처리해 메모리로 추출·적재한다. (최
 **요청 Body**
 ```json
 {
-  "current_question": "현재 가장 큰 리스크가 뭐야?",
-  "rag_context": ""
+  "current_question": "현재 가장 큰 리스크가 뭐야?"
 }
 ```
 
 | 필드 | 타입 | 설명 |
 |---|---|---|
 | `current_question` | string | 현재 질문 |
-| `rag_context` | string | 이번 질의 전용 RAG 참고 평문 (선택, 저장하지 않음) |
 
 **응답 `200`**
 ```json

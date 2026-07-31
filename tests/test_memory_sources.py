@@ -1,6 +1,6 @@
 """memory_sources 분리 테이블: ingest/search/sync 경로 테스트."""
 import base64
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 
 from backend.api.repository import _collect_merged_prs, _collect_repo_sources, _sync_bg
 from backend.llm.base import LLMResponse

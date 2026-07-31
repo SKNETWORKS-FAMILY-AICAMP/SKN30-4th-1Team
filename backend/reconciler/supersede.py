@@ -7,11 +7,10 @@ pr_actions(complete_action)와 같은 human-in-the-loop 패턴: 자동 적용하
 """
 import json
 import logging
-from typing import Literal, Optional, TypedDict
+from typing import Literal, Optional
 
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
 from ..db.mysql import get_connection
@@ -90,13 +89,6 @@ class SupersedeResult(BaseModel):
     matches: list[SupersedeMatch] = Field(default_factory=list)
 
 
-class SupersedeState(TypedDict, total=False):
-    project_id: int
-    new_decisions: list[dict]
-    candidates: list[dict]
-    result: SupersedeResult
-
-
 def _json_for_prompt(value: list[BaseModel]) -> str:
     """Pydantic 입력을 프롬프트용 compact JSON 문자열로 변환한다."""
     return json.dumps([v.model_dump() for v in value], ensure_ascii=False, default=str)
@@ -165,36 +157,15 @@ def _invoke_supersede_once(
     raise ValueError(f"Supersede 구조화 출력 파싱 실패: {error_text}")
 
 
-def match_node(state: SupersedeState) -> dict:
-    """LangGraph 노드: 신규 decision과 기존 후보를 한 번에 판정한다."""
-    news = [NewDecision.model_validate(d) for d in state["new_decisions"]]
-    cands = [ExistingDecision.model_validate(c) for c in state["candidates"]]
-    return {"result": _invoke_supersede_once(news, cands)}
-
-
-def build_supersede_graph():
-    """pr_actions와 같은 방식의 얇은 LangGraph wrapper를 만든다."""
-    graph = StateGraph(SupersedeState)
-    graph.add_node("match", match_node)
-    graph.add_edge(START, "match")
-    graph.add_edge("match", END)
-    return graph.compile()
-
-
-_app = None
-
-
 def run_supersede(
     project_id: int, new_decisions: list[dict], candidates: list[dict]
 ) -> SupersedeResult:
-    """컴파일된 supersede 그래프를 재사용해 매칭 후보를 반환한다."""
-    global _app
-    if _app is None:
-        _app = build_supersede_graph()
-    out = _app.invoke(
-        {"project_id": project_id, "new_decisions": new_decisions, "candidates": candidates}
-    )
-    return out["result"]
+    """입력을 검증한 뒤 supersede 후보를 한 번 판정한다."""
+    validated_news = [NewDecision.model_validate(item) for item in new_decisions]
+    validated_candidates = [
+        ExistingDecision.model_validate(item) for item in candidates
+    ]
+    return _invoke_supersede_once(validated_news, validated_candidates)
 
 
 def _short_date(value) -> Optional[str]:

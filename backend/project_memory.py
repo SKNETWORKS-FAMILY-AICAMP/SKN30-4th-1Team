@@ -125,7 +125,7 @@ def regenerate_project_memory(project_id: int) -> str:
             return ""
 
         memory_lines = "\n".join(_format_summary_memory_row(row) for row in rows)
-        llm = get_chat_model(tier="quality")
+        llm = get_chat_model()
         prompt = (
             "다음은 현재 프로젝트에 남아 있는 memory 항목 전체이다. "
             "삭제된 항목은 절대 추측하거나 포함하지 말고, 남은 항목만 근거로 "

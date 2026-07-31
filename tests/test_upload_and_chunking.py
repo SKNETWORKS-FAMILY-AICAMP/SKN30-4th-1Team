@@ -1,5 +1,5 @@
 """_split_text() chunk size 불변식 및 upload_document 비동기 경로 테스트."""
-from unittest.mock import patch, MagicMock, call, ANY
+from unittest.mock import patch, MagicMock, call
 
 import pytest
 from fastapi.testclient import TestClient

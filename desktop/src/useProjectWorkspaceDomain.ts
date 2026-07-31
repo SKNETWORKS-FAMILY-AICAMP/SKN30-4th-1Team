@@ -23,7 +23,6 @@ type ProjectWorkspaceSelection = {
   selectedProject: ProjectWorkspace | null;
   selectedProjectRole: ProjectRole | null | undefined;
   selectedSession: ChatSession | null;
-  sessions: ChatSession[];
 };
 
 function deriveProjectWorkspaceSelection(
@@ -56,7 +55,6 @@ function deriveProjectWorkspaceSelection(
     selectedProject,
     selectedProjectRole,
     selectedSession,
-    sessions,
   };
 }
 

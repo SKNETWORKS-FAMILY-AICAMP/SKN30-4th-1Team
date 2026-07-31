@@ -7,7 +7,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -803,7 +803,7 @@ def test_pair_coverage_preserves_global_hook_status(tmp_path):
 def test_reject_partial_ragas_blocks_nan():
     """R5-001: 필수 지표 컬럼에 NaN(실패 job)이 있으면 게시 전에 예외 —
     mean(skipna)의 조용한 부분 평균이 summary·마커로 기록되지 않는다."""
-    import pandas as pd
+    pd = pytest.importorskip("pandas")
     col_map = {"llm_context_precision_with_reference": "context_precision",
                "context_recall": "context_recall"}
     ok = pd.DataFrame({"llm_context_precision_with_reference": [1.0, 0.5],
@@ -822,7 +822,7 @@ def test_ragas_score_aborts_before_publish_on_nan(monkeypatch):
     """R5-001: evaluate가 NaN을 돌려주면 ragas_score가 예외로 중단 —
     cmd_measure의 게시(summary·마커·상세 CSV)는 전부 그 뒤라 실행되지 않는다.
     ragas 내부 구성요소를 전부 가짜로 대체해 네트워크·임시파일 무접촉(hermetic)."""
-    import pandas as pd
+    pd = pytest.importorskip("pandas")
     run_eval._install_vertexai_shim()   # ragas 임포트 전 필수(하네스와 동일)
     ragas_mod = pytest.importorskip("ragas")
     import ragas.llms as ragas_llms
@@ -860,7 +860,7 @@ def test_ragas_score_raises_judge_max_tokens(monkeypatch):
     진술 분해 출력이 잘려 IncompleteOutputException→NaN을 유발했다(modu E0
     final Job[62]). ragas_score가 llm_factory에 JUDGE_MAX_TOKENS를 넘기고,
     그 값이 기본 1024보다 큰지 검증 — 기본으로 되돌아가면 실패."""
-    import pandas as pd
+    pd = pytest.importorskip("pandas")
     run_eval._install_vertexai_shim()
     ragas_mod = pytest.importorskip("ragas")
     import ragas.llms as ragas_llms
