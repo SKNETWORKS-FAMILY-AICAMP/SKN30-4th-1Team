@@ -209,7 +209,6 @@ def main() -> int:
         "DB_PASSWORD": args.db_password,
         "DB_NAME": db_name,
         "PAIM_AUTH_MODE": "dev",
-        "PAIM_QUERY_ROUTING_MODE": "agentic",
         "CHROMA_PERSIST_DIR": str(state_dir / "chroma"),
     })
     os.environ.pop("DEV_USER_ID", None)

@@ -1,0 +1,592 @@
+{
+  "schema_version": 1,
+  "dataset_id": "routing_v2",
+  "purpose": "세 Tool 역할(hybrid_search / structured_state / overview)을 자극해 오케스트레이터의 Tool 선택을 검증한다. hybrid_search 14 / structured_state 13 / overview 13.",
+  "capability_map": {
+    "hybrid_search": "search_hybrid_vector_rag",
+    "structured_state": "query_sql_state (operation=list|count)",
+    "overview": "query_sql_state (operation=overview)"
+  },
+  "notes": [
+    "structured_state 문항은 질문에 분류·담당자·상태 조건이 이미 주어져 있어 구조화 조회로 정확히 표현된다. 기대 수치는 프로젝트 #29(csbot)/#30(modu)의 실제 memory 행 기준이다.",
+    "hybrid_search 문항은 사용자가 모르는 이유·수치·원인·담당을 묻는다. 자유 텍스트 조건이라 구조화 스키마로 표현할 수 없다.",
+    "overview 문항 13개는 서로 다른 상황(브리핑, 남은 일, 신규 합류자 안내, 주간 보고, 회고 준비, 경영진 요약 등)에서 나오는 서로 다른 문장이다. 표현이 달라도 같은 역할로 라우팅되어야 한다.",
+    "expected_history_mode는 전 문항 null이다. 이 데이터셋은 capability 라우팅만 검증한다."
+  ],
+  "questions": [
+    {
+      "id": "V2-SEM-01",
+      "corpus": "csbot",
+      "family": "hybrid_search",
+      "user_input": "반품 관련 질문에서 오답이 많이 났던 핵심 원인이 뭐야?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-SEM-02",
+      "corpus": "csbot",
+      "family": "hybrid_search",
+      "user_input": "최종 QA 정답률이 개선 전 대비 얼마나 올랐어?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-SEM-03",
+      "corpus": "csbot",
+      "family": "hybrid_search",
+      "user_input": "개선 작업을 바로 시작하지 않고 진단 스프린트를 먼저 한 이유가 뭐야?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-SEM-04",
+      "corpus": "csbot",
+      "family": "hybrid_search",
+      "user_input": "LLM 모델을 최신 버전으로 올리기로 한 이유랑 예상 비용 증가는 어느 정도야?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-SEM-05",
+      "corpus": "csbot",
+      "family": "hybrid_search",
+      "user_input": "개선 전 하루 평균 질의 건수랑 fallback 응답 비율이 어느 정도였어?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-SEM-06",
+      "corpus": "csbot",
+      "family": "hybrid_search",
+      "user_input": "지식 베이스 전면 갱신이랑 semantic chunking 구현은 누가 맡았어?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-SEM-07",
+      "corpus": "csbot",
+      "family": "hybrid_search",
+      "user_input": "테스트에서 할루시네이션 사례가 몇 건 나왔고 원인은 뭐였어?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-SEM-08",
+      "corpus": "modu",
+      "family": "hybrid_search",
+      "user_input": "앱 개발 프레임워크로 Flutter를 고른 이유가 뭐야?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-SEM-09",
+      "corpus": "modu",
+      "family": "hybrid_search",
+      "user_input": "이메일 발송 서비스를 AWS SES로 정한 이유는 뭐야?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-SEM-10",
+      "corpus": "modu",
+      "family": "hybrid_search",
+      "user_input": "애플 로그인을 뒤늦게 추가하게 된 이유가 뭐야?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-SEM-11",
+      "corpus": "modu",
+      "family": "hybrid_search",
+      "user_input": "클로즈드 베타를 강남·판교 지역으로만 한정한 이유는?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-SEM-12",
+      "corpus": "modu",
+      "family": "hybrid_search",
+      "user_input": "모임 인원 제한은 몇 명으로 정했고 왜 그렇게 정했어?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-SEM-13",
+      "corpus": "modu",
+      "family": "hybrid_search",
+      "user_input": "모임 알림 지연 문제는 원인이 뭐였고 어떻게 해결했어?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-SEM-14",
+      "corpus": "modu",
+      "family": "hybrid_search",
+      "user_input": "마케팅 푸시 알림을 MVP에서 뺀 이유가 뭐야?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["hybrid_search"],
+      "allowed_capabilities": ["hybrid_search"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {},
+      "expected_history_mode": null
+    },
+
+    {
+      "id": "V2-STR-01",
+      "corpus": "csbot",
+      "family": "structured_state",
+      "user_input": "윤재혁이 담당하는 액션 목록을 보여줘.",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["structured_state"],
+      "allowed_capabilities": ["structured_state"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {
+        "structured_state": {"operation": "list", "category": "action", "owner": "윤재혁"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-STR-02",
+      "corpus": "csbot",
+      "family": "structured_state",
+      "user_input": "강다은이 맡은 액션 아이템을 목록으로 알려줘.",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["structured_state"],
+      "allowed_capabilities": ["structured_state"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {
+        "structured_state": {"operation": "list", "category": "action", "owner": "강다은"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-STR-03",
+      "corpus": "csbot",
+      "family": "structured_state",
+      "user_input": "이지훈이 담당하는 액션 아이템은 몇 건이야?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["structured_state"],
+      "allowed_capabilities": ["structured_state"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {
+        "structured_state": {"operation": "count", "category": "action", "owner": "이지훈"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-STR-04",
+      "corpus": "csbot",
+      "family": "structured_state",
+      "user_input": "기록된 issue는 몇 건이야?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["structured_state"],
+      "allowed_capabilities": ["structured_state"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {
+        "structured_state": {"operation": "count", "category": "issue"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-STR-05",
+      "corpus": "csbot",
+      "family": "structured_state",
+      "user_input": "risk로 등록된 항목은 몇 건이야?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["structured_state"],
+      "allowed_capabilities": ["structured_state"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {
+        "structured_state": {"operation": "count", "category": "risk"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-STR-06",
+      "corpus": "csbot",
+      "family": "structured_state",
+      "user_input": "이 프로젝트에 액션 아이템이 총 몇 건 기록돼 있어?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["structured_state"],
+      "allowed_capabilities": ["structured_state"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {
+        "structured_state": {"operation": "count", "category": "action"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-STR-07",
+      "corpus": "csbot",
+      "family": "structured_state",
+      "user_input": "최민준이 담당하는 액션 목록을 보여줘.",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["structured_state"],
+      "allowed_capabilities": ["structured_state"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {
+        "structured_state": {"operation": "list", "category": "action", "owner": "최민준"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-STR-08",
+      "corpus": "modu",
+      "family": "structured_state",
+      "user_input": "한지민이 맡은 액션 아이템은 몇 건이야?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["structured_state"],
+      "allowed_capabilities": ["structured_state"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {
+        "structured_state": {"operation": "count", "category": "action", "owner": "한지민"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-STR-09",
+      "corpus": "modu",
+      "family": "structured_state",
+      "user_input": "김태호가 담당하는 액션 목록을 보여줘.",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["structured_state"],
+      "allowed_capabilities": ["structured_state"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {
+        "structured_state": {"operation": "list", "category": "action", "owner": "김태호"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-STR-10",
+      "corpus": "modu",
+      "family": "structured_state",
+      "user_input": "이 프로젝트에 기록된 decision은 총 몇 건이야?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["structured_state"],
+      "allowed_capabilities": ["structured_state"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {
+        "structured_state": {"operation": "count", "category": "decision"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-STR-11",
+      "corpus": "modu",
+      "family": "structured_state",
+      "user_input": "아직 완료되지 않은 open 상태 액션은 몇 건이야?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["structured_state"],
+      "allowed_capabilities": ["structured_state"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {
+        "structured_state": {"operation": "count", "category": "action", "completion_status": "open"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-STR-12",
+      "corpus": "modu",
+      "family": "structured_state",
+      "user_input": "risk 항목은 몇 건 기록돼 있어?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["structured_state"],
+      "allowed_capabilities": ["structured_state"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {
+        "structured_state": {"operation": "count", "category": "risk"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-STR-13",
+      "corpus": "modu",
+      "family": "structured_state",
+      "user_input": "정예린이 담당하는 액션을 목록으로 보여줘.",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["structured_state"],
+      "allowed_capabilities": ["structured_state"],
+      "max_tool_rounds": 1,
+      "expected_arguments": {
+        "structured_state": {"operation": "list", "category": "action", "owner": "정예린"}
+      },
+      "expected_history_mode": null
+    },
+
+    {
+      "id": "V2-OV-01",
+      "corpus": "csbot",
+      "family": "overview",
+      "user_input": "이 프로젝트가 지금 어떤 상태인지 전반적으로 브리핑해줘.",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["overview"],
+      "allowed_capabilities": ["overview", "hybrid_search"],
+      "max_tool_rounds": 2,
+      "expected_arguments": {
+        "overview": {"operation": "overview", "category": "all"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-OV-02",
+      "corpus": "csbot",
+      "family": "overview",
+      "user_input": "지금까지 뭐가 진행됐고 뭐가 남았는지 전체적으로 정리해줘.",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["overview"],
+      "allowed_capabilities": ["overview", "hybrid_search"],
+      "max_tool_rounds": 2,
+      "expected_arguments": {
+        "overview": {"operation": "overview", "category": "all"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-OV-03",
+      "corpus": "csbot",
+      "family": "overview",
+      "user_input": "이번에 프로젝트에 새로 합류했는데 어떤 프로젝트인지 개요를 설명해줘.",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["overview"],
+      "allowed_capabilities": ["overview", "hybrid_search"],
+      "max_tool_rounds": 2,
+      "expected_arguments": {
+        "overview": {"operation": "overview", "category": "all"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-OV-04",
+      "corpus": "csbot",
+      "family": "overview",
+      "user_input": "주간 보고에 넣을 수 있게 프로젝트 전반 상황을 요약해줘.",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["overview"],
+      "allowed_capabilities": ["overview", "hybrid_search"],
+      "max_tool_rounds": 2,
+      "expected_arguments": {
+        "overview": {"operation": "overview", "category": "all"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-OV-05",
+      "corpus": "csbot",
+      "family": "overview",
+      "user_input": "우리 지금 전체적으로 어디까지 온 거야?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["overview"],
+      "allowed_capabilities": ["overview", "hybrid_search"],
+      "max_tool_rounds": 2,
+      "expected_arguments": {
+        "overview": {"operation": "overview", "category": "all"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-OV-06",
+      "corpus": "csbot",
+      "family": "overview",
+      "user_input": "프로젝트 기록 전체를 훑어서 큰 그림을 잡아줘.",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["overview"],
+      "allowed_capabilities": ["overview", "hybrid_search"],
+      "max_tool_rounds": 2,
+      "expected_arguments": {
+        "overview": {"operation": "overview", "category": "all"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-OV-07",
+      "corpus": "csbot",
+      "family": "overview",
+      "user_input": "회고 준비 중인데 프로젝트 전반을 한 번 정리해줄래?",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["overview"],
+      "allowed_capabilities": ["overview", "hybrid_search"],
+      "max_tool_rounds": 2,
+      "expected_arguments": {
+        "overview": {"operation": "overview", "category": "all"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-OV-08",
+      "corpus": "modu",
+      "family": "overview",
+      "user_input": "이 프로젝트 현재 상태를 전반적으로 브리핑해줘.",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["overview"],
+      "allowed_capabilities": ["overview", "hybrid_search"],
+      "max_tool_rounds": 2,
+      "expected_arguments": {
+        "overview": {"operation": "overview", "category": "all"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-OV-09",
+      "corpus": "modu",
+      "family": "overview",
+      "user_input": "이 프로젝트가 처음부터 지금까지 어떻게 흘러왔는지 전체적으로 정리해줘.",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["overview"],
+      "allowed_capabilities": ["overview", "hybrid_search"],
+      "max_tool_rounds": 2,
+      "expected_arguments": {
+        "overview": {"operation": "overview", "category": "all"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-OV-10",
+      "corpus": "modu",
+      "family": "overview",
+      "user_input": "새로 온 팀원한테 설명한다고 생각하고 프로젝트 개요를 알려줘.",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["overview"],
+      "allowed_capabilities": ["overview", "hybrid_search"],
+      "max_tool_rounds": 2,
+      "expected_arguments": {
+        "overview": {"operation": "overview", "category": "all"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-OV-11",
+      "corpus": "modu",
+      "family": "overview",
+      "user_input": "프로젝트 전반 상황이랑 앞으로 남은 일정을 같이 정리해줘.",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["overview"],
+      "allowed_capabilities": ["overview", "hybrid_search"],
+      "max_tool_rounds": 2,
+      "expected_arguments": {
+        "overview": {"operation": "overview", "category": "all"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-OV-12",
+      "corpus": "modu",
+      "family": "overview",
+      "user_input": "경영진 보고용으로 프로젝트 전체 상황을 짧게 요약해줘.",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["overview"],
+      "allowed_capabilities": ["overview", "hybrid_search"],
+      "max_tool_rounds": 2,
+      "expected_arguments": {
+        "overview": {"operation": "overview", "category": "all"}
+      },
+      "expected_history_mode": null
+    },
+    {
+      "id": "V2-OV-13",
+      "corpus": "modu",
+      "family": "overview",
+      "user_input": "프로젝트가 전체적으로 어디까지 진행됐는지 한눈에 보이게 정리해줘.",
+      "history": [],
+      "attachments": [],
+      "required_capabilities": ["overview"],
+      "allowed_capabilities": ["overview", "hybrid_search"],
+      "max_tool_rounds": 2,
+      "expected_arguments": {
+        "overview": {"operation": "overview", "category": "all"}
+      },
+      "expected_history_mode": null
+    }
+  ]
+}

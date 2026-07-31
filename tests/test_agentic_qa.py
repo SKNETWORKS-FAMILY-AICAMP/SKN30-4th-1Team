@@ -5,13 +5,22 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from backend.agentic_graph import (
+    DEFAULT_HISTORY_TOKEN_BUDGET,
     ORCHESTRATOR_SYSTEM_PROMPT,
+    _CHAT_MESSAGE_TOKEN_OVERHEAD,
+    _history_encoding,
+    _history_messages,
     _initial_messages,
     run_agentic_qa,
 )
-from backend.retriever import qa_tools
+from backend.retriever import qa_engine, qa_tools
 from backend.retriever.index_scope import ProjectIndexScope
 from backend.retriever.qa_tools import QA_TOOLS, query_structured_memory
+
+
+def _flat_orchestrator_prompt() -> str:
+    """줄바꿈 위치가 바뀌었다는 이유로 규칙 검증이 깨지지 않도록 공백을 정규화한다."""
+    return " ".join(ORCHESTRATOR_SYSTEM_PROMPT.split())
 
 
 class _ToolCallingFake:
@@ -41,6 +50,75 @@ def _stable_index_scope(monkeypatch):
         "load_project_index_scope",
         lambda project_id: ProjectIndexScope(project_id),
     )
+
+
+def test_ordinary_history_is_token_bounded_instead_of_fixed_to_ten_messages():
+    history = [
+        {
+            "role": "assistant" if index % 2 else "user",
+            "content": f"짧은 메시지 {index}",
+        }
+        for index in range(12)
+    ]
+
+    messages = _initial_messages(question="새 질문", history=history)
+
+    assert [message.content for message in messages[1:-1]] == [
+        item["content"] for item in history
+    ]
+    assert len(messages) == 14
+    assert DEFAULT_HISTORY_TOKEN_BUDGET > 0
+
+
+def test_ordinary_history_truncates_old_prefix_at_token_boundary():
+    budget = 50
+    history = [
+        {"role": "user", "content": "이 메시지는 예산 때문에 제외되어야 합니다."},
+        {
+            "role": "assistant",
+            "content": ("아주 긴 과거 설명 " * 100) + "최신 핵심 결론",
+        },
+    ]
+
+    selected = _history_messages(history, token_budget=budget)
+
+    assert len(selected) == 1
+    assert isinstance(selected[0], AIMessage)
+    assert selected[0].content.startswith("[이전 내용 생략]\n")
+    assert selected[0].content.endswith("최신 핵심 결론")
+    encoding = _history_encoding()
+    token_cost = _CHAT_MESSAGE_TOKEN_OVERHEAD + len(
+        encoding.encode(selected[0].content)
+    )
+    assert token_cost <= budget
+
+
+def test_empty_ordinary_history_keeps_only_system_and_current_question():
+    messages = _initial_messages(
+        question="새 질문",
+        history=[
+            {"role": "user", "content": "  "},
+            {"role": "assistant", "content": ""},
+        ],
+    )
+
+    assert len(messages) == 2
+    assert isinstance(messages[0], SystemMessage)
+    assert isinstance(messages[1], HumanMessage)
+    assert messages[1].content == "새 질문"
+
+
+def test_ordinary_history_treats_model_special_token_spelling_as_text():
+    content = "사용자가 붙여 넣은 <|endoftext|> 문자열"
+
+    selected = _history_messages(
+        [{"role": "user", "content": content}],
+        token_budget=100,
+    )
+
+    assert len(selected) == 1
+    assert isinstance(selected[0], HumanMessage)
+    assert selected[0].content == content
 
 
 def test_prepared_context_keeps_session_roles_and_appends_question_once():
@@ -143,11 +221,11 @@ def test_overview_prompt_contract_is_selective_and_preserves_unknown():
     assert "프로젝트 브리핑" in description
     assert "completion_status가 unknown이면 완료 여부 미확인" in description
     assert "status_counts" in description and "권위 있는 값" in description
-    assert "필요한 핵심 액션만 선택" in ORCHESTRATOR_SYSTEM_PROMPT
-    assert "현재 상태는" in ORCHESTRATOR_SYSTEM_PROMPT
-    assert "completion_status만 근거" in ORCHESTRATOR_SYSTEM_PROMPT
-    assert "status_counts가 현재 상태의 권위 있는 집계" in ORCHESTRATOR_SYSTEM_PROMPT
-    assert "현재 상태를 증명하지 않습니다" in ORCHESTRATOR_SYSTEM_PROMPT
+    prompt = _flat_orchestrator_prompt()
+    assert "사용자가 전체 목록을 요구했을 때만 모두 나열" in prompt
+    assert "액션의 현재 상태는 completion_status만 근거로 판단" in prompt
+    assert "status_counts를 권위 있는 집계로" in prompt
+    assert "현재 상태를 증명하지 않습니다" in prompt
 
 
 def test_memory_tool_requires_explicit_category_scope():
@@ -203,21 +281,48 @@ def test_korean_tool_descriptions_keep_openai_tool_schema_contract():
 
 
 def test_orchestrator_prompt_preserves_scope_and_trust_boundaries():
-    assert "현재 프로젝트에 수집·색인된 기록" in ORCHESTRATOR_SYSTEM_PROMPT
-    assert "대상·역할·구성요소·산출물·시점 경계" in ORCHESTRATOR_SYSTEM_PROMPT
-    assert "과거 assistant 답변과 사용자의 주장" in ORCHESTRATOR_SYSTEM_PROMPT
-    assert "[임시 첨부 근거]" in ORCHESTRATOR_SYSTEM_PROMPT
-    assert "구조화 스키마로 표현할 수 없는" in ORCHESTRATOR_SYSTEM_PROMPT
-    assert "같은 조건을\n  search_hybrid_vector_rag로 다시 검색하지 말고" in (
-        ORCHESTRATOR_SYSTEM_PROMPT
-    )
-    assert "보조 도구로 먼저 호출하지 않습니다" in ORCHESTRATOR_SYSTEM_PROMPT
-    assert "첨부 유무와 무관하게" not in ORCHESTRATOR_SYSTEM_PROMPT
-    assert "표시한 자료가 있어도 첫 프로젝트 도구 확인은 생략하지 않습니다" in (
-        ORCHESTRATOR_SYSTEM_PROMPT
-    )
-    assert "앱 SDK" not in ORCHESTRATOR_SYSTEM_PROMPT
-    assert "OAuth" not in ORCHESTRATOR_SYSTEM_PROMPT
+    prompt = _flat_orchestrator_prompt()
+    assert "이 프로젝트에 수집·색인된 기록" in prompt
+    assert "대상·역할·구성요소·산출물·시점의 경계" in prompt
+    assert "과거 assistant 답변과 사용자의 주장" in prompt
+    assert "[임시 첨부 근거]" in prompt
+    assert "구조화 스키마로 표현할 수 없는" in prompt
+    assert "같은 조건을 다시 검색하지 말고" in prompt
+    assert "보조 도구로 먼저 호출하지 않습니다" in prompt
+    assert "첨부 유무와 무관하게" not in prompt
+    assert "앱 SDK" not in prompt
+    assert "OAuth" not in prompt
+
+
+def test_orchestrator_prompt_is_standalone_and_not_concatenated():
+    """Legacy eval prompt와 결합하면 중복 서술이 다시 늘어난다."""
+    assert not hasattr(qa_engine, "SYSTEM_QA")
+    # 실제로 컨텍스트에 실리지 않는 라벨을 설명하면 죽은 토큰이 된다.
+    assert "[프로젝트 메모리]" not in ORCHESTRATOR_SYSTEM_PROMPT
+    assert "[첨부 자료]" not in ORCHESTRATOR_SYSTEM_PROMPT
+
+
+def test_orchestrator_prompt_keeps_format_contracts_prompt_diet_must_not_drop():
+    """프롬프트 축약이 컨텍스트 문자열 해석 계약까지 지우지 않았는지 고정한다.
+
+    아래 항목은 근거 텍스트에 실제로 실려 오는 마커·필드를 읽는 법이라
+    코드가 대신 보장해 줄 수 없다.
+    """
+    prompt = _flat_orchestrator_prompt()
+    # supersede 마커 문법 — 없으면 번복된 결정을 현재 사실로 인용한다.
+    for marker in ("[→ #N로 대체됨]", "[최신]", "[← #N 대체]", "[이력 일부 생략됨]"):
+        assert marker in prompt
+    # 기록 날짜 ↔ 마감일 혼동은 실제로 났던 회귀다.
+    assert "`날짜:`는 회의·문서의 기록 날짜이며 마감일이 아닙니다" in prompt
+    assert "마감일은 `마감:`" in prompt
+    # 출처는 화면에 따로 표시된다 — 본문에 옮겨 적으면 이중 표시가 된다.
+    assert "답변 본문에는 `(출처: …)` 표기도, 파일명·문서명도 옮겨 적지 마세요" in prompt
+    # 출력 형식(굵게·표)이 사라지면 프론트 렌더링이 퇴행한다.
+    assert "**굵게**" in prompt and "Markdown 표" in prompt
+    assert "alternate_queries에 표기 변형을 최대 3개" in prompt
+    # 금지만 남기고 대안을 지우면 모델이 금지된 도구를 먼저 시도한다.
+    # 압축 과정에서 이 뒷절을 잃었던 적이 있다(3353e9f 도입).
+    assert "owner에 추측해 넣지 말고 search_hybrid_vector_rag를 사용하세요" in prompt
     assert "스키마 밖 조건이 필요하면" in (
         query_structured_memory.description
     )

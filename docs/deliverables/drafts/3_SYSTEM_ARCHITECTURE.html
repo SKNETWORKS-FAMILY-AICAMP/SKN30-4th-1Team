@@ -337,10 +337,9 @@
 │   │   ├── migrate_v4.sql           <span class="c"># 액션 마감일(due_date) 컬럼</span>
 │   │   └── migrate_v5.sql           <span class="c"># PR 워터마크 + memory_suggestions 테이블</span>
 │   │
-│   └── test/                        <span class="legacy"># ⚠ pytest 아님 — RAG 검색 품질 수동 평가 스크립트</span>
-│       ├── rag_eval.py              <span class="c"># RAGAS 기반 하이브리드 검색 평가 (튜닝용)</span>
-│       ├── rag_eval_langsmith.py    <span class="c"># LangSmith 연동 평가 실행</span>
-│       └── rag_eval_*.csv           <span class="c"># 평가 실행 결과 스냅샷</span>
+│   └── test/                        <span class="legacy"># ⚠ pytest 아님 — Q&amp;A golden 평가 자산</span>
+│       ├── golden/run_eval.py       <span class="c"># 현 Agentic 검색·답변 경로의 golden 평가 진입점</span>
+│       └── rag_eval_*.csv           <span class="c"># 과거 수동 평가 결과 스냅샷(실행 코드 아님)</span>
 │
 ├── <span class="path">tests/</span>                           <span class="c"># pytest 자동화 스위트 (API·인증·암호화·Reconciler·QA 등)</span>
 │
@@ -478,7 +477,7 @@ ingestor.ingest()
     <table>
       <tr><th>디렉토리</th><th>목적</th><th>실행 방식</th></tr>
       <tr><td><code>tests/</code></td><td>pytest 자동화 스위트 (API·인증·암호화·Reconciler·QA 라우팅 등)</td><td><code>pytest</code></td></tr>
-      <tr><td><code>backend/test/</code></td><td>RAGAS 기반 하이브리드 검색(리트리버) 품질 수동 평가 — 파라미터 튜닝용</td><td><code>python backend/test/rag_eval.py</code></td></tr>
+      <tr><td><code>backend/test/golden/</code></td><td>현재 Agentic 검색·답변 경로의 golden 평가</td><td><code>python backend/test/golden/run_eval.py --help</code></td></tr>
       <tr><td><code>evals/</code></td><td>문서 청킹 품질 평가 — golden fixture 대비 청크 분할 정확도</td><td><code>python -m evals.eval_chunking</code></td></tr>
     </table>
     <p><code>meeting_notes/</code>와 <code>data/samples/</code>는 현재 코드에서 직접 참조하지 않는 수동 업로드·검증용 샘플입니다.</p>

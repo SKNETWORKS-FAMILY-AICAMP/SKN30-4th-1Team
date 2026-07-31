@@ -7,6 +7,7 @@ import base64
 import types
 from unittest.mock import MagicMock, patch
 
+from backend.agentic_graph import ORCHESTRATOR_SYSTEM_PROMPT
 from backend.retriever import qa_engine
 from backend.retriever.index_scope import ProjectIndexScope
 
@@ -86,11 +87,11 @@ def test_structured_row_preserves_all_unique_document_sources():
     )
 
 
-def test_system_qa_has_citation_rule():
-    assert "출처 인용" in qa_engine.SYSTEM_QA
-    # 유형 라벨을 출처로 쓰지 말라는 지시가 있어야 한다.
-    assert "유형 이름을" in qa_engine.SYSTEM_QA
-    assert "컨텍스트에 없는 출처를 지어내지 마라" in qa_engine.SYSTEM_QA
+def test_agentic_system_prompt_has_citation_rule():
+    prompt = " ".join(ORCHESTRATOR_SYSTEM_PROMPT.split())
+    assert "출처 목록이 이미 따로 표시" in prompt
+    assert "답변 본문에는" in prompt
+    assert "파일명·문서명도 옮겨 적지 마세요" in prompt
 
 
 # ── 원문 청크 컨텍스트에 출처 마커가 실리는지 (_build_context 수준) ────────────
@@ -121,8 +122,6 @@ def test_chroma_context_carries_source_marker(monkeypatch):
     text = "채팅 개발은 5월 착수한다"
     meta = {"source": "2026-03-02_회의.md", "date": "2026-03-02",
             "item_type": "document", "source_path": "", "repo_id": -1}
-    monkeypatch.setattr(qa_engine, "_generate_multi_queries",
-                        lambda q: ["채팅 착수"])
     monkeypatch.setattr(
         qa_engine,
         "load_project_index_scope",
@@ -135,7 +134,11 @@ def test_chroma_context_carries_source_marker(monkeypatch):
                         lambda: _vectorstore({"채팅 착수": [text]}))
     with patch("backend.retriever.qa_engine.get_collection",
                return_value=_chunk_collection([(text, meta)])):
-        context, sources, debug = qa_engine._build_context(1, "채팅 착수")
+        context, sources, debug = qa_engine._build_context(
+            1,
+            "채팅 착수",
+            query_variants=["채팅 착수"],
+        )
     assert "[원문 맥락]" in context
     assert "(출처: 2026-03-02_회의.md)" in context
     assert debug["chroma_chunks"][0]["source_label"] == "2026-03-02_회의.md"
@@ -170,7 +173,6 @@ def test_public_sources_use_canonical_labels_for_rows_history_and_chunks(monkeyp
         "date": "2026-03-03",
         "item_type": "document",
     }
-    monkeypatch.setattr(qa_engine, "_generate_multi_queries", lambda q: ["README 근거"])
     monkeypatch.setattr(
         qa_engine,
         "load_project_index_scope",
@@ -202,6 +204,7 @@ def test_public_sources_use_canonical_labels_for_rows_history_and_chunks(monkeyp
             history_mode=True,
             history_scope="global",
             history_topic_tokens=[],
+            query_variants=["README 근거"],
         )
 
     expected = [
@@ -222,6 +225,7 @@ def test_attachment_context_has_source_marker():
     from backend.api import query as query_api
     content = base64.b64encode("첨부 본문 내용".encode()).decode()
     att = query_api.QueryAttachment(filename="설계.md", content_base64=content)
-    ctx, sources = query_api._prepare_attachment_context([att])
+    evidence = query_api._prepare_attachment_evidence([att])
+    ctx, sources = query_api._render_attachment_evidence(evidence)
     assert "(출처: attachment:설계.md)" in ctx
     assert "attachment:설계.md" in sources

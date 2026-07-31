@@ -847,7 +847,6 @@ def _configure_runtime(args: argparse.Namespace) -> dict:
         "DB_PASSWORD": args.db_password,
         "DB_NAME": manifest["database"],
         "PAIM_AUTH_MODE": "dev",
-        "PAIM_QUERY_ROUTING_MODE": "agentic",
         "CHROMA_PERSIST_DIR": str(state_dir / "chroma"),
         "CHROMA_COLLECTION_NAME": manifest["chroma_collection_name"],
     })
