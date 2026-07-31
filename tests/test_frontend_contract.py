@@ -6,6 +6,7 @@ Q2: 파일 크기 10 MB 초과 → 413
 doc_type: 파일명 기반 자동 추론
 """
 import time
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -17,6 +18,14 @@ from backend.api.documents import _infer_doc_type
 from backend.retriever.index_scope import ProjectIndexScope
 
 _client = TestClient(app, raise_server_exceptions=False)
+
+
+def test_desktop_leaves_history_size_to_backend_token_budget():
+    source = (
+        Path(__file__).resolve().parents[1] / "desktop" / "src" / "App.tsx"
+    ).read_text(encoding="utf-8")
+
+    assert "QUERY_HISTORY_LIMIT" not in source
 
 
 # ── R1: 세션 prefix ──────────────────────────────────────────────

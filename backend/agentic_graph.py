@@ -7,6 +7,7 @@ import os
 import unicodedata
 from typing import Annotated, Optional, TypedDict
 
+import tiktoken
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -18,13 +19,15 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
-from .llm.chat_model_factory import get_agentic_qa_model
-from .retriever import qa_engine
+from .llm.chat_model_factory import AGENTIC_QA_MODEL, get_agentic_qa_model
 from .retriever.qa_tools import QA_TOOLS
 
 
 MAX_TOOL_ROUNDS = 5
 DEFAULT_MAX_TOOL_ROUNDS = MAX_TOOL_ROUNDS
+DEFAULT_HISTORY_TOKEN_BUDGET = 4_000
+_CHAT_MESSAGE_TOKEN_OVERHEAD = 4
+_HISTORY_TRUNCATION_MARKER = "[이전 내용 생략]\n"
 MAX_TOOL_SOURCES = 5
 MAX_ATTACHMENT_SOURCES = 5
 _VALID_TOOL_STATUSES = frozenset({
@@ -33,9 +36,9 @@ _VALID_TOOL_STATUSES = frozenset({
 _PROJECT_LOOKUP_STATUSES = frozenset({"ok", "empty"})
 _EMPTY_PROJECT_EVIDENCE_ANSWER = "프로젝트 기록에서 확인되지 않습니다."
 
-# qa_engine.SYSTEM_QA 와 이어붙이지 않는다 — 두 프롬프트가 같은 규칙을 서로 다른
-# 표현으로 중복 서술해 입력 토큰만 늘렸다. SYSTEM_QA 는 비-Agentic 레거시 평가 경로가
-# 계속 쓰므로 그대로 두고, 오케스트레이터는 이 상수 하나만 본다.
+# 비-Agentic 구 프롬프트와 이어붙이지 않는다 — 두 프롬프트가 같은 규칙을 서로 다른
+# 표현으로 중복 서술해 입력 토큰만 늘렸다. 구 런타임은 archive/legacy_qa_v1의 고정
+# 커밋으로만 비교하고, 현재 오케스트레이터는 이 상수 하나만 본다.
 # 강제 첫 도구 호출(tool_choice="any")·라운드 상한·중복 호출 차단·출처 수집은 코드가
 # 보장하므로 프롬프트에서 다시 지시하지 않는다.
 ORCHESTRATOR_SYSTEM_PROMPT = """당신은 PaiM의 프로젝트 Q&A 오케스트레이터입니다.
@@ -371,6 +374,85 @@ def build_agentic_qa_graph(model=None, max_tool_rounds: Optional[int] = None):
 _agentic_app = None
 
 
+def _history_encoding():
+    try:
+        return tiktoken.encoding_for_model(AGENTIC_QA_MODEL)
+    except KeyError:
+        return tiktoken.get_encoding("o200k_base")
+
+
+def _encode_history_text(encoding, text: str) -> list[int]:
+    """Treat model special-token spellings in user text as ordinary text."""
+    return encoding.encode(text, disallowed_special=())
+
+
+def _history_messages(
+    history: Optional[list],
+    token_budget: int = DEFAULT_HISTORY_TOKEN_BUDGET,
+) -> list[BaseMessage]:
+    """Keep the newest ordinary chat history within a deterministic token budget."""
+    if token_budget <= 0:
+        return []
+
+    encoding = _history_encoding()
+    selected: list[BaseMessage] = []
+    used_tokens = 0
+
+    for item in reversed(history or []):
+        content = str(item.get("content", "")).strip()
+        if not content:
+            continue
+
+        content_tokens = _encode_history_text(encoding, content)
+        message_tokens = _CHAT_MESSAGE_TOKEN_OVERHEAD + len(content_tokens)
+        remaining = token_budget - used_tokens
+        if message_tokens <= remaining:
+            bounded_content = content
+        else:
+            available_content_tokens = remaining - _CHAT_MESSAGE_TOKEN_OVERHEAD
+            marker_tokens = _encode_history_text(
+                encoding, _HISTORY_TRUNCATION_MARKER
+            )
+            if available_content_tokens <= len(marker_tokens):
+                break
+
+            tail_size = available_content_tokens - len(marker_tokens)
+            bounded_content = (
+                _HISTORY_TRUNCATION_MARKER
+                + encoding.decode(content_tokens[-tail_size:])
+            )
+            while (
+                len(_encode_history_text(encoding, bounded_content))
+                > available_content_tokens
+                and tail_size > 0
+            ):
+                tail_size -= 1
+                bounded_content = (
+                    _HISTORY_TRUNCATION_MARKER
+                    + encoding.decode(content_tokens[-tail_size:])
+                )
+
+            if (
+                len(_encode_history_text(encoding, bounded_content))
+                > available_content_tokens
+            ):
+                break
+
+        if item.get("role") == "assistant":
+            selected.append(AIMessage(content=bounded_content))
+        else:
+            selected.append(HumanMessage(content=bounded_content))
+        used_tokens += _CHAT_MESSAGE_TOKEN_OVERHEAD + len(
+            _encode_history_text(encoding, bounded_content)
+        )
+
+        if bounded_content != content:
+            break
+
+    selected.reverse()
+    return selected
+
+
 def _initial_messages(
     question: str,
     history: Optional[list],
@@ -399,14 +481,7 @@ def _initial_messages(
             else:
                 messages.append(HumanMessage(content=content))
     else:
-        for item in (history or [])[-qa_engine.MAX_HISTORY:]:
-            content = str(item.get("content", "")).strip()
-            if not content:
-                continue
-            if item.get("role") == "assistant":
-                messages.append(AIMessage(content=content))
-            else:
-                messages.append(HumanMessage(content=content))
+        messages.extend(_history_messages(history))
     if attachment_context.strip():
         messages.append(HumanMessage(content=(
             "[임시 첨부 근거]\n"

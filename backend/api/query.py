@@ -76,15 +76,6 @@ class _ValidatedAttachment:
     data: bytes
 
 
-def _warn_ignored_legacy_routing_mode() -> None:
-    """Keep the existing env name observable while the runtime is Agentic-only."""
-    if os.getenv("PAIM_QUERY_ROUTING_MODE", "").strip().lower() == "legacy":
-        logger.warning(
-            "legacy_query_routing_mode_ignored",
-            extra={"code": "LEGACY_QUERY_ROUTING_MODE_IGNORED"},
-        )
-
-
 def _clip_attachment_text(text: str, limit: int, marker: str) -> str:
     """잘림 마커까지 포함해 ``limit``자를 넘지 않도록 텍스트를 자른다."""
     limit = max(0, limit)
@@ -253,11 +244,6 @@ def _render_attachment_evidence(
     return "[첨부 자료]\n" + "\n\n".join(sections), sources
 
 
-def _prepare_attachment_context(attachments: List[QueryAttachment]) -> tuple[str, List[str]]:
-    """기존 내부 호출자를 위한 첨부 컨텍스트 호환 함수."""
-    return _render_attachment_evidence(_prepare_attachment_evidence(attachments))
-
-
 def execute_project_query(project_id: int, body: QueryRequest):
     """Execute one query without HTTP transport decorators.
 
@@ -265,7 +251,6 @@ def execute_project_query(project_id: int, body: QueryRequest):
     Internal callers use this boundary without depending on transport
     decorators or consuming an anonymous HTTP limiter bucket.
     """
-    _warn_ignored_legacy_routing_mode()
     attachment_evidence = _prepare_attachment_evidence(body.attachments)
     attachment_context, attachment_sources = _render_attachment_evidence(
         attachment_evidence
@@ -290,15 +275,21 @@ def execute_project_query(project_id: int, body: QueryRequest):
             attachment_sources=attachment_sources,
             attachment_evidence=[item.debug() for item in attachment_evidence],
         )
-        result["route"] = "semantic"
-        debug = result.get("debug") or {}
-        debug["route"] = "semantic"
-        debug["router_stage"] = "tool_agent"
-        result["debug"] = debug
         return result
     except Exception:
         logger.error("qa_request_failed", extra={"project_id": project_id, "code": "QA_FAILED"})
         raise HTTPException(status_code=503, detail="Q&A 처리 중 오류가 발생했습니다. 서버 로그를 확인하세요.")
+
+
+def _public_query_response(result: Dict) -> Dict:
+    """Remove evaluation-only context from the HTTP response without mutating it."""
+    public_result = dict(result)
+    debug = public_result.get("debug")
+    if isinstance(debug, dict):
+        public_debug = dict(debug)
+        public_debug.pop("model_contexts", None)
+        public_result["debug"] = public_debug
+    return public_result
 
 
 @router.post(
@@ -313,4 +304,4 @@ def execute_project_query(project_id: int, body: QueryRequest):
 @limiter.limit(RATE_LIMIT_QUERY, key_func=authenticated_user_key)
 def query(request: Request, project_id: int, body: QueryRequest):
     require_project_access(project_id)
-    return execute_project_query(project_id, body)
+    return _public_query_response(execute_project_query(project_id, body))

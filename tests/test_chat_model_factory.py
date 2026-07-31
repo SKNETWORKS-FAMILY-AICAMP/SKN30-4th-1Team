@@ -16,7 +16,7 @@ def test_import_without_api_key(monkeypatch):
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     import backend.llm.chat_model_factory  # noqa: F401 — import 자체가 크래시하지 않아야 함
     import backend.retriever.qa_engine as q
-    assert q._chain is None
+    assert not hasattr(q, "_chain")
 
 
 def test_get_chat_model_openai(monkeypatch):

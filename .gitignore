@@ -214,6 +214,7 @@ backend-agent-workflow-fixed.zip
 data/uploads/
 .claude/
 evals/results/
+evals/routing_v2/results/
 
 # 로컬 코드 리뷰 결과물
 .reviews/

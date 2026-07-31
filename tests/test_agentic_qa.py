@@ -5,7 +5,11 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from backend.agentic_graph import (
+    DEFAULT_HISTORY_TOKEN_BUDGET,
     ORCHESTRATOR_SYSTEM_PROMPT,
+    _CHAT_MESSAGE_TOKEN_OVERHEAD,
+    _history_encoding,
+    _history_messages,
     _initial_messages,
     run_agentic_qa,
 )
@@ -46,6 +50,75 @@ def _stable_index_scope(monkeypatch):
         "load_project_index_scope",
         lambda project_id: ProjectIndexScope(project_id),
     )
+
+
+def test_ordinary_history_is_token_bounded_instead_of_fixed_to_ten_messages():
+    history = [
+        {
+            "role": "assistant" if index % 2 else "user",
+            "content": f"짧은 메시지 {index}",
+        }
+        for index in range(12)
+    ]
+
+    messages = _initial_messages(question="새 질문", history=history)
+
+    assert [message.content for message in messages[1:-1]] == [
+        item["content"] for item in history
+    ]
+    assert len(messages) == 14
+    assert DEFAULT_HISTORY_TOKEN_BUDGET > 0
+
+
+def test_ordinary_history_truncates_old_prefix_at_token_boundary():
+    budget = 50
+    history = [
+        {"role": "user", "content": "이 메시지는 예산 때문에 제외되어야 합니다."},
+        {
+            "role": "assistant",
+            "content": ("아주 긴 과거 설명 " * 100) + "최신 핵심 결론",
+        },
+    ]
+
+    selected = _history_messages(history, token_budget=budget)
+
+    assert len(selected) == 1
+    assert isinstance(selected[0], AIMessage)
+    assert selected[0].content.startswith("[이전 내용 생략]\n")
+    assert selected[0].content.endswith("최신 핵심 결론")
+    encoding = _history_encoding()
+    token_cost = _CHAT_MESSAGE_TOKEN_OVERHEAD + len(
+        encoding.encode(selected[0].content)
+    )
+    assert token_cost <= budget
+
+
+def test_empty_ordinary_history_keeps_only_system_and_current_question():
+    messages = _initial_messages(
+        question="새 질문",
+        history=[
+            {"role": "user", "content": "  "},
+            {"role": "assistant", "content": ""},
+        ],
+    )
+
+    assert len(messages) == 2
+    assert isinstance(messages[0], SystemMessage)
+    assert isinstance(messages[1], HumanMessage)
+    assert messages[1].content == "새 질문"
+
+
+def test_ordinary_history_treats_model_special_token_spelling_as_text():
+    content = "사용자가 붙여 넣은 <|endoftext|> 문자열"
+
+    selected = _history_messages(
+        [{"role": "user", "content": content}],
+        token_budget=100,
+    )
+
+    assert len(selected) == 1
+    assert isinstance(selected[0], HumanMessage)
+    assert selected[0].content == content
 
 
 def test_prepared_context_keeps_session_roles_and_appends_question_once():
@@ -222,8 +295,8 @@ def test_orchestrator_prompt_preserves_scope_and_trust_boundaries():
 
 
 def test_orchestrator_prompt_is_standalone_and_not_concatenated():
-    """qa_engine.SYSTEM_QA 와의 결합을 되살리면 중복 서술이 다시 늘어난다."""
-    assert qa_engine.SYSTEM_QA not in ORCHESTRATOR_SYSTEM_PROMPT
+    """Legacy eval prompt와 결합하면 중복 서술이 다시 늘어난다."""
+    assert not hasattr(qa_engine, "SYSTEM_QA")
     # 실제로 컨텍스트에 실리지 않는 라벨을 설명하면 죽은 토큰이 된다.
     assert "[프로젝트 메모리]" not in ORCHESTRATOR_SYSTEM_PROMPT
     assert "[첨부 자료]" not in ORCHESTRATOR_SYSTEM_PROMPT

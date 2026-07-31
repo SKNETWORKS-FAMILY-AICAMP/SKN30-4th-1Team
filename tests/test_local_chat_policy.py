@@ -70,6 +70,7 @@ def test_stateless_query_does_not_write_server_chat_tables():
         assert history == [{"role": "user", "content": "이전 질문"}]
         assert attachment_context == ""
         assert attachment_sources == []
+        assert attachment_evidence == []
         return {"answer": "답변", "sources": [], "debug": {}}
 
     with (

@@ -112,10 +112,9 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 │   │   ├── migrate_v4.sql           # 액션 마감일(due_date) 컬럼 추가
 │   │   └── migrate_v5.sql           # PR 워터마크 + memory_suggestions(완료 제안 인박스) 테이블 추가
 │   │
-│   └── test/                        # ⚠ pytest 스위트 아님 — RAG 검색 품질 수동 평가 스크립트
-│       ├── rag_eval.py              # RAGAS 기반 하이브리드 검색 평가 (리트리버 파라미터 튜닝용, 환경변수로 실행)
-│       ├── rag_eval_langsmith.py    # LangSmith 연동 평가 실행
-│       └── rag_eval_*.csv           # 평가 실행 결과 스냅샷
+│   └── test/                        # ⚠ pytest 스위트 아님 — Q&A golden 평가 자산
+│       ├── golden/run_eval.py       # 현 Agentic 검색·답변 경로의 golden 평가 진입점
+│       └── rag_eval_*.csv           # 과거 수동 평가 결과 스냅샷(실행 코드 아님)
 │
 ├── tests/                           # pytest 자동화 테스트 스위트 (CI/로컬 `pytest` 대상)
 │   ├── test_*.py                    # API·인증·암호화·Reconciler·QA 라우팅 등 단위/통합 테스트
@@ -275,7 +274,7 @@ Tauri 2(Rust 셸) 위에 React 19 + TypeScript로 구성된 공식 사용자 UI�
 | 디렉토리 | 목적 | 실행 방식 |
 | --- | --- | --- |
 | `tests/` | pytest 자동화 스위트 (API, 인증, 암호화, Reconciler, QA 라우팅 등) | `pytest` |
-| `backend/test/` | RAGAS 기반 하이브리드 검색(리트리버) 품질 수동 평가 — 파라미터 튜닝용 | `python backend/test/rag_eval.py` (환경변수로 K/거리 임계값 조정) |
+| `backend/test/golden/` | 현재 Agentic 검색·답변 경로의 golden 평가 | `python backend/test/golden/run_eval.py --help` |
 | `evals/` | 문서 청킹 품질 평가 — golden fixture 대비 청크 분할 정확도 검증 | `python -m evals.eval_chunking` |
 
 `meeting_notes/`와 `data/samples/`는 현재 코드에서 직접 참조하지 않는 수동 업로드·검증용 샘플입니다.

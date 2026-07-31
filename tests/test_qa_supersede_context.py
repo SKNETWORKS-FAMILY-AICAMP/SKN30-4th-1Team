@@ -44,7 +44,6 @@ def _empty_chunk_collection():
 
 def _build(question, rows, graph_rows, *, scope="global", tokens=(),
            monkeypatch=None, collection=None, history_mode=True):
-    monkeypatch.setattr(qa_engine, "_generate_multi_queries", lambda q: [q])
     monkeypatch.setattr(
         qa_engine.mysql_search, "search",
         lambda pid, **kwargs: [dict(r) for r in rows],
@@ -60,6 +59,7 @@ def _build(question, rows, graph_rows, *, scope="global", tokens=(),
             history_mode=history_mode,
             history_scope=scope if history_mode else None,
             history_topic_tokens=sorted(tokens) if history_mode else None,
+            query_variants=[question],
         )
 
 
@@ -405,7 +405,6 @@ def test_history_mode_uses_dedicated_graph_query(monkeypatch):
         search_kwargs.append(kwargs)
         return []
 
-    monkeypatch.setattr(qa_engine, "_generate_multi_queries", lambda q: [q])
     monkeypatch.setattr(qa_engine.mysql_search, "search", spy_search)
     graph_calls = []
     monkeypatch.setattr(
@@ -415,7 +414,8 @@ def test_history_mode_uses_dedicated_graph_query(monkeypatch):
     with patch("backend.retriever.qa_engine.get_collection",
                return_value=_empty_chunk_collection()):
         qa_engine._build_context(1, "왜 바뀌었어?", history_mode=True,
-                                 history_scope="global", history_topic_tokens=[])
+                                 history_scope="global", history_topic_tokens=[],
+                                 query_variants=["왜 바뀌었어?"])
 
     assert graph_calls == [1]
     assert all(not kw.get("include_superseded") for kw in search_kwargs)
@@ -451,7 +451,12 @@ def _fake_vectorstore(order_by_query):
 
 
 def _build_chunks(question, queries, chunks, dense_map, monkeypatch):
-    monkeypatch.setattr(qa_engine, "_generate_multi_queries", lambda q: list(queries))
+    # RRF 자체를 검사하므로 운영 Tool 스키마의 최대 4개 정규화와 분리한다.
+    monkeypatch.setattr(
+        qa_engine,
+        "_normalize_multi_queries",
+        lambda _question, _variants: list(queries),
+    )
     monkeypatch.setattr(qa_engine.mysql_search, "search", lambda pid, **kw: [])
     monkeypatch.setattr(
         qa_engine.mysql_search,
@@ -461,7 +466,11 @@ def _build_chunks(question, queries, chunks, dense_map, monkeypatch):
     monkeypatch.setattr(qa_engine, "_get_vectorstore", lambda: _fake_vectorstore(dense_map))
     with patch("backend.retriever.qa_engine.get_collection",
                return_value=_chunk_collection(chunks)):
-        return qa_engine._build_context(1, question)
+        return qa_engine._build_context(
+            1,
+            question,
+            query_variants=list(queries),
+        )
 
 
 _CHUNKS = [

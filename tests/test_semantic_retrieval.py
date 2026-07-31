@@ -7,21 +7,22 @@ from backend.retriever import memory_vector, qa_engine
 from backend.retriever.index_scope import ProjectIndexScope
 
 
-def test_multi_query_generation_falls_back_to_original(monkeypatch):
-    """재표현 LLM 호출 실패 시 원 질문 단독 검색으로 폴백한다."""
+def test_direct_context_uses_only_original_query_without_hidden_llm(monkeypatch):
     monkeypatch.setattr(
         qa_engine,
-        "get_chat_model",
-        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("llm down")),
+        "load_project_index_scope",
+        lambda project_id: ProjectIndexScope(project_id),
     )
+    monkeypatch.setattr(qa_engine.mysql_search, "search", lambda *args, **kwargs: [])
+    collection = MagicMock()
+    collection.get.return_value = {"documents": [], "metadatas": [], "ids": []}
 
-    assert qa_engine._generate_multi_queries("왜 PR AUC를 선택했어?") == ["왜 PR AUC를 선택했어?"]
+    with patch("backend.retriever.qa_engine.get_collection", return_value=collection):
+        _, _, debug = qa_engine._build_context(1, "왜 PR AUC를 선택했어?")
 
-
-def test_multi_query_prompt_does_not_force_exactly_three_rewrites():
-    assert "2~3개" in qa_engine.MULTI_QUERY_PROMPT
-    assert "3개를 반환" not in qa_engine.MULTI_QUERY_PROMPT
-    assert "고유 용어도 의미를 바꾸지 않는 범위" in qa_engine.MULTI_QUERY_PROMPT
+    assert debug["multi_queries"] == ["왜 PR AUC를 선택했어?"]
+    assert debug["multi_query_source"] == "direct"
+    assert "multi_query_model_tier" not in debug
 
 
 def test_multi_queries_preserve_original_and_normalize_duplicates(monkeypatch):
@@ -79,7 +80,6 @@ def test_category_substrings_do_not_narrow_structured_retrieval(monkeypatch):
         "load_project_index_scope",
         lambda project_id: ProjectIndexScope(project_id),
     )
-    monkeypatch.setattr(qa_engine, "_generate_multi_queries", lambda q: [q])
     monkeypatch.setattr(
         qa_engine.mysql_search,
         "search",
@@ -100,6 +100,7 @@ def test_category_substrings_do_not_narrow_structured_retrieval(monkeypatch):
             1,
             "결정적 전환의 배경을 알려줘",
             history_mode=False,
+            query_variants=["결정적 전환의 배경을 알려줘"],
         )
 
     assert debug["filters"] == {"category": None}
