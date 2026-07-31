@@ -91,67 +91,35 @@ PaiM은 회의록, 문서, 음성 기록과 GitHub 활동을 하나의 **프로�
 
 ```mermaid
 flowchart TB
-    subgraph MEMORY_STAGE["1–2 · 자료 연결과 갱신"]
-        direction TB
-        DOCUMENTS["문서 · 회의 음성"] --> INGEST["업로드 · STT<br/>구조화 적재"]
-        GITHUB["GitHub 저장소"] --> SYNC["사용자가 실행하는<br/>저장소 동기화"]
-    end
+    CONNECT["1 · 자료 연결<br/>문서 · 회의 음성 · GitHub"]
+    MEMORY["2 · Project Memory<br/>결정 · 액션 · 이슈 · 리스크 · 출처"]
+    TRIGGER{"3 · 독립 트리거"}
+    QA["질문<br/>Agentic Q&A"]
+    SUGGEST["완료 · 번복 · 마감일 제안"]
+    RESULT["4 · 결과<br/>근거 답변 또는 승인 반영"]
 
-    MEMORY["3 · Project Memory<br/>결정 · 액션 · 이슈 · 리스크 · 출처"]
-    INGEST --> MEMORY
-    SYNC -->|"generation 게시"| MEMORY
-
-    subgraph ASSIST["4–5 · 독립 실행과 사용자 결정"]
-        direction LR
-        TRIGGERS["독립 트리거<br/>질문 · 새 머지 PR · 새 메모리"]
-        QA["4-A · Agentic Q&A<br/>질문 · 브리핑 요청"]
-        COMPLETE["4-B · 완료 감지<br/>머지 PR × 열린 액션"]
-        MAINTAIN["4-C · 기억 정합성<br/>결정 번복 · 마감일 후보"]
-        ANSWER["근거와 출처가 있는 답변"]
-        PENDING["검토 대기 제안<br/>완료 · 결정 번복 · 마감일"]
-        REVIEW{"사용자 검토"}
-        APPLY["승인<br/>프로젝트 상태 반영"]
-        KEEP["거절<br/>기존 상태 유지"]
-
-        TRIGGERS -->|"질문"| QA
-        TRIGGERS -->|"새 머지 PR"| COMPLETE
-        TRIGGERS -->|"신규 결정 · 날짜 후보"| MAINTAIN
-        QA --> ANSWER
-        COMPLETE --> PENDING
-        MAINTAIN --> PENDING
-        PENDING --> REVIEW
-        REVIEW -->|"승인"| APPLY
-        REVIEW -->|"거절"| KEEP
-    end
-
-    MEMORY --> TRIGGERS
-    SYNC -. "동기화 게시 결과" .-> TRIGGERS
-    INGEST -. "적재 결과" .-> TRIGGERS
+    CONNECT -->|"업로드 · STT · 저장소 동기화"| MEMORY
+    MEMORY --> TRIGGER
+    TRIGGER -->|"사용자 질문"| QA
+    TRIGGER -->|"적재 · 동기화 완료"| SUGGEST
+    QA --> RESULT
+    SUGGEST --> RESULT
 
     classDef source fill:#EAF2FF,stroke:#4F7CAC,color:#172A3A,stroke-width:2px
-    classDef process fill:#F2ECFF,stroke:#7C3AED,color:#3B1768,stroke-width:2px
     classDef memory fill:#6D28D9,stroke:#4C1D95,color:#FFFFFF,stroke-width:3px
     classDef qa fill:#E7F8F2,stroke:#159A80,color:#075E54,stroke-width:2px
     classDef suggestion fill:#FFF7E6,stroke:#D97706,color:#78350F,stroke-width:2px
-    classDef review fill:#FFF4D6,stroke:#D97706,color:#78350F,stroke-width:2px
     classDef result fill:#172A3A,stroke:#0F172A,color:#FFFFFF,stroke-width:3px
-    classDef reject fill:#F8FAFC,stroke:#94A3B8,color:#334155,stroke-width:2px
 
-    class DOCUMENTS,GITHUB source
-    class INGEST,SYNC process
+    class CONNECT source
     class MEMORY memory
-    class TRIGGERS,QA,ANSWER qa
-    class COMPLETE,MAINTAIN,PENDING suggestion
-    class REVIEW review
-    class APPLY result
-    class KEEP reject
-
-    style MEMORY_STAGE fill:#FAF8FF,stroke:#C4B5FD,color:#3B1768,stroke-width:1px
-    style ASSIST fill:#F8FAFC,stroke:#CBD5E1,color:#172A3A,stroke-width:1px
+    class TRIGGER,QA qa
+    class SUGGEST suggestion
+    class RESULT result
     linkStyle default stroke:#94A3B8,stroke-width:2px
 ```
 
-4-A, 4-B, 4-C는 동시에 실행되는 한 파이프라인이 아닙니다. Q&A는 사용자의 질문으로, 완료 감지는 저장소 동기화에서 새로운 머지 PR이 확인됐을 때, 결정·마감일 검사는 새 메모리가 적재됐을 때 각각 실행됩니다. 상태를 바꾸는 제안은 사용자가 승인하기 전까지 적용되지 않습니다.
+두 갈래는 동시에 실행되는 한 파이프라인이 아닙니다. Q&A는 사용자의 질문으로 시작하고, 완료·번복·마감일 제안은 새 PR이나 메모리가 확인될 때만 실행됩니다. 상태 변경은 사용자가 승인한 뒤에만 반영됩니다.
 
 ## AI 아키텍처
 
@@ -160,123 +128,80 @@ PaiM은 질문 유형을 미리 고정하는 라우터 대신, 하나의 **LangG
 ### 데이터 적재와 프로젝트 메모리
 
 ```mermaid
-flowchart LR
-    subgraph SOURCES["1 · Knowledge Sources"]
-        direction TB
-        DOCUMENTS["TXT · Markdown · PDF · DOCX<br/>회의 음성"]
-        GITHUB["GitHub Activity<br/>README · 커밋 메시지 · Issue · PR"]
-    end
+flowchart TB
+    SOURCES["1 · Knowledge Sources<br/>문서 · 회의 음성 · GitHub"]
+    PIPELINE["2 · Source-aware Pipeline<br/>변환 · STT · 동기화 · 구조화 추출"]
+    MYSQL[("MySQL<br/>구조화 상태 · 출처 · 이력")]
+    CHROMA[("ChromaDB<br/>원문 청크 · Memory Vector")]
+    SCOPE["3 · Project Memory<br/>Repository generation 일치"]
 
-    subgraph PIPELINES["2 · Source-aware Pipeline"]
-        direction TB
-        DOCUMENT_PIPE["문서 변환/STT<br/>→ Extractor LLM → Ingestor"]
-        REPOSITORY_PIPE["Repository Sync<br/>→ Extractor LLM → staging"]
-    end
-
-    subgraph MEMORY["3 · Project Memory"]
-        direction TB
-        GENERATION["Repository Generation<br/>atomic publish"]
-        MYSQL[("MySQL<br/>구조화 Memory · 출처 · 상태 · 이력")]
-        CHROMA[("ChromaDB<br/>원문 청크 · Memory Vector")]
-    end
-
-    DOCUMENTS --> DOCUMENT_PIPE
-    GITHUB --> REPOSITORY_PIPE
-    DOCUMENT_PIPE -->|"구조화 항목"| MYSQL
-    DOCUMENT_PIPE -->|"원문 청크 + memory vector"| CHROMA
-    REPOSITORY_PIPE --> GENERATION
-    GENERATION -->|"구조화 항목"| MYSQL
-    GENERATION -->|"원문 청크 + memory vector"| CHROMA
+    SOURCES --> PIPELINE
+    PIPELINE --> MYSQL
+    PIPELINE --> CHROMA
+    MYSQL --> SCOPE
+    CHROMA --> SCOPE
 
     classDef source fill:#EAF2FF,stroke:#4F7CAC,color:#172A3A,stroke-width:2px
     classDef process fill:#F2ECFF,stroke:#7C3AED,color:#3B1768,stroke-width:2px
     classDef datastore fill:#172A3A,stroke:#0F172A,color:#FFFFFF,stroke-width:3px
     classDef scope fill:#F8FAFC,stroke:#64748B,color:#334155,stroke-width:2px,stroke-dasharray:5 5
 
-    class DOCUMENTS,GITHUB source
-    class DOCUMENT_PIPE,REPOSITORY_PIPE process
+    class SOURCES source
+    class PIPELINE process
     class MYSQL,CHROMA datastore
-    class GENERATION scope
-
-    style SOURCES fill:#F8FAFC,stroke:#CBD5E1,color:#172A3A,stroke-width:1px
-    style PIPELINES fill:#FAF8FF,stroke:#C4B5FD,color:#3B1768,stroke-width:1px
-    style MEMORY fill:#F5F3FF,stroke:#8B5CF6,color:#3B1768,stroke-width:2px
+    class SCOPE scope
     linkStyle default stroke:#94A3B8,stroke-width:2px
 ```
 
 문서 적재는 구조화 항목을 MySQL에, 원문 청크와 구조화 memory vector를 ChromaDB에 저장합니다. 저장소 동기화는 새 generation을 staging한 뒤 게시 범위를 원자적으로 전환해 두 저장소가 같은 세대만 조회하도록 맞춥니다.
 
-### Agentic Q&A와 기억 정합성
+### Agentic Q&A
 
 ```mermaid
 flowchart TB
-    MEMORY["Published Project Memory<br/>MySQL · ChromaDB"]
+    REQUEST["질문 · 임시 첨부"]
+    MEMORY[("Published Memory<br/>MySQL · ChromaDB")]
+    ORCHESTRATOR["LangGraph Orchestrator<br/>첫 Tool 필수 · 최대 5라운드"]
+    TOOLS["2 Read-only Tools<br/>① SQL 조회 · ② Hybrid RAG"]
+    SYNTHESIS["오케스트레이터 종합"]
+    EVIDENCE_GUARD["Evidence Guard<br/>출처 · 실질 근거 검증"]
+    ANSWER["근거와 출처가 있는 답변"]
 
-    subgraph QA_FLOW["4-A · Agentic Q&A · 사용자 질문 시"]
-        direction LR
-        REQUEST["질문 · 임시 첨부<br/>제한된 대화 이력"]
-        ORCHESTRATOR["LangGraph Orchestrator<br/>첫 Tool 필수 · 최대 5라운드 · 중복 차단"]
-        SQL_TOOL(["query_sql_state<br/>list · count · overview"])
-        RAG_TOOL(["search_hybrid_vector_rag<br/>Dense 0.4 + BM25 0.4 + Recency 0.2"])
-        SYNTHESIS["Tool observation 종합"]
-        EVIDENCE_GUARD["Server Evidence Guard<br/>artifact · 출처 · 실질 근거 검증"]
-        ANSWER["근거와 출처가 있는 답변"]
-
-        REQUEST --> ORCHESTRATOR
-        ORCHESTRATOR --> SQL_TOOL
-        ORCHESTRATOR --> RAG_TOOL
-        SQL_TOOL --> SYNTHESIS
-        RAG_TOOL --> SYNTHESIS
-        SYNTHESIS --> EVIDENCE_GUARD --> ANSWER
-    end
-
-    subgraph RECONCILE_FLOW["4-B · Memory Reconciliation · 적재/동기화 후"]
-        direction LR
-        PR_EVENT["새 머지 PR"] --> PR_MATCH["PR Completion<br/>머지 PR × 열린 액션"]
-        DECISION_EVENT["신규 결정"] --> SUPERSEDE["Supersede<br/>신규 결정 × 기존 결정"]
-        DATE_EVENT["상대 · 연도 생략 날짜"] --> DUE_DATE["Due-date Guard"]
-        PENDING["Pending Suggestions<br/>완료 · 결정 번복 · 마감일"]
-        REVIEW{"사용자 승인"}
-        APPLY["프로젝트 상태 반영"]
-        REJECT["기존 상태 유지"]
-
-        PR_MATCH --> PENDING
-        SUPERSEDE --> PENDING
-        DUE_DATE --> PENDING
-        PENDING --> REVIEW
-        REVIEW -->|"승인"| APPLY
-        REVIEW -->|"거절"| REJECT
-    end
-
-    MEMORY --> QA_FLOW
-    MEMORY --> RECONCILE_FLOW
+    REQUEST --> ORCHESTRATOR
+    ORCHESTRATOR --> TOOLS
+    MEMORY --> TOOLS
+    TOOLS --> SYNTHESIS
+    SYNTHESIS --> EVIDENCE_GUARD
+    EVIDENCE_GUARD --> ANSWER
 
     classDef datastore fill:#172A3A,stroke:#0F172A,color:#FFFFFF,stroke-width:3px
     classDef source fill:#EAF2FF,stroke:#4F7CAC,color:#172A3A,stroke-width:2px
     classDef agent fill:#6D28D9,stroke:#4C1D95,color:#FFFFFF,stroke-width:3px
     classDef tool fill:#EDE9FE,stroke:#8B5CF6,color:#3B1768,stroke-width:2px
-    classDef evidence fill:#E7F8F2,stroke:#159A80,color:#075E54,stroke-width:2px
     classDef guard fill:#FFF4D6,stroke:#D97706,color:#78350F,stroke-width:2px
-    classDef suggestion fill:#FFF7E6,stroke:#D97706,color:#78350F,stroke-width:2px
     classDef result fill:#172A3A,stroke:#0F172A,color:#FFFFFF,stroke-width:3px
-    classDef reject fill:#FDECEC,stroke:#DC2626,color:#7F1D1D,stroke-width:2px
 
     class MEMORY datastore
     class REQUEST source
     class ORCHESTRATOR agent
-    class SQL_TOOL,RAG_TOOL tool
-    class SYNTHESIS,ANSWER evidence
-    class EVIDENCE_GUARD,REVIEW guard
-    class PR_EVENT,DECISION_EVENT,DATE_EVENT,PR_MATCH,SUPERSEDE,DUE_DATE,PENDING suggestion
-    class APPLY result
-    class REJECT reject
-
-    style QA_FLOW fill:#F0FDFA,stroke:#5EEAD4,color:#075E54,stroke-width:2px
-    style RECONCILE_FLOW fill:#FFFBEB,stroke:#FCD34D,color:#78350F,stroke-width:2px
+    class TOOLS tool
+    class SYNTHESIS agent
+    class EVIDENCE_GUARD guard
+    class ANSWER result
     linkStyle default stroke:#94A3B8,stroke-width:2px
 ```
 
-두 워크플로는 같은 게시 세대의 프로젝트 메모리를 읽지만 하나의 연속 파이프라인은 아닙니다. Q&A는 사용자의 질문으로 시작하고, 완료·번복·마감일 제안은 적재 또는 저장소 동기화가 끝난 뒤 각 조건에 맞을 때만 실행됩니다.
+오케스트레이터는 질문마다 두 읽기 전용 Tool 중 필요한 경로를 선택하고, 서버는 Tool 결과의 출처와 실질 근거를 다시 검증한 뒤 답변을 반환합니다.
+
+### 상태 변경 안전장치
+
+| 독립 트리거 | 검사 | 처리 |
+| --- | --- | --- |
+| 저장소 동기화에서 새 머지 PR 확인 | 열린 액션과 완료 근거 대조 | 완료 제안 |
+| 새 결정 적재 | 기존 결정과 번복 관계 판별 | Supersede 제안 |
+| 상대 날짜·연도 생략 날짜 추출 | 기준일과 시간 순서 검증 | 마감일 제안 |
+
+세 검사는 Q&A와 별도로 실행되며 결과를 자동 반영하지 않습니다. 모든 항목은 `Pending Suggestions`에 쌓이고 사용자가 승인한 경우에만 프로젝트 메모리에 반영됩니다.
 
 ### 핵심 기술 선택
 
@@ -339,18 +264,16 @@ flowchart TB
 `routing_v2`는 CS-Bot 21문항과 Modu 19문항으로 구성됩니다. 자연어 근거 검색 14문항, 구조화 상태 조회 13문항, 프로젝트 조망 13문항을 실제 `/query` 경로로 실행해 Tool 선택과 답변을 함께 평가했습니다.
 
 ```mermaid
-flowchart LR
-    DATA["40개 Golden 질문<br/>CS-Bot 21 · Modu 19"]
-    RUN["실제 /query 실행<br/>gpt-4.1-mini · temperature 0"]
-    CONTRACT["결정론적 Tool 계약<br/>Tool · 인자 · 결과 상태"]
-    JUDGE["답변 의미 평가<br/>gpt-4.1 Judge · temperature 0"]
-    GOLDEN["Golden 기준<br/>필수 사실 · 금지 주장"]
+flowchart TB
+    DATA["40개 Golden 질문<br/>질문 · 필수 사실 · 금지 주장"]
+    RUN["실제 /query 실행<br/>gpt-4.1-mini · T=0"]
+    CONTRACT["Tool 계약 검사<br/>Tool · 인자 · 결과 상태"]
+    JUDGE["답변 의미 평가<br/>gpt-4.1 Judge · T=0"]
     REPORT["평가 보고서<br/>PASS · PARTIAL · FAIL · Latency"]
 
     DATA --> RUN
     RUN --> CONTRACT
     RUN --> JUDGE
-    GOLDEN --> JUDGE
     CONTRACT --> REPORT
     JUDGE --> REPORT
 
@@ -359,7 +282,7 @@ flowchart LR
     classDef verify fill:#FFF4D6,stroke:#D97706,color:#78350F,stroke-width:2px
     classDef output fill:#E7F8F2,stroke:#159A80,color:#075E54,stroke-width:2px
 
-    class DATA,GOLDEN input
+    class DATA input
     class RUN runtime
     class CONTRACT,JUDGE verify
     class REPORT output
@@ -482,31 +405,33 @@ npm run build --prefix desktop
 ## 배포 구조
 
 ```mermaid
-flowchart LR
-    DESKTOP["Tauri Desktop<br/>macOS · Windows"] -->|"HTTPS"| CADDY["Caddy<br/>TLS · 80/443"]
-    CADDY --> API["FastAPI<br/>내부 Docker Network"]
-    API --> MYSQL[("MySQL 8<br/>구조화 상태")]
-    API --> CHROMA[("ChromaDB<br/>벡터 인덱스")]
-    API --> UPLOAD[("Upload Volume<br/>문서 · 음성")]
+flowchart TB
+    DESKTOP["Tauri Desktop<br/>macOS · Windows"]
+    CADDY["Caddy<br/>HTTPS · TLS"]
+    API["FastAPI<br/>AWS EC2 · Docker"]
+    MYSQL[("MySQL<br/>구조화 상태")]
+    CHROMA[("ChromaDB<br/>벡터 인덱스")]
+    UPLOAD[("Upload Volume<br/>문서 · 음성")]
 
-    TAG["v* Tag"] --> ACTIONS["GitHub Actions<br/>Desktop Test · Build"]
-    ACTIONS --> RELEASE["GitHub Releases<br/>DMG · EXE · MSI"]
+    DESKTOP -->|"HTTPS"| CADDY
+    CADDY --> API
+    API --> MYSQL
+    API --> CHROMA
+    API --> UPLOAD
 
     classDef client fill:#EAF2FF,stroke:#4F7CAC,color:#172A3A,stroke-width:2px
     classDef edge fill:#FFF4D6,stroke:#D97706,color:#78350F,stroke-width:2px
     classDef service fill:#6D28D9,stroke:#4C1D95,color:#FFFFFF,stroke-width:3px
     classDef datastore fill:#172A3A,stroke:#0F172A,color:#FFFFFF,stroke-width:3px
-    classDef release fill:#E7F8F2,stroke:#159A80,color:#075E54,stroke-width:2px
 
-    class DESKTOP,TAG client
+    class DESKTOP client
     class CADDY edge
     class API service
     class MYSQL,CHROMA,UPLOAD datastore
-    class ACTIONS,RELEASE release
     linkStyle default stroke:#94A3B8,stroke-width:2px
 ```
 
-PaiM 서버는 AWS EC2의 Docker Compose 스택으로 운영합니다. 외부에는 Caddy의 80·443 포트만 공개하고 FastAPI·MySQL은 내부 네트워크에 둡니다. 서버 배포는 운영자가 `deploy/stack.sh`를 통해 수행하며, 환경변수·백업·복구·롤백 절차는 [배포 운영 가이드](deploy/README.md)를 따릅니다.
+PaiM 서버는 AWS EC2의 Docker Compose 스택으로 운영합니다. 외부에는 Caddy의 80·443 포트만 공개하고 FastAPI·MySQL은 내부 네트워크에 둡니다. 데스크톱 릴리스는 별도로 `v*` 태그에서 GitHub Actions가 테스트·빌드해 GitHub Releases에 게시합니다. 서버 배포는 운영자가 `deploy/stack.sh`를 통해 수행하며, 환경변수·백업·복구·롤백 절차는 [배포 운영 가이드](deploy/README.md)를 따릅니다.
 
 ## 문서
 
