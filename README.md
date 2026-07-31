@@ -160,38 +160,31 @@ flowchart TB
 ```mermaid
 flowchart TB
     REQUEST["질문 · 임시 첨부"]
-    MEMORY[("Published Memory<br/>MySQL · ChromaDB")]
-    ORCHESTRATOR["LangGraph Orchestrator<br/>첫 Tool 필수 · 최대 5라운드"]
-    TOOLS["2 Read-only Tools<br/>① SQL 조회 · ② Hybrid RAG"]
-    SYNTHESIS["오케스트레이터 종합"]
+    ORCHESTRATOR["LangGraph Orchestrator LLM<br/>Tool 선택 · Observation 판단<br/>최종 답변 생성"]
+    TOOLS["Project Memory Tools · 2개<br/>SQL State<br/>Hybrid RAG"]
     EVIDENCE_GUARD["Evidence Guard<br/>출처 · 실질 근거 검증"]
     ANSWER["근거와 출처가 있는 답변"]
 
     REQUEST --> ORCHESTRATOR
-    ORCHESTRATOR --> TOOLS
-    MEMORY --> TOOLS
-    TOOLS --> SYNTHESIS
-    SYNTHESIS --> EVIDENCE_GUARD
+    ORCHESTRATOR <-->|"Tool Call ↔ Observation"| TOOLS
+    ORCHESTRATOR -->|"근거 확보 · 최종 응답"| EVIDENCE_GUARD
     EVIDENCE_GUARD --> ANSWER
 
-    classDef datastore fill:#172A3A,stroke:#0F172A,color:#FFFFFF,stroke-width:3px
     classDef source fill:#EAF2FF,stroke:#4F7CAC,color:#172A3A,stroke-width:2px
     classDef agent fill:#6D28D9,stroke:#4C1D95,color:#FFFFFF,stroke-width:3px
     classDef tool fill:#EDE9FE,stroke:#8B5CF6,color:#3B1768,stroke-width:2px
     classDef guard fill:#FFF4D6,stroke:#D97706,color:#78350F,stroke-width:2px
     classDef result fill:#172A3A,stroke:#0F172A,color:#FFFFFF,stroke-width:3px
 
-    class MEMORY datastore
     class REQUEST source
     class ORCHESTRATOR agent
     class TOOLS tool
-    class SYNTHESIS agent
     class EVIDENCE_GUARD guard
     class ANSWER result
     linkStyle default stroke:#94A3B8,stroke-width:2px
 ```
 
-오케스트레이터는 질문마다 두 읽기 전용 Tool 중 필요한 경로를 선택하고, 서버는 Tool 결과의 출처와 실질 근거를 다시 검증한 뒤 답변을 반환합니다.
+오케스트레이터 LLM은 첫 Tool 호출을 반드시 수행하고, `tool_call → observation → 다음 판단`을 최대 5라운드 반복합니다. 두 Tool은 프로젝트 메모리의 근거만 반환하며 사용자 답변을 직접 만들지 않습니다. 근거가 충분해지면 오케스트레이터 LLM이 최종 답변을 생성하고, 서버가 출처와 실질 근거를 다시 검증한 뒤 반환합니다.
 
 ### 상태 변경 안전장치
 
