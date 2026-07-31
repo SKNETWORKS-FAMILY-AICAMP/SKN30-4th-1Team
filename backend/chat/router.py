@@ -11,12 +11,13 @@ from backend.agentic_graph import run_agentic_qa
 from backend.db.mysql import get_connection
 from backend.security.session_crypto import get_session_crypto
 from backend.chat.session_store import SessionStore
-from backend.chat.context_builder import ContextBuilder
 from backend.api.auth import get_current_user_id, require_project_access
 from backend.rate_limit import RATE_LIMIT_CHAT, authenticated_user_key, limiter
 
 router = APIRouter(prefix="/projects/{project_id}/sessions", tags=["Session Memory API"])
 logger = logging.getLogger(__name__)
+
+SUMMARY_PROMPT_MAX_TOKENS = 2000  # 롤링 요약을 프롬프트에 실을 때의 상한
 
 # --- 실제 DB 커넥션 종속성 주입기 (다른 라우터와 동일하게 backend.db.mysql.get_connection 사용) ---
 def get_db():
@@ -79,44 +80,6 @@ def _verify_session_ownership(cursor, project_id: int, session_id: str):
         )
     if not cursor.fetchone():
         raise HTTPException(status_code=404, detail="해당 프로젝트에서 요청하신 세션을 찾을 수 없습니다.")
-
-
-def _to_agentic_prepared_context(
-    final_prompt_messages: List[dict], current_question: str
-) -> List[dict]:
-    """Keep the session context builder's budget and message order for Agentic Q&A.
-
-    The Agentic runner owns its orchestrator system prompt and appends the
-    current question itself.  The remaining server-prepared summary, message
-    window, and optional RAG text must retain their original roles so a long
-    session does not silently lose its rolling summary.
-    """
-    context_messages = list(final_prompt_messages)
-    if context_messages and context_messages[0].get("role") == "system":
-        context_messages = context_messages[1:]
-    if (
-        context_messages
-        and context_messages[-1].get("role") == "user"
-        and context_messages[-1].get("content") == current_question
-    ):
-        context_messages = context_messages[:-1]
-    # The session handler has already appended this turn to recent_messages
-    # before ContextBuilder runs.  The Agentic runner appends ``question`` at
-    # the end, so remove that copied message as well instead of asking the
-    # orchestrator the same question twice.
-    for index in range(len(context_messages) - 1, -1, -1):
-        message = context_messages[index]
-        if (
-            message.get("role") == "user"
-            and message.get("content") == current_question
-        ):
-            del context_messages[index]
-            break
-    return [
-        {"role": message["role"], "content": message["content"]}
-        for message in context_messages
-        if message.get("content")
-    ]
 
 
 # --- [1] POST /projects/{project_id}/sessions (세션 생성) ---
@@ -313,28 +276,44 @@ def handle_session_query(
         break
 
     # -------------------------------------------------------------------------
-    # 정제 완료된 안전한 최적화 데이터 컴포넌트들을 전달하여 최종 시스템 프롬프트 조립
+    # Agentic 오케스트레이터에 넘길 컨텍스트 조립
+    # 위 while 루프가 이미 MAX_TOTAL_BUDGET 안으로 잘라냈으므로 여기서 예산을
+    # 다시 계산하지 않는다. 오케스트레이터가 시스템 프롬프트와 현재 질문을 직접
+    # 붙이므로 둘 다 넣지 않는다.
     # -------------------------------------------------------------------------
-    builder = ContextBuilder(model_name="gpt-4o")
-    final_prompt_messages = builder.build_final_prompt(
-        system_prompt="당신은 개발 프로젝트 통합 도우미 PaiM입니다.",
-        decrypted_summary=current_summary,
-        decrypted_recent_messages=recent_messages,
-        rag_chunks=retrieved_rag_chunks,
-        current_question=request.current_question,
-        max_total_budget=MAX_TOTAL_BUDGET
-    )
-    # -------------------------------------------------------------------------
+    prepared_context = []
+    if current_summary:
+        # 요약은 롤링 병합으로 무한히 늘어나므로 프롬프트에 싣는 사본만 상한을 건다.
+        # 저장되는 current_summary 는 자르지 않는다.
+        summary_text = f"[이전 대화 요약]: {current_summary}"
+        summary_ids = encoder.encode(summary_text)
+        if len(summary_ids) > SUMMARY_PROMPT_MAX_TOKENS:
+            summary_text = encoder.decode(summary_ids[:SUMMARY_PROMPT_MAX_TOKENS])
+        # 요약은 사용자 대화 내용이므로 서버 규칙(system)이 아니라 user 로 전달한다.
+        prepared_context.append({"role": "user", "content": summary_text})
 
-    # 세션의 암호화 이력·요약·임시 RAG 입력은 기존 ContextBuilder 예산을 그대로
-    # 적용한 뒤, 프로젝트 Q&A와 같은 Agentic 오케스트레이터에 전달한다.
+    # 마지막 원소는 위에서 방금 추가한 현재 질문이다(트리밍은 앞에서만 제거한다).
+    # 오케스트레이터가 다시 붙이므로 여기서는 제외한다.
+    prepared_context.extend(
+        {"role": message["role"], "content": message["text"]}
+        for message in recent_messages[:-1]
+        if message["text"]
+    )
+
+    if retrieved_rag_chunks:
+        prepared_context.append({
+            "role": "system",
+            "content": (
+                "[참고 프로젝트 RAG 지식 - MySQL/ChromaDB 검색 결과]:\n"
+                + "\n\n".join(chunk["text"] for chunk in retrieved_rag_chunks)
+            ),
+        })
+
     try:
         agentic_result = run_agentic_qa(
             project_id=project_id,
             question=request.current_question,
-            prepared_context=_to_agentic_prepared_context(
-                final_prompt_messages, request.current_question
-            ),
+            prepared_context=prepared_context,
         )
         llm_response_text = agentic_result["answer"]
     except Exception:

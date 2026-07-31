@@ -71,8 +71,7 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 │   │
 │   ├── chat/                        # 세션형 대화 (암호화 대화 이력)
 │   │   ├── router.py                # /projects/{id}/sessions — 세션 CRUD, 세션 내 질의
-│   │   ├── session_store.py         # 세션·메시지 암호화 저장/조회
-│   │   └── context_builder.py       # tiktoken 기반 프롬프트 컨텍스트 조립(토큰 예산 관리)
+│   │   └── session_store.py         # 세션·메시지 암호화 저장/조회
 │   │
 │   ├── pipeline/                    # 문서 → 구조화 메모리 변환
 │   │   ├── extractor.py             # LLM 추출 — 소스 타입(회의록/README/커밋/이슈-PR)별 지침 분기, 청크 분할·중복 제거
@@ -237,7 +236,7 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 ### 3.7 chat — 암호화 세션 대화
 
 - `session_store.py`: 세션·메시지를 `security/session_crypto.py`(AES-256-GCM, `SESSION_MEMORY_KEY`)로 암호화 저장
-- `context_builder.py`: tiktoken으로 토큰 수를 계산해 시스템 프롬프트+요약+최근 메시지를 토큰 예산 안에서 조립
+- `router.py`: tiktoken으로 토큰 예산을 계산해 롤링 요약+최근 메시지를 잘라낸 뒤 Agentic 오케스트레이터에 전달
 - 세션 질의 API도 같은 Agentic Q&A를 사용합니다. 기존 컨텍스트 예산·암호화 이력·롤링 요약은 API 전처리에서 만들고, Agentic 도구 오케스트레이터가 답변을 생성한 뒤 기존 저장·응답 형식을 유지합니다.
 
 ### 3.8 llm — 프로바이더 추상화
@@ -335,7 +334,7 @@ repo 연결/동기화 (api/repository.py: POST .../sync)
   → 최종 답변 + 출처 반환 (`route`는 호환성상 `semantic`)
 
 세션 질의 (chat/router.py)
-  → context_builder.py 로 암호화 대화 이력과 함께 컨텍스트 조립
+  → 토큰 예산 안에서 암호화 대화 이력·롤링 요약을 컨텍스트로 조립
   → Agentic Q&A (프로젝트 질의·Streamlit과 동일한 도구 오케스트레이터)
   → 기존 세션 저장·롤링 요약·응답 형식 유지
 ```
