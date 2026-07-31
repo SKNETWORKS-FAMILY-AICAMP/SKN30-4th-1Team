@@ -1,6 +1,6 @@
 # PaiM 시스템 아키텍처
 
-> 갱신: 2026-07-29
+> 갱신: 2026-07-31 (`main` `d13baba`)
 >
 > 이 문서는 현재 저장소의 실제 디렉토리/코드 구조를 기준으로 작성되었습니다. `README.md`의 구조 설명이 이 문서와 다르다면 이 문서(코드 기준)를 우선하세요.
 
@@ -8,41 +8,36 @@
 
 PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 프로젝트 메모리"로 통합하는 LLM 기반 AI 프로젝트 매니저입니다.
 
-- **입력**: 회의록(.md/.txt/.pdf) 업로드, GitHub repo 연결
-- **처리**: LLM이 결정(decision)·액션(action)·이슈(issue)·리스크(risk)로 구조화 추출 → MySQL + ChromaDB에 이중 저장
-- **관찰**: repo sync 시 머지된 PR과 열린 액션을 LangGraph 기반 Reconciler가 대조해 완료 제안 생성 (승인은 항상 사람)
-- **질의**: 프로젝트 Q&A는 Agentic 오케스트레이터가 SQL 상태·하이브리드 근거·프로젝트 조망 도구를 필요에 따라 호출
+- **입력**: 회의록·문서(.md/.txt/.pdf/.docx), 회의 음성, GitHub 저장소 활동
+- **처리**: LLM이 결정(decision)·액션(action)·이슈(issue)·리스크(risk)로 구조화하고, 구조화 항목은 MySQL에, 원문 청크와 memory vector는 ChromaDB에 저장
+- **관찰**: 사용자가 repo sync를 실행하면 새 머지 PR과 열린 액션을 구조화 Reconciler LLM이 대조해 완료 제안 생성 (승인은 항상 사람)
+- **질의**: Agentic 오케스트레이터가 `query_sql_state`와 `search_hybrid_vector_rag` 두 도구를 필요에 따라 호출 (`overview`는 SQL 도구의 operation)
 - **UI**: Tauri + React 데스크톱 앱 (macOS/Windows)
 
 ```
-                         ┌─────────────────────────┐
-                         │   Desktop App (Tauri)   │
-                         │   React 19 + TS UI      │
-                         └────────────┬─────────────┘
-                                      │ HTTP (127.0.0.1:8000)
+┌────────────────────┐      HTTPS       ┌────────────────────┐
+│ Desktop App        │ ───────────────▶ │ Caddy · TLS        │
+│ Tauri + React 19   │                  │ external 80/443    │
+└────────────────────┘                  └──────────┬─────────┘
+                                                  │ internal network
+                                                  ▼
+                                       ┌────────────────────┐
+                                       │ FastAPI Backend    │
+                                       │ API · Auth · GitHub│
+                                       └───┬──────┬─────┬───┘
+                                           │      │     │
+                         ┌─────────────────┘      │     └─────────────────┐
+                         ▼                        ▼                       ▼
+               ┌────────────────┐       ┌────────────────┐      ┌────────────────┐
+               │ Extract/Ingest │       │ Agentic Q&A    │      │ Reconciliation │
+               │ source-aware   │       │ two read tools │      │ PR/supersede   │
+               └───────┬────────┘       └───────┬────────┘      └───────┬────────┘
+                       └──────────────┬──────────┴───────────────────────┘
                                       ▼
                          ┌─────────────────────────┐
-                         │      FastAPI Backend     │
-                         │  api / chat / github 라우터│
-                         └──┬───────┬───────┬───────┘
-                            │       │       │
-                 ┌──────────┘       │       └──────────┐
-                 ▼                  ▼                  ▼
-     ┌────────────────────┐ ┌──────────────┐ ┌──────────────────┐
-     │ pipeline (추출/적재) │ │ Agentic Q&A  │ │ reconciler        │
-     │ extractor·ingestor  │ │ 도구·하이브리드 │ │ PR↔액션 대조 그래프 │
-     └─────────┬───────────┘ │ 하이브리드 RAG │ └─────────┬──────────┘
-               │             └──────┬───────┘           │
-               ▼                    ▼                    ▼
-     ┌────────────────┐   ┌────────────────┐   ┌────────────────────┐
-     │  MySQL (구조화)  │   │ ChromaDB (벡터) │   │ GitHub App (REST)  │
-     └────────────────┘   └────────────────┘   └────────────────────┘
-                                      ▲
-                                      │
-                        ┌─────────────┴─────────────┐
-                        │  llm/ (OpenAI·Claude·      │
-                        │  Google·Local 팩토리)        │
-                        └─────────────────────────────┘
+                         │ MySQL + ChromaDB        │
+                         │ published project memory│
+                         └─────────────────────────┘
 ```
 
 ## 2. 저장소 레이아웃 (주석 포함)
@@ -60,7 +55,8 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 │   ├── storage.py                   # 업로드 파일 저장 추상화 (로컬 FS 기본, S3 등 교체 대비)
 │   │
 │   ├── api/                         # REST 엔드포인트 (prefix: /api/v1)
-│   │   ├── auth.py                  # 개발용 임시 인증 (DEV_USER_ID 기반, 4차 로드맵에서 정식 로그인으로 대체 예정)
+│   │   ├── auth.py                  # JWT 인증·비밀번호 해시·프로젝트 역할 검사 (dev는 명시적 테스트 모드)
+│   │   ├── auth_routes.py           # 회원가입·로그인·현재 사용자 API
 │   │   ├── project.py               # 프로젝트 CRUD
 │   │   ├── documents.py             # 문서 업로드/삭제 + Git 로그 적재
 │   │   ├── memory.py                # 수동 memory CRUD
@@ -78,8 +74,9 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 │   │   ├── ingestor.py              # 추출 결과를 MySQL(구조화) + ChromaDB(벡터) 이중 적재
 │   │   └── models.py                # MemoryItem 등 파이프라인 Pydantic 모델
 │   │
-│   ├── reconciler/                  # 머지 PR ↔ 열린 액션 완료 제안
-│   │   └── pr_actions.py            # LangGraph 배치 매칭 — 워터마크 기반 증분 처리, high/medium 확신 + 근거만 제안
+│   ├── reconciler/                  # 상태를 자동 변경하지 않는 사용자 검토 제안
+│   │   ├── pr_actions.py            # 구조화 LLM 배치 매칭 — 머지 PR ↔ 열린 액션 완료 제안
+│   │   └── supersede.py             # 신규 결정 ↔ 기존 결정 번복 후보 판별
 │   │
 │   ├── retriever/                   # Agentic Q&A 도구와 검색 부품
 │   │   ├── qa_tools.py              # 근거 검색·구조화 조회·조망 Tool 정의
@@ -110,7 +107,11 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 │   │   ├── migrate_v2.sql           # 문서 처리 상태·진행률 컬럼 추가 (idempotent)
 │   │   ├── migrate_v3.sql           # 액션 완료(completed_at)·정렬(sort_order) 컬럼 추가
 │   │   ├── migrate_v4.sql           # 액션 마감일(due_date) 컬럼 추가
-│   │   └── migrate_v5.sql           # PR 워터마크 + memory_suggestions(완료 제안 인박스) 테이블 추가
+│   │   ├── migrate_v5.sql           # PR 워터마크 + memory_suggestions 테이블 추가
+│   │   ├── migrate_v6.sql           # 다중 사용자·제안 승인자 감사 추적
+│   │   ├── migrate_v7.sql           # decision supersede 포인터
+│   │   ├── migrate_v8.sql           # supersede FK + active_memory 뷰
+│   │   └── migrate_v9.sql           # 저장량 quota + repository generation 게시 계약
 │   │
 │   └── test/                        # ⚠ pytest 스위트 아님 — Q&A golden 평가 자산
 │       ├── golden/run_eval.py       # 현 Agentic 검색·답변 경로의 golden 평가 진입점
@@ -159,8 +160,9 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 │   ├── deliverables/                # 제출 산출물 작업 공간
 │   └── archive/                     # 과거 평가·통합·핸드오버 기록
 │
-├── docker-compose.yml                # MySQL 컨테이너 (schema.sql 자동 적용)
-├── start-paim.bat                    # Windows 원클릭 실행 (Docker·백엔드·앱 자동 기동)
+├── docker-compose.yml                # 로컬 개발용 MySQL
+├── docker-compose.prod.yml           # Caddy·FastAPI·MySQL 운영 스택
+├── deploy/                           # AWS 배포 preflight·rollout·backup·restore
 └── pyproject.toml / uv.lock          # Python 패키지·의존성 (uv)
 ```
 
@@ -169,9 +171,9 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 ### 3.1 요청 진입 및 부트스트랩 (`backend/main.py`)
 
 - FastAPI 앱을 생성하고 `api/*`, `chat/router`, `github/router`를 `/api/v1` prefix로 등록합니다 (`github/router`는 자체 `/github/app` prefix 사용).
-- CORS는 데스크톱 앱의 Tauri origin(`tauri://localhost` 등)만 허용합니다.
-- `lifespan`에서 서버 기동 시: 중단된 문서/repo 작업 복구(`startup.recover_stale_tasks`), 레거시 프로젝트 멤버십 백필, ChromaDB 벡터 백필을 실행하고 백그라운드 `stale_watchdog` 태스크를 띄웁니다.
-- 백엔드는 `127.0.0.1`에만 바인딩 — LAN 노출 없이 로컬 우선으로 동작합니다.
+- CORS는 `CORS_ORIGINS`의 명시적 allowlist만 허용하며 wildcard를 거부합니다. 개발 기본값은 `http://127.0.0.1:7420`, Tauri origin은 정확히 `tauri://localhost`만 허용합니다.
+- `lifespan`에서 서버 기동 시 중단된 문서/repo 작업, quota cleanup, schema v9, ChromaDB memory vector를 복구·검증하고 watchdog을 시작합니다.
+- 운영 컨테이너는 FastAPI를 내부 Docker network의 `0.0.0.0:8000`에 바인딩합니다. 호스트에는 직접 공개하지 않고 Caddy만 80·443으로 노출합니다.
 
 ### 3.2 API 레이어 (`backend/api/`, `backend/chat/router.py`, `backend/github/router.py`)
 
@@ -254,8 +256,10 @@ Google Gemini는 중첩 스키마 구조화 출력을 지원하지 않아 구조
 
 - `mysql.py`: PyMySQL 커넥션 헬퍼
 - `chroma.py`: OpenAI 임베딩 전용 별도 컬렉션 사용(cosine space) — 기본 chromadb 임베딩(384-dim, L2)과 분리
-- `schema.sql`: 최초 스키마 — `users`, `projects`, `project_members`, `documents`, `repositories`, `memory`, `memory_sources`, `memory_suggestions`, `chat_sessions`, `chat_messages`, `chat_summaries`, `project_memory` (12개 테이블)
-- `migrate_v2~v5.sql`: 문서 처리 상태 컬럼 → 액션 완료/정렬 컬럼 → 마감일 컬럼 → PR 워터마크+완료 제안 인박스 순으로 idempotent 마이그레이션 적용 (컨테이너 기동 시 자동 실행)
+- `schema.sql`: 사용자·프로젝트·문서·저장소·memory·suggestion·레거시 chat·quota/cleanup을 포함한 현재 fresh schema (14개 테이블)
+- `migrate_v2~v5.sql`: 문서 처리 상태 → 액션 완료/정렬 → 마감일 → PR 워터마크·제안 인박스
+- `migrate_v6~v8.sql`: 다중 사용자·승인 감사 → 결정 번복 포인터 → self-FK와 `active_memory` 뷰
+- `migrate_v9.sql`: 업로드 quota 예약·정리 소유권과 repository generation staging/publish 계약. 앱 시작 시 `ensure_schema_v9()`가 idempotent하게 보증
 
 ## 4. 데스크톱 아키텍처 (`desktop/`)
 
@@ -268,13 +272,18 @@ Tauri 2(Rust 셸) 위에 React 19 + TypeScript로 구성된 공식 사용자 UI�
 
 ## 5. 테스트·평가 자산
 
-세 디렉토리가 목적이 다른 테스트/평가 도구입니다.
+자동 테스트와 LLM 평가는 실행 조건과 합격 기준이 다릅니다.
 
 | 디렉토리 | 목적 | 실행 방식 |
 | --- | --- | --- |
-| `tests/` | pytest 자동화 스위트 (API, 인증, 암호화, Reconciler, QA 라우팅 등) | `pytest` |
-| `backend/test/golden/` | 현재 Agentic 검색·답변 경로의 golden 평가 | `python backend/test/golden/run_eval.py --help` |
-| `evals/` | 문서 청킹 품질 평가 — golden fixture 대비 청크 분할 정확도 검증 | `python -m evals.eval_chunking` |
+| `tests/` | API·인증·암호화·Reconciler·QA 계약 자동 테스트 | `./tests/integration/mysql/run.sh` |
+| `desktop/scripts/*.test.mjs` | 데스크톱 API·동기화·STT 계약 테스트 | `npm test --prefix desktop` |
+| `evals/agentic_v2/` | 동결된 MySQL·Chroma snapshot을 사용한 정식 paired Agentic 평가 계약 | `python -m evals.agentic_v2.pipeline --help` |
+| `evals/routing_v2/` | 40문항 개발 회귀 평가와 문항별 보고서 | `python -m evals.routing_v2.run_current --help` |
+| `evals/fixtures/` | 문서 청킹 결과를 golden fixture와 비교 | `python -m evals.eval_chunking` |
+| `backend/test/golden/` | 과거 RAG/라우팅 실험과 비교용 golden 자산 | `python backend/test/golden/run_eval.py --help` |
+
+전체 백엔드 게이트는 Git, uv, Docker Compose, Bash 4+와 GNU `realpath`가 있는 Linux 환경을 기준으로 합니다. macOS 기본 Bash 3.2는 배포·하네스 계약 테스트의 실행 환경이 아닙니다.
 
 `meeting_notes/`와 `data/samples/`는 현재 코드에서 직접 참조하지 않는 수동 업로드·검증용 샘플입니다.
 
@@ -289,7 +298,8 @@ Tauri 2(Rust 셸) 위에 React 19 + TypeScript로 구성된 공식 사용자 UI�
 
 - `memory.date` = 회의/문서의 기록 날짜, `memory.due_date` = 마감일 (별개 컬럼, migrate_v4)
 - `memory.is_user_verified` = 사용자가 수정한 기록 보호 플래그 — LLM 재처리가 덮어쓰지 않음
-- `memory_suggestions` = Reconciler가 만든 완료 제안, 근거·승인 이력과 함께 보존 (migrate_v5)
+- `memory_suggestions` = 액션 완료(`complete_action`)·결정 번복(`supersede`)·마감일(`set_due_date`) 제안을 근거·승인 이력과 함께 보존
+- `published_memory` / `active_memory` = 현재 게시된 repository generation과 번복되지 않은 최신 memory만 노출하는 뷰
 - `chat_sessions`/`chat_messages`/`chat_summaries` = deprecated 서버 세션 API의 구형 클라이언트 호환 테이블 (AES-256-GCM 암호화)
 - `project_memory` = 조망형 질문에 쓰이는 응축 요약
 
@@ -300,8 +310,12 @@ Tauri 2(Rust 셸) 위에 React 19 + TypeScript로 구성된 공식 사용자 UI�
 ```
 사용자 업로드 (api/documents.py)
   → storage.py 로 파일 저장 (BackgroundTasks로 비동기 처리)
-  → pipeline/extractor.py: 소스 지침 기반 LLM 구조화 추출
-  → pipeline/ingestor.py: MySQL(memory) + ChromaDB 이중 저장
+  → 문서 변환 또는 STT 후 pipeline/extractor.py의 소스 지침 기반 LLM 구조화 추출
+  → pipeline/ingestor.py
+      → MySQL: 구조화 memory + source + 날짜/상태
+      → ChromaDB: 원문 청크 + memory vector
+      → 상대·연도 생략 마감일은 pending 제안으로 저장
+      → 신규 decision은 유사한 기존 decision과 supersede 여부 판별
   → 문서 상태(status)를 polling(api/documents.py: GET .../documents/{id}/status)으로 확인
 ```
 
@@ -309,9 +323,12 @@ Tauri 2(Rust 셸) 위에 React 19 + TypeScript로 구성된 공식 사용자 UI�
 
 ```
 repo 연결/동기화 (api/repository.py: POST .../sync)
-  → GitHub App API로 머지 PR·열린 이슈/README/커밋 수집
-  → pipeline/extractor.py 로 README/커밋/이슈 구조화 적재 (소스 타입별 지침)
-  → reconciler/pr_actions.py: 워터마크 이후 머지 PR × 열린 액션 LLM 배치 대조
+  → worker fence를 획득하고 새 repository generation UUID 할당
+  → GitHub App API로 README·커밋 메시지·Issue·PR 제목/본문과 새 머지 PR 수집
+  → pipeline/extractor.py 로 source-aware 구조화 후 MySQL·ChromaDB staging 적재
+  → generation을 atomic publish해 두 저장소의 조회 범위를 함께 전환
+  → 새 decision의 supersede 후보 판별
+  → reconciler/pr_actions.py: 워터마크 이후 머지 PR × 열린 액션 구조화 LLM 배치 대조
   → high/medium 확신 매칭만 memory_suggestions 에 제안 생성
   → 사용자가 GithubPanel.tsx 의 제안 인박스에서 승인/거절 (api/suggestion.py)
   → 승인 시에만 memory.completed_at 갱신
@@ -326,6 +343,8 @@ repo 연결/동기화 (api/repository.py: POST .../sync)
   → agentic_graph.py: 오케스트레이터 LLM
       → search_hybrid_vector_rag / query_sql_state
       → 도구 근거 반환 → 필요한 경우 다음 도구 호출
+      → 최대 5라운드, 정규화 후 중복 호출 차단
+  → 서버가 Tool artifact·출처·실질 근거를 검증하고 오류/빈 근거의 긍정 주장을 차단
   → 최종 답변 + 출처 반환 (`route`는 호환성상 `semantic`)
   → 데스크톱이 질문·답변을 로컬 대화에 저장
 
@@ -347,10 +366,12 @@ repo 연결/동기화 (api/repository.py: POST .../sync)
 ## 8. 설계 원칙
 
 - **정확도 > 재현율**: Reconciler의 완료 매칭은 애매하면 보고하지 않음(high/medium 확신 + 근거 필수). 놓친 제안은 다음 동기화나 사람이 잡을 수 있지만, 틀린 완료 처리는 신뢰를 무너뜨림.
-- **파괴적 변경은 제안-승인, 추가는 자동**: 메모리 적재는 자동이지만 완료 처리처럼 상태를 바꾸는 일은 반드시 사람의 승인을 거침 (human-in-the-loop).
-- **근거 우선 Agentic Q&A**: 오케스트레이터는 읽기 전용 도구를 하나 이상 호출해 근거를 확인한 뒤 답한다. 검증·재계획 같은 안전장치는 평가 결과가 필요할 때만 추가한다.
+- **파괴적 변경은 제안-승인, 추가는 자동**: 메모리 적재는 자동이지만 액션 완료·결정 번복·상대 마감일 반영은 반드시 사람의 승인을 거침 (human-in-the-loop).
+- **근거 우선 Agentic Q&A**: 첫 읽기 전용 Tool 호출을 강제하고, 최대 5라운드·중복 호출 차단·서버 근거 검증을 적용합니다. 오류·무효 artifact·실질 근거 부재를 자연스러운 긍정 답변으로 바꾸지 않습니다.
 - **데스크톱 채팅은 local-only**: 새 데스크톱은 대화와 초안을 현재 WebView `localStorage`에 저장합니다. `/query`에는 답변 생성에 필요한 최근 대화를 전송하지만 서버 chat 테이블에는 저장하지 않으며, 암호화 서버 세션은 deprecated 호환 경로에만 남아 있습니다.
 
 ## 9. CI/CD
 
-`.github/workflows/release.yml`이 버전 태그(`v*`) push 시 `desktop/`(Tauri) 앱을 macOS `.dmg`, Windows `-setup.exe`/`.msi`로 빌드해 GitHub Releases에 게시합니다. 백엔드는 별도 CI 없이 로컬(`docker compose` + `uv run uvicorn`) 또는 `start-paim.bat`(Windows 원클릭)으로 구동합니다.
+`.github/workflows/release.yml`은 버전 태그(`v*`) push 시 데스크톱 계약 테스트를 실행하고 Tauri 앱을 macOS Universal `.dmg`, Windows x64 `-setup.exe`/`.msi`로 빌드해 GitHub Releases에 게시합니다.
+
+백엔드 운영 배포는 GitHub Actions의 범위가 아닙니다. AWS EC2에서 Caddy·FastAPI·MySQL을 `docker-compose.prod.yml`로 운영하며, 운영자는 `deploy/stack.sh`의 preflight를 통과한 불변 이미지 태그를 rollout합니다. 백업·복구·롤백 절차는 [`deploy/README.md`](../deploy/README.md)를 따릅니다.
