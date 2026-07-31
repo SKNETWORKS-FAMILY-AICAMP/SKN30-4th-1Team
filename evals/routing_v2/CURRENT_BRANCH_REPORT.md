@@ -1,7 +1,7 @@
 # routing_v2 현재 브랜치 평가 보고서
 
 - 브랜치: `feat/이동욱-프롬프트_수정`
-- 커밋: `b42cc5cae92dcd8a4503477af99dc1add3e7dc90`
+- 커밋: `f3f768c6d8d67aa4fceea4c6f1a5a06df3394c6e`
 - 문항: 40개
 - API 성공: 40/40
 - Tool 계약: 40/40 (100.0%)
