@@ -30,6 +30,7 @@ const AUTH_SESSION = {
 const PROJECT_STORAGE_KEY = `paim.projects.v8.account.${encodeURIComponent(
   `${API_SERVER_A}|${SMOKE_USER.id}|${SMOKE_USER.email}`,
 )}`;
+const PROJECT_DRAFT_STORAGE_KEY = `${PROJECT_STORAGE_KEY}.drafts`;
 const SIDEBAR_STORAGE_KEY = "paim.sidebarCollapsed.v1";
 const SIDEBAR_WIDTH_STORAGE_KEY = "paim.sidebarWidth.v1";
 const PROJECT_PANEL_COLLAPSED_STORAGE_KEY = "paim.projectPanelCollapsed.v2";
@@ -1046,10 +1047,14 @@ function createPaimTauriMockScript() {
       window.__paimLayoutTauriMockInstalled = true;
       const callbacks = new Map();
       const listeners = new Map();
+      let attachmentPreviewDelayMs = 0;
       let nextCallbackId = 1;
       let nextDialogSelection = null;
       let nextEventId = 1;
 
+      window.__paimLayoutConfigureAttachmentPreview = ({ delayMs = 0 } = {}) => {
+        attachmentPreviewDelayMs = Math.max(0, Number(delayMs) || 0);
+      };
       window.__paimLayoutSelectDialogPath = (path) => {
         nextDialogSelection = typeof path === "string" ? path : null;
       };
@@ -1111,6 +1116,14 @@ function createPaimTauriMockScript() {
             const selection = nextDialogSelection;
             nextDialogSelection = null;
             return selection;
+          }
+          if (cmd === "create_attachment_preview") {
+            if (attachmentPreviewDelayMs > 0) {
+              await new Promise((resolve) =>
+                window.setTimeout(resolve, attachmentPreviewDelayMs),
+              );
+            }
+            return null;
           }
           if (cmd === "path_kind") {
             return "file";
@@ -2981,7 +2994,7 @@ async function verifySidebarChatRowsHaveNoDecorativeIcon(send) {
   return { value, failures };
 }
 
-// 연결 테스트는 초안을 검사만 하고, 앱 설정 초기화는 사용자 데이터와 서버 범위를 보존한다.
+// 운영 UI는 서버 선택을 숨기고, 앱 설정 초기화는 사용자 데이터와 서버 범위를 보존한다.
 async function verifySettingsConnectionAndResetSafety(send) {
   await send("Emulation.setDeviceMetricsOverride", {
     width: 1280,
@@ -3014,7 +3027,7 @@ async function verifySettingsConnectionAndResetSafety(send) {
   const beforeResult = await send("Runtime.evaluate", {
     returnByValue: true,
     expression: `(() => {
-      window.__paimSettingsSafetyMarker = 'before-connection-test';
+      window.__paimSettingsSafetyMarker = 'before-settings-reset';
       return {
         authRaw: localStorage.getItem(${JSON.stringify(AUTH_STORAGE_KEY)}),
         href: location.href,
@@ -3024,47 +3037,16 @@ async function verifySettingsConnectionAndResetSafety(send) {
     })()`,
   });
 
-  await send("Runtime.evaluate", {
-    expression: `(() => {
-      const input = document.querySelector('.settings-group[aria-label="서버 주소"] input');
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      setter.call(input, ${JSON.stringify(API_SERVER_B)});
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-    })()`,
-  });
-  await send("Runtime.evaluate", {
-    expression: `Array.from(document.querySelectorAll('.settings-server-actions button'))
-      .find((button) => button.textContent.trim() === '연결 테스트')?.click()`,
-  });
-
-  const connectionStartedAt = Date.now();
-  while (Date.now() - connectionStartedAt < 4000) {
-    const statusResult = await send("Runtime.evaluate", {
-      returnByValue: true,
-      expression: `document.querySelector('.settings-draft-status')?.textContent?.includes('새 주소에 연결할 수 있습니다') === true`,
-    });
-    if (statusResult.result.value) {
-      break;
-    }
-    await sleep(50);
-  }
-
   const afterConnectionResult = await send("Runtime.evaluate", {
     returnByValue: true,
     expression: `(() => {
-      const requests = window.__paimLayoutApiRequests || [];
       return {
-        applyLabel: Array.from(document.querySelectorAll('.settings-server-actions button'))
-          .find((button) => button.textContent.includes('적용'))?.textContent.trim() || '',
         authRaw: localStorage.getItem(${JSON.stringify(AUTH_STORAGE_KEY)}),
-        draftStatus: document.querySelector('.settings-draft-status')?.textContent.trim() || '',
-        draftValue: document.querySelector('.settings-group[aria-label="서버 주소"] input')?.value || '',
         href: location.href,
         marker: window.__paimSettingsSafetyMarker || '',
         projectRaw: localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}),
-        serverBHealthRequested: requests.some((request) =>
-          request.serverOrigin === ${JSON.stringify(API_SERVER_B)} && request.call === 'GET /health'
-        ),
+        serverAddressVisible: Boolean(document.querySelector('.settings-group[aria-label="서버 주소"]')),
+        serverUrlVisible: document.body.innerText.includes(${JSON.stringify(API_SERVER_A)}),
         settingsPage: Boolean(document.querySelector('.settings-page')),
         settingsRaw: localStorage.getItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}),
       };
@@ -3098,7 +3080,7 @@ async function verifySettingsConnectionAndResetSafety(send) {
     try {
       const markerResult = await send("Runtime.evaluate", {
         returnByValue: true,
-        expression: `window.__paimSettingsSafetyMarker !== 'before-connection-test' && Boolean(document.querySelector('.app-shell'))`,
+        expression: `window.__paimSettingsSafetyMarker !== 'before-settings-reset' && Boolean(document.querySelector('.app-shell'))`,
       });
       if (markerResult.result.value) {
         didReload = true;
@@ -3155,21 +3137,19 @@ async function verifySettingsConnectionAndResetSafety(send) {
   const failures = [];
 
   if (!value.afterConnection.settingsPage ||
-      value.afterConnection.marker !== "before-connection-test" ||
+      value.afterConnection.marker !== "before-settings-reset" ||
       value.afterConnection.href !== value.before.href ||
       value.afterConnection.settingsRaw !== value.before.settingsRaw ||
       value.afterConnection.projectRaw !== value.before.projectRaw ||
       value.afterConnection.authRaw !== value.before.authRaw ||
-      value.afterConnection.draftValue !== API_SERVER_B ||
-      value.afterConnection.applyLabel !== "서버 전환 적용" ||
-      !value.afterConnection.draftStatus.includes("새 주소에 연결할 수 있습니다") ||
-      !value.afterConnection.serverBHealthRequested) {
-    failures.push("connection test should only validate the draft URL without saving, applying, or reloading");
+      value.afterConnection.serverAddressVisible ||
+      value.afterConnection.serverUrlVisible) {
+    failures.push("settings should hide server selection and connection details");
   }
 
   if (!value.firstResetPress.resetLabels.includes("취소") ||
       !value.firstResetPress.resetLabels.includes("설정 초기화") ||
-      value.firstResetPress.marker !== "before-connection-test" ||
+      value.firstResetPress.marker !== "before-settings-reset" ||
       value.firstResetPress.settingsRaw !== value.before.settingsRaw ||
       value.firstResetPress.projectRaw !== value.before.projectRaw ||
       value.firstResetPress.authRaw !== value.before.authRaw) {
@@ -4004,7 +3984,7 @@ async function verifyAccountMenuContract(send) {
       value.profile.initials !== "SO" ||
       value.profile.details.length !== 2 ||
       !value.profile.details.some((detail) => detail.label === "가입일" && !detail.value.includes("확인할 수 없음")) ||
-      !value.profile.details.some((detail) => detail.label === "서버 상태" && detail.value.includes("서버")) ||
+      !value.profile.details.some((detail) => detail.label === "서비스 상태" && detail.value === "연결됨") ||
       value.profile.menuVisible) {
     failures.push("Profile should show the authenticated identity and focus its heading");
   }
@@ -11066,9 +11046,14 @@ async function verifyGithubTimelineState(send) {
     }))()`,
   });
 
+  await waitForSelector(
+    send,
+    '.project-panel-tabpanel:not([hidden]) .overview-github-repo-row button:not(:disabled)',
+  );
   await send("Runtime.evaluate", {
-    expression: `Array.from(document.querySelectorAll('.overview-github-repo-row button'))
-      .find((button) => button.textContent.includes('연결'))?.click()`,
+    expression: `Array.from(document.querySelectorAll(
+      '.project-panel-tabpanel:not([hidden]) .overview-github-repo-row button:not(:disabled)',
+    )).find((button) => button.textContent.trim() === '연결')?.click()`,
   });
   await waitForSelector(send, ".overview-github-connected-card");
   await send("Runtime.evaluate", {
@@ -11348,7 +11333,7 @@ async function verifyGithubSyncPollingState(send) {
             provider: 'github',
             repository_url: ${JSON.stringify(repositoryUrl)},
             branch: 'main',
-            run_id: isComplete ? 'run-server-b' : 'run-server-a',
+            run_id: isComplete ? null : 'run-server-a',
             sync_started_at: ${JSON.stringify(syncStartedAt)},
             commit_sha: isComplete ? ${JSON.stringify(indexedSha)} : null,
             indexed_files: isComplete ? 4 : null,
@@ -11569,7 +11554,7 @@ async function verifyGithubSyncPollingState(send) {
       value.completed.hasFailureCard ||
       value.completed.hasSyncProgress ||
       value.completed.storedStatus !== "indexed" ||
-      value.completed.storedRunId !== "run-server-b" ||
+      value.completed.storedRunId !== null ||
       value.completed.quietStatus !== "최신 상태") {
     failures.push("GitHub polling should accept the terminal state of the latest server run");
   }
@@ -12111,6 +12096,105 @@ async function verifyGithubRepositoryReadOwnership(send) {
       };
     })()`,
   });
+  const collapseBaselineResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => ({
+      headCalls: window.__paimGithubReadOwnership?.headCalls ?? 0,
+      metadataCalls: window.__paimGithubReadOwnership?.metadataCalls ?? 0,
+    }))()`,
+  });
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector('.project-panel-collapse-toggle')?.click()`,
+  });
+  await waitForSelector(send, ".project-panel-rail-toggle");
+  await send("Runtime.evaluate", {
+    expression: `(() => {
+      const previousNow = Date.now;
+      Date.now = () => previousNow() + ${6 * 60 * 1000};
+      window.dispatchEvent(new Event('focus'));
+    })()`,
+  });
+  await sleep(100);
+  const collapsedLifecycleResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => ({
+      hasGithubPanel: Boolean(document.querySelector('.github-panel-content')),
+      hasRailButton: Boolean(document.querySelector('.project-panel-rail-toggle')),
+      headCalls: window.__paimGithubReadOwnership?.headCalls ?? 0,
+      metadataCalls: window.__paimGithubReadOwnership?.metadataCalls ?? 0,
+    }))()`,
+  });
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector('.project-panel-rail-toggle')?.click()`,
+  });
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const activityRefreshed = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `window.__paimGithubReadOwnership?.metadataCalls >= ${
+        collapseBaselineResult.result.value.metadataCalls + 1
+      }`,
+    });
+    if (activityRefreshed.result.value) {
+      break;
+    }
+    await sleep(25);
+  }
+  await sleep(100);
+  const expandedLifecycleResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => ({
+      hasGithubPanel: Boolean(document.querySelector('.github-panel-content')),
+      hasRailButton: Boolean(document.querySelector('.project-panel-rail-toggle')),
+      headCalls: window.__paimGithubReadOwnership?.headCalls ?? 0,
+      metadataCalls: window.__paimGithubReadOwnership?.metadataCalls ?? 0,
+    }))()`,
+  });
+  await openSettingsFromAccountMenu(send);
+  await send("Runtime.evaluate", {
+    expression: `(() => {
+      const previousNow = Date.now;
+      Date.now = () => previousNow() + ${6 * 60 * 1000};
+      window.dispatchEvent(new Event('focus'));
+    })()`,
+  });
+  await sleep(100);
+  const hiddenViewResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => ({
+      hasProjectPanel: Boolean(document.querySelector('.project-panel')),
+      hasSettings: Boolean(document.querySelector('.settings-page')),
+      headCalls: window.__paimGithubReadOwnership?.headCalls ?? 0,
+      metadataCalls: window.__paimGithubReadOwnership?.metadataCalls ?? 0,
+    }))()`,
+  });
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector('.settings-page .settings-back-button')?.click()`,
+  });
+  await waitForSelector(send, ".portfolio-page");
+  await openProjectChatFromPortfolio(send);
+  await waitForSelector(send, ".github-panel-content");
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const activityRefreshed = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `window.__paimGithubReadOwnership?.metadataCalls >= ${
+        expandedLifecycleResult.result.value.metadataCalls + 1
+      }`,
+    });
+    if (activityRefreshed.result.value) {
+      break;
+    }
+    await sleep(25);
+  }
+  await sleep(100);
+  const restoredViewResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => ({
+      hasGithubPanel: Boolean(document.querySelector('.github-panel-content')),
+      hasSettings: Boolean(document.querySelector('.settings-page')),
+      headCalls: window.__paimGithubReadOwnership?.headCalls ?? 0,
+      metadataCalls: window.__paimGithubReadOwnership?.metadataCalls ?? 0,
+    }))()`,
+  });
 
   const staleListState = createProjectStorage(
     "project-github-read-list",
@@ -12357,10 +12441,724 @@ async function verifyGithubRepositoryReadOwnership(send) {
     })()`,
   });
 
+  const cancelledReadCheckedAt = now - (10 * 60 * 1000);
+  const cancelledReadState = createProjectStorage(
+    "project-github-read-cancelled",
+    "GitHub Read Cancelled",
+    [
+      {
+        id: "session-github-read-cancelled",
+        title: "GitHub Read Cancelled Chat",
+        createdAt: now,
+        messages: [],
+      },
+    ],
+    "session-github-read-cancelled",
+    [],
+    {
+      apiProjectId: 95,
+      setupCompletedAt: now,
+      githubConnected: true,
+      githubRepository: {
+        path: repositoryUrl,
+        name: "Ownership",
+        branch: "release/1.x",
+        isDirty: false,
+        remoteRepo: "smoke/Ownership",
+        issuePrStatus: "서버 연결됨",
+        visibility: "public",
+        authProvider: "public",
+        repoId: 808,
+        syncStatus: "indexed",
+        syncRunId: "run-read-cancelled",
+        commitSha: indexedSha,
+        remoteHeadSha: indexedSha,
+        remoteCheckedAt: cancelledReadCheckedAt,
+        remoteCheckAttemptedAt: cancelledReadCheckedAt,
+        remoteCheckStatus: "current",
+      },
+    },
+  );
+
+  await evaluateAndOpenProjectChat(
+    send,
+    `
+      const settings = JSON.parse(
+        localStorage.getItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}) || '{}',
+      );
+      settings.language = 'ko';
+      settings.serverUrl = ${JSON.stringify(API_SERVER_A)};
+      localStorage.setItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}, JSON.stringify(settings));
+      localStorage.setItem(${JSON.stringify(AUTH_SCENARIO_STORAGE_KEY)}, 'owner');
+      localStorage.setItem(${JSON.stringify(AUTH_STORAGE_KEY)}, ${JSON.stringify(JSON.stringify(AUTH_SESSION))});
+      localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)});
+      localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false');
+      localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(cancelledReadState)});
+
+      const cancelledReadBaseFetch = window.fetch.bind(window);
+      const cancelledRead = { activityCalls: 0, syncCalls: 0 };
+      window.__paimGithubCancelledRead = cancelledRead;
+      const response = (payload, status = 200) => Promise.resolve(new Response(
+        JSON.stringify(payload),
+        { status, headers: { 'Content-Type': 'application/json' } },
+      ));
+      window.fetch = async (input, init = {}) => {
+        const rawUrl = typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+        const url = new URL(rawUrl, location.origin);
+        const method = String(init?.method || 'GET').toUpperCase();
+
+        if (url.pathname === '/api/v1/projects/95/repositories' && method === 'GET') {
+          return response([{
+            id: 808,
+            provider: 'github',
+            repository_url: ${JSON.stringify(repositoryUrl)},
+            branch: 'release/1.x',
+            status: 'indexed',
+            run_id: 'run-read-cancelled',
+          }]);
+        }
+        if (url.pathname === '/api/v1/projects/95/repositories/808/status' && method === 'GET') {
+          return response({
+            repo_id: 808,
+            status: 'indexed',
+            provider: 'github',
+            repository_url: ${JSON.stringify(repositoryUrl)},
+            branch: 'release/1.x',
+            run_id: 'run-read-cancelled',
+            commit_sha: ${JSON.stringify(indexedSha)},
+            indexed_files: 4,
+            last_error: null,
+            sync_warning: null,
+          });
+        }
+        if (url.pathname === '/api/v1/projects/95/repositories/808/sync' && method === 'POST') {
+          cancelledRead.syncCalls += 1;
+          return response({ detail: 'sync rejected for smoke' }, 503);
+        }
+        if (url.href === ${JSON.stringify(repositoryUrl.replace("github.com", "api.github.com/repos"))}) {
+          cancelledRead.activityCalls += 1;
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+          return response({
+            default_branch: 'main',
+            full_name: 'smoke/Ownership',
+            html_url: ${JSON.stringify(repositoryUrl)},
+            name: 'Ownership',
+            owner: {
+              avatar_url: '',
+              html_url: 'https://github.com/smoke',
+              login: 'smoke',
+            },
+            private: false,
+          });
+        }
+        if (url.href.startsWith(${JSON.stringify(
+          repositoryUrl.replace("github.com", "api.github.com/repos") + "/commits",
+        )})) {
+          return response([{
+            html_url: ${JSON.stringify(`${repositoryUrl}/commit/${indexedSha}`)},
+            sha: ${JSON.stringify(indexedSha)},
+            commit: {
+              author: { date: ${JSON.stringify(new Date(now - 60_000).toISOString())} },
+              message: 'cancelled activity',
+            },
+          }]);
+        }
+        if (url.href.startsWith(${JSON.stringify(
+          repositoryUrl.replace("github.com", "api.github.com/repos") + "/issues",
+        )}) || url.href.startsWith(${JSON.stringify(
+          repositoryUrl.replace("github.com", "api.github.com/repos") + "/pulls",
+        )})) {
+          return response([]);
+        }
+
+        return cancelledReadBaseFetch(input, init);
+      };
+    `,
+  );
+  await send("Runtime.evaluate", {
+    expression: `Array.from(document.querySelectorAll('.project-panel-menu button'))
+      .find((button) => button.textContent.includes('GitHub'))?.click()`,
+  });
+  await waitForSelector(send, ".overview-github-connected-card");
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const activityChecking = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `(() => {
+        const stored = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
+        return window.__paimGithubCancelledRead?.activityCalls === 1 &&
+          stored.projects?.[0]?.githubRepository?.remoteCheckStatus === 'checking';
+      })()`,
+    });
+    if (activityChecking.result.value) {
+      break;
+    }
+    await sleep(25);
+  }
+  await waitForSelector(
+    send,
+    '.project-panel-tabpanel:not([hidden]) button[aria-label="GitHub 동기화"]:not(:disabled)',
+  );
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector(
+      '.project-panel-tabpanel:not([hidden]) button[aria-label="GitHub 동기화"]:not(:disabled)',
+    )?.click()`,
+  });
+  await sleep(3150);
+  const cancelledReadResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const stored = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
+      const repository = stored.projects?.[0]?.githubRepository || {};
+      return {
+        activityCalls: window.__paimGithubCancelledRead?.activityCalls ?? 0,
+        quietStatus: document.querySelector('.overview-github-sync-quiet')?.textContent.trim() || "",
+        remoteCheckAttemptedAt: repository.remoteCheckAttemptedAt ?? null,
+        remoteCheckError: repository.remoteCheckError ?? null,
+        remoteCheckedAt: repository.remoteCheckedAt ?? null,
+        remoteCheckStatus: repository.remoteCheckStatus ?? null,
+        syncCalls: window.__paimGithubCancelledRead?.syncCalls ?? 0,
+        syncStatus: repository.syncStatus ?? null,
+      };
+    })()`,
+  });
+
+  const backgroundSyncState = createProjectStorage(
+    "project-github-background-sync",
+    "GitHub Background Sync",
+    [
+      {
+        id: "session-github-background-sync",
+        title: "GitHub Background Sync Chat",
+        createdAt: now,
+        messages: [],
+      },
+    ],
+    "session-github-background-sync",
+    [],
+    {
+      apiProjectId: 96,
+      setupCompletedAt: now,
+      githubConnected: true,
+      githubRepository: {
+        path: repositoryUrl,
+        name: "Ownership",
+        branch: "release/1.x",
+        isDirty: false,
+        remoteRepo: "smoke/Ownership",
+        issuePrStatus: "서버 연결됨",
+        visibility: "public",
+        authProvider: "public",
+        repoId: 909,
+        syncStatus: "syncing",
+        syncRunId: "run-background-sync",
+        syncStartedAt: now,
+        commitSha: indexedSha,
+        remoteHeadSha: staleSha,
+        remoteCheckedAt: now,
+        remoteCheckAttemptedAt: now,
+        remoteCheckStatus: "needs_sync",
+      },
+    },
+  );
+
+  await evaluateAndOpenProjectChat(
+    send,
+    `
+      const settings = JSON.parse(
+        localStorage.getItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}) || '{}',
+      );
+      settings.language = 'ko';
+      settings.serverUrl = ${JSON.stringify(API_SERVER_A)};
+      localStorage.setItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}, JSON.stringify(settings));
+      localStorage.setItem(${JSON.stringify(AUTH_SCENARIO_STORAGE_KEY)}, 'owner');
+      localStorage.setItem(${JSON.stringify(AUTH_STORAGE_KEY)}, ${JSON.stringify(JSON.stringify(AUTH_SESSION))});
+      localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)});
+      localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false');
+      localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(backgroundSyncState)});
+
+      const backgroundSyncBaseFetch = window.fetch.bind(window);
+      const backgroundSync = {
+        activityCalls: 0,
+        metadataCalls: 0,
+        statusCalls: 0,
+        syncCalls: 0,
+      };
+      window.__paimGithubBackgroundSync = backgroundSync;
+      const response = (payload, status = 200) => Promise.resolve(new Response(
+        JSON.stringify(payload),
+        { status, headers: { 'Content-Type': 'application/json' } },
+      ));
+      window.fetch = async (input, init = {}) => {
+        const rawUrl = typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+        const url = new URL(rawUrl, location.origin);
+        const method = String(init?.method || 'GET').toUpperCase();
+
+        if (url.pathname === '/api/v1/projects/96/repositories' && method === 'GET') {
+          return response([{
+            id: 909,
+            provider: 'github',
+            repository_url: ${JSON.stringify(repositoryUrl)},
+            branch: 'release/1.x',
+            status: 'syncing',
+            run_id: 'run-background-sync',
+            sync_started_at: ${JSON.stringify(new Date(now).toISOString())},
+          }]);
+        }
+        if (url.pathname === '/api/v1/projects/96/repositories/909/status' && method === 'GET') {
+          backgroundSync.statusCalls += 1;
+          const isComplete = backgroundSync.statusCalls >= 2;
+          return response({
+            repo_id: 909,
+            status: isComplete ? 'indexed' : 'syncing',
+            provider: 'github',
+            repository_url: ${JSON.stringify(repositoryUrl)},
+            branch: 'release/1.x',
+            run_id: isComplete ? null : 'run-background-sync',
+            sync_started_at: ${JSON.stringify(new Date(now).toISOString())},
+            commit_sha: isComplete ? ${JSON.stringify(staleSha)} : ${JSON.stringify(indexedSha)},
+            indexed_files: 4,
+            last_error: null,
+            sync_warning: null,
+          });
+        }
+        if (url.pathname === '/api/v1/projects/96/repositories/909/sync' && method === 'POST') {
+          backgroundSync.syncCalls += 1;
+          return response({
+            repo_id: 909,
+            status: 'syncing',
+            branch: 'release/1.x',
+            run_id: 'run-background-sync',
+          });
+        }
+        if (url.href === ${JSON.stringify(repositoryUrl.replace("github.com", "api.github.com/repos"))}) {
+          backgroundSync.metadataCalls += 1;
+          return response({
+            default_branch: 'main',
+            full_name: 'smoke/Ownership',
+            html_url: ${JSON.stringify(repositoryUrl)},
+            name: 'Ownership',
+            owner: {
+              avatar_url: '',
+              html_url: 'https://github.com/smoke',
+              login: 'smoke',
+            },
+            private: false,
+          });
+        }
+        if (url.href.startsWith(${JSON.stringify(
+          repositoryUrl.replace("github.com", "api.github.com/repos") + "/commits",
+        )})) {
+          backgroundSync.activityCalls += 1;
+          return response([{
+            html_url: ${JSON.stringify(`${repositoryUrl}/commit/${staleSha}`)},
+            sha: ${JSON.stringify(staleSha)},
+            commit: {
+              author: { date: ${JSON.stringify(new Date(now - 60_000).toISOString())} },
+              message: 'background sync completed',
+            },
+          }]);
+        }
+        if (url.href.startsWith(${JSON.stringify(
+          repositoryUrl.replace("github.com", "api.github.com/repos") + "/issues",
+        )}) || url.href.startsWith(${JSON.stringify(
+          repositoryUrl.replace("github.com", "api.github.com/repos") + "/pulls",
+        )})) {
+          return response([]);
+        }
+
+        return backgroundSyncBaseFetch(input, init);
+      };
+    `,
+  );
+  await send("Runtime.evaluate", {
+    expression: `Array.from(document.querySelectorAll('.project-panel-menu button'))
+      .find((button) => button.textContent.includes('GitHub'))?.click()`,
+  });
+  await waitForSelector(send, '.overview-github-sync-summary[data-status="needs_sync"]');
+  const backgroundSyncBeforeClickResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const button = document.querySelector(
+        '.overview-github-sync-summary[data-status="needs_sync"] button',
+      );
+      return {
+        buttonDisabled: Boolean(button?.disabled),
+        buttonText: button?.textContent.trim() || "",
+        headerDisabled: Boolean(document.querySelector(
+          '.project-panel-tabpanel:not([hidden]) .overview-github-sync-button',
+        )?.disabled),
+      };
+    })()`,
+  });
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector(
+      '.overview-github-sync-summary[data-status="needs_sync"] button',
+    )?.click()`,
+  });
+  await sleep(100);
+  const backgroundSyncAfterClickResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `window.__paimGithubBackgroundSync?.syncCalls ?? 0`,
+  });
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    const completed = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `(() => {
+        const stored = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
+        const repository = stored.projects?.[0]?.githubRepository || {};
+        return repository.syncStatus === 'indexed' &&
+          repository.remoteCheckStatus === 'current' &&
+          (document.querySelector('.overview-github-sync-quiet')?.textContent || '').trim() ===
+            '최신 상태';
+      })()`,
+    });
+    if (completed.result.value) {
+      break;
+    }
+    await sleep(50);
+  }
+  const backgroundSyncCompletedResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const stored = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
+      const repository = stored.projects?.[0]?.githubRepository || {};
+      return {
+        activityCalls: window.__paimGithubBackgroundSync?.activityCalls ?? 0,
+        commitSha: repository.commitSha || null,
+        metadataCalls: window.__paimGithubBackgroundSync?.metadataCalls ?? 0,
+        quietStatus: document.querySelector('.overview-github-sync-quiet')?.textContent.trim() || "",
+        remoteCheckStatus: repository.remoteCheckStatus || null,
+        remoteHeadSha: repository.remoteHeadSha || null,
+        statusCalls: window.__paimGithubBackgroundSync?.statusCalls ?? 0,
+        syncRunId: repository.syncRunId || null,
+        syncStatus: repository.syncStatus || null,
+      };
+    })()`,
+  });
+
+  const pollRaceRepositoryAUrl = "https://github.com/smoke/PollA";
+  const pollRaceRepositoryBUrl = "https://github.com/smoke/PollB";
+  const pollRaceState = createProjectStorage(
+    "project-github-poll-race",
+    "GitHub Poll Race",
+    [
+      {
+        id: "session-github-poll-race",
+        title: "GitHub Poll Race Chat",
+        createdAt: now,
+        messages: [],
+      },
+    ],
+    "session-github-poll-race",
+    [],
+    {
+      apiProjectId: 97,
+      setupCompletedAt: now,
+      githubConnected: true,
+      githubRepository: {
+        path: pollRaceRepositoryAUrl,
+        name: "PollA",
+        branch: "main",
+        isDirty: false,
+        remoteRepo: "smoke/PollA",
+        issuePrStatus: "서버 연결됨",
+        visibility: "public",
+        authProvider: "public",
+        repoId: 1001,
+        syncStatus: "syncing",
+        syncRunId: "run-poll-a",
+        syncStartedAt: now,
+        commitSha: indexedSha,
+        remoteHeadSha: indexedSha,
+        remoteCheckedAt: now,
+        remoteCheckAttemptedAt: now,
+        remoteCheckStatus: "current",
+      },
+    },
+  );
+
+  await evaluateAndOpenProjectChat(
+    send,
+    `
+      const settings = JSON.parse(
+        localStorage.getItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}) || '{}',
+      );
+      settings.language = 'ko';
+      settings.serverUrl = ${JSON.stringify(API_SERVER_A)};
+      localStorage.setItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}, JSON.stringify(settings));
+      localStorage.setItem(${JSON.stringify(AUTH_SCENARIO_STORAGE_KEY)}, 'owner');
+      localStorage.setItem(${JSON.stringify(AUTH_STORAGE_KEY)}, ${JSON.stringify(JSON.stringify(AUTH_SESSION))});
+      localStorage.setItem(${JSON.stringify(GITHUB_CLIENT_ID_STORAGE_KEY)}, 'smoke-client');
+      localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)});
+      localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false');
+      localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(pollRaceState)});
+
+      const pollRaceBaseFetch = window.fetch.bind(window);
+      const pollRace = {
+        deleteCalls: 0,
+        pollAborted: 0,
+        pollResolved: 0,
+        statusCalls: 0,
+      };
+      window.__paimGithubPollRace = pollRace;
+      window.open = () => null;
+      const response = (payload, status = 200) => Promise.resolve(new Response(
+        status === 204 ? null : JSON.stringify(payload),
+        { status, headers: { 'Content-Type': 'application/json' } },
+      ));
+      const repositoryB = {
+        default_branch: 'main',
+        full_name: 'smoke/PollB',
+        html_url: ${JSON.stringify(pollRaceRepositoryBUrl)},
+        name: 'PollB',
+        owner: {
+          avatar_url: '',
+          html_url: 'https://github.com/smoke',
+          login: 'smoke',
+        },
+        private: false,
+      };
+      window.fetch = async (input, init = {}) => {
+        const rawUrl = typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+        const url = new URL(rawUrl, location.origin);
+        const method = String(init?.method || 'GET').toUpperCase();
+
+        if (url.pathname === '/api/v1/projects/97/repositories' && method === 'GET') {
+          return response([{
+            id: 1001,
+            provider: 'github',
+            repository_url: ${JSON.stringify(pollRaceRepositoryAUrl)},
+            branch: 'main',
+            status: 'syncing',
+            run_id: 'run-poll-a',
+          }]);
+        }
+        if (url.pathname === '/api/v1/projects/97/repositories/1001/status' && method === 'GET') {
+          pollRace.statusCalls += 1;
+          if (pollRace.statusCalls === 1) {
+            return response({
+              repo_id: 1001,
+              status: 'syncing',
+              provider: 'github',
+              repository_url: ${JSON.stringify(pollRaceRepositoryAUrl)},
+              branch: 'main',
+              run_id: 'run-poll-a',
+              commit_sha: ${JSON.stringify(indexedSha)},
+              indexed_files: 4,
+              last_error: null,
+              sync_warning: null,
+            });
+          }
+
+          return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+              pollRace.pollResolved += 1;
+              resolve(new Response(JSON.stringify({
+                repo_id: 1001,
+                status: 'indexed',
+                provider: 'github',
+                repository_url: ${JSON.stringify(pollRaceRepositoryAUrl)},
+                branch: 'main',
+                run_id: 'run-poll-a',
+                commit_sha: ${JSON.stringify(staleSha)},
+                indexed_files: 8,
+                last_error: null,
+                sync_warning: null,
+              }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+            }, 1200);
+            const abort = () => {
+              clearTimeout(timer);
+              pollRace.pollAborted += 1;
+              reject(new DOMException('poll cancelled', 'AbortError'));
+            };
+            if (init.signal?.aborted) {
+              abort();
+              return;
+            }
+            init.signal?.addEventListener('abort', abort, { once: true });
+          });
+        }
+        if (url.pathname === '/api/v1/projects/97/repositories/1001' && method === 'DELETE') {
+          pollRace.deleteCalls += 1;
+          if (pollRace.deleteCalls === 1) {
+            return response({ detail: 'temporary delete failure' }, 503);
+          }
+          return response(null, 204);
+        }
+        if (url.href.includes('github.com/login/device/code')) {
+          return response({
+            device_code: 'poll-race-device',
+            user_code: 'POLL-123',
+            verification_uri: 'https://github.com/login/device',
+            expires_in: 900,
+            interval: 5,
+          });
+        }
+        if (url.href.includes('github.com/login/oauth/access_token')) {
+          return response({
+            access_token: 'poll-race-token',
+            token_type: 'bearer',
+            scope: 'repo read:user',
+          });
+        }
+        if (url.href.includes('api.github.com/user/installations')) {
+          return response({ installations: [] });
+        }
+        if (url.href.includes('api.github.com/user/repos')) {
+          return response([repositoryB]);
+        }
+        if (url.href === 'https://api.github.com/user') {
+          return response({
+            avatar_url: '',
+            html_url: 'https://github.com/smoke',
+            login: 'smoke',
+            name: 'Smoke User',
+          });
+        }
+        if (url.href === ${JSON.stringify(pollRaceRepositoryBUrl.replace(
+          "github.com",
+          "api.github.com/repos",
+        ))}) {
+          return response(repositoryB);
+        }
+        if (url.href.startsWith(${JSON.stringify(
+          pollRaceRepositoryBUrl.replace("github.com", "api.github.com/repos") + "/commits",
+        )})) {
+          return response([{
+            html_url: ${JSON.stringify(`${pollRaceRepositoryBUrl}/commit/${staleSha}`)},
+            sha: ${JSON.stringify(staleSha)},
+            commit: {
+              author: { date: ${JSON.stringify(new Date(now - 30_000).toISOString())} },
+              message: 'Poll B activity',
+            },
+          }]);
+        }
+        if (url.href.startsWith(${JSON.stringify(
+          pollRaceRepositoryBUrl.replace("github.com", "api.github.com/repos") + "/issues",
+        )}) || url.href.startsWith(${JSON.stringify(
+          pollRaceRepositoryBUrl.replace("github.com", "api.github.com/repos") + "/pulls",
+        )})) {
+          return response([]);
+        }
+
+        return pollRaceBaseFetch(input, init);
+      };
+    `,
+  );
+  await send("Runtime.evaluate", {
+    expression: `Array.from(document.querySelectorAll('.project-panel-menu button'))
+      .find((button) => button.textContent.includes('GitHub'))?.click()`,
+  });
+  await waitForSelector(send, ".overview-github-sync-progress");
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const pollStarted = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `window.__paimGithubPollRace?.statusCalls >= 2`,
+    });
+    if (pollStarted.result.value) {
+      break;
+    }
+    await sleep(50);
+  }
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await send("Runtime.evaluate", {
+      expression: `document.querySelector(
+        '.project-panel-tabpanel:not([hidden]) .overview-github-more-menu',
+      )?.click()`,
+    });
+    await waitForSelector(send, '[role="menuitem"]');
+    await send("Runtime.evaluate", {
+      expression: `Array.from(document.querySelectorAll('[role="menuitem"]'))
+        .find((item) => item.textContent.includes('연결 해제'))?.click()`,
+    });
+    await sleep(80);
+  }
+  await waitForSelector(send, ".overview-github-connected-card");
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const resumedPollStarted = await send("Runtime.evaluate", {
+      returnByValue: true,
+      expression: `window.__paimGithubPollRace?.statusCalls >= 3`,
+    });
+    if (resumedPollStarted.result.value) {
+      break;
+    }
+    await sleep(50);
+  }
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector(
+      '.project-panel-tabpanel:not([hidden]) .overview-github-more-menu',
+    )?.click()`,
+  });
+  await waitForSelector(send, '[role="menuitem"]');
+  await send("Runtime.evaluate", {
+    expression: `Array.from(document.querySelectorAll('[role="menuitem"]'))
+      .find((item) => item.textContent.includes('연결 해제'))?.click()`,
+  });
+  await waitForSelector(send, ".overview-github-login-card");
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector('.overview-github-primary-button')?.click()`,
+  });
+  await waitForSelector(send, ".overview-github-auth-card");
+  await send("Runtime.evaluate", {
+    expression: `Array.from(document.querySelectorAll('.overview-github-auth-card button'))
+      .find((button) => button.textContent.includes('로그인 완료했어요'))?.click()`,
+  });
+  await waitForSelector(send, ".overview-github-repos-card");
+  await send("Runtime.evaluate", {
+    expression: `Array.from(document.querySelectorAll('.overview-github-repo-row'))
+      .find((row) => row.textContent.includes('smoke/PollB'))?.querySelector('button')?.click()`,
+  });
+  await waitForSelector(send, ".overview-github-connected-card");
+  await sleep(1400);
+  const pollRaceResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const stored = JSON.parse(localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}');
+      const project = stored.projects?.[0] || {};
+      const repository = project.githubRepository || {};
+      return {
+        deleteCalls: window.__paimGithubPollRace?.deleteCalls ?? 0,
+        eventTitle: project.githubEvents?.[0]?.title || "",
+        pollAborted: window.__paimGithubPollRace?.pollAborted ?? 0,
+        pollResolved: window.__paimGithubPollRace?.pollResolved ?? 0,
+        remoteRepo: repository.remoteRepo || "",
+        repositoryPath: repository.path || "",
+        statusCalls: window.__paimGithubPollRace?.statusCalls ?? 0,
+        syncStatus: repository.syncStatus || null,
+      };
+    })()`,
+  });
+
   const value = {
     activity: activityResult.result.value,
+    activityLifecycle: {
+      baseline: collapseBaselineResult.result.value,
+      collapsed: collapsedLifecycleResult.result.value,
+      expanded: expandedLifecycleResult.result.value,
+      hiddenView: hiddenViewResult.result.value,
+      restoredView: restoredViewResult.result.value,
+    },
+    backgroundSync: {
+      afterClickSyncCalls: backgroundSyncAfterClickResult.result.value,
+      beforeClick: backgroundSyncBeforeClickResult.result.value,
+      completed: backgroundSyncCompletedResult.result.value,
+    },
+    cancelledRead: cancelledReadResult.result.value,
     initialMissing: initialMissingResult.result.value,
     list: listResult.result.value,
+    pollRace: pollRaceResult.result.value,
   };
   const failures = [];
 
@@ -12374,6 +13172,30 @@ async function verifyGithubRepositoryReadOwnership(send) {
       value.activity.eventTitle !== "new activity") {
     failures.push(
       "GitHub reads should keep the connected branch, reject stale activity, persist freshness, and use one lightweight HEAD request on stale focus",
+    );
+  }
+
+  if (!value.activityLifecycle.collapsed.hasRailButton ||
+      value.activityLifecycle.collapsed.headCalls !== value.activityLifecycle.baseline.headCalls ||
+      value.activityLifecycle.collapsed.metadataCalls !== value.activityLifecycle.baseline.metadataCalls ||
+      value.activityLifecycle.expanded.hasRailButton ||
+      !value.activityLifecycle.expanded.hasGithubPanel ||
+      value.activityLifecycle.expanded.headCalls !== value.activityLifecycle.baseline.headCalls ||
+      value.activityLifecycle.expanded.metadataCalls !==
+        value.activityLifecycle.baseline.metadataCalls + 1 ||
+      !value.activityLifecycle.hiddenView.hasSettings ||
+      value.activityLifecycle.hiddenView.hasProjectPanel ||
+      value.activityLifecycle.hiddenView.headCalls !== value.activityLifecycle.expanded.headCalls ||
+      value.activityLifecycle.hiddenView.metadataCalls !==
+        value.activityLifecycle.expanded.metadataCalls ||
+      value.activityLifecycle.restoredView.hasSettings ||
+      !value.activityLifecycle.restoredView.hasGithubPanel ||
+      value.activityLifecycle.restoredView.headCalls !==
+        value.activityLifecycle.expanded.headCalls ||
+      value.activityLifecycle.restoredView.metadataCalls !==
+        value.activityLifecycle.expanded.metadataCalls + 1) {
+    failures.push(
+      `a hidden GitHub panel should remove focus refreshes and re-run stale activity after collapse or main-view restoration without changing tabs: ${JSON.stringify(value.activityLifecycle)}`,
     );
   }
 
@@ -12395,6 +13217,54 @@ async function verifyGithubRepositoryReadOwnership(send) {
     );
   }
 
+  if (value.cancelledRead.activityCalls !== 1 ||
+      value.cancelledRead.syncCalls !== 1 ||
+      value.cancelledRead.syncStatus !== "failed" ||
+      value.cancelledRead.remoteCheckStatus !== "unknown" ||
+      value.cancelledRead.remoteCheckError !== null ||
+      value.cancelledRead.remoteCheckedAt !== cancelledReadCheckedAt ||
+      value.cancelledRead.remoteCheckAttemptedAt !== cancelledReadCheckedAt ||
+      value.cancelledRead.quietStatus === "최신 상태 확인 중") {
+    failures.push(
+      `starting a GitHub mutation should cancel an in-flight activity read without leaving remote freshness checking: ${JSON.stringify(value.cancelledRead)}`,
+    );
+  }
+
+  if (!value.backgroundSync.beforeClick.buttonDisabled ||
+      value.backgroundSync.beforeClick.buttonText !== "동기화 중" ||
+      value.backgroundSync.afterClickSyncCalls !== 0) {
+    failures.push(
+      `the needs-sync summary CTA should stay disabled while the server background sync is running: ${JSON.stringify(value.backgroundSync)}`,
+    );
+  }
+
+  if (value.backgroundSync.completed.statusCalls < 2 ||
+      value.backgroundSync.completed.metadataCalls !== 1 ||
+      value.backgroundSync.completed.activityCalls !== 1 ||
+      value.backgroundSync.completed.syncStatus !== "indexed" ||
+      value.backgroundSync.completed.syncRunId !== null ||
+      value.backgroundSync.completed.commitSha !== staleSha ||
+      value.backgroundSync.completed.remoteHeadSha !== staleSha ||
+      value.backgroundSync.completed.remoteCheckStatus !== "current" ||
+      value.backgroundSync.completed.quietStatus !== "최신 상태") {
+    failures.push(
+      `an indexed sync should keep its forced activity refresh through the commit dependency change and settle current: ${JSON.stringify(value.backgroundSync.completed)}`,
+    );
+  }
+
+  if (value.pollRace.statusCalls < 3 ||
+      value.pollRace.deleteCalls !== 2 ||
+      value.pollRace.pollAborted !== 2 ||
+      value.pollRace.pollResolved !== 0 ||
+      value.pollRace.repositoryPath !== pollRaceRepositoryBUrl ||
+      value.pollRace.remoteRepo !== "smoke/PollB" ||
+      value.pollRace.eventTitle !== "Poll B activity" ||
+      value.pollRace.syncStatus !== null) {
+    failures.push(
+      `disconnecting repository A should abort its active poll so a later repository B remains authoritative: ${JSON.stringify(value.pollRace)}`,
+    );
+  }
+
   debugLayout("github repository read ownership", value);
   return { value, failures };
 }
@@ -12404,7 +13274,6 @@ async function verifyGithubRemoteFreshnessStates(send) {
   const now = Date.now();
   const repositoryUrl = "https://github.com/smoke/Freshness";
   const indexedSha = "cccccccccccccccccccccccccccccccccccccccc";
-  const staleCheckedAt = now - (10 * 60 * 1000);
   const stalePublicState = createProjectStorage(
     "project-github-freshness-error",
     "GitHub Freshness Error",
@@ -12460,6 +13329,7 @@ async function verifyGithubRemoteFreshnessStates(send) {
       const freshnessBaseFetch = window.fetch.bind(window);
       const freshnessBaseSetInterval = window.setInterval.bind(window);
       const freshness = {
+        failureCompletedAt: null,
         fixedHeadIntervalRegistrations: 0,
         headCalls: 0,
         metadataCalls: 0,
@@ -12519,6 +13389,8 @@ async function verifyGithubRemoteFreshnessStates(send) {
           freshness.headCalls += 1;
           freshness.requestedBranches.push(url.searchParams.get('sha'));
           if (freshness.headCalls === 1) {
+            await new Promise((resolve) => setTimeout(resolve, 180));
+            freshness.failureCompletedAt = Date.now();
             return response({ message: 'temporary upstream failure' }, 503);
           }
           return response([{
@@ -12555,6 +13427,7 @@ async function verifyGithubRemoteFreshnessStates(send) {
       const repository = stored.projects?.[0]?.githubRepository || {};
       return {
         cardText: document.querySelector('.overview-github-sync-summary[data-status="error"]')?.textContent.trim() || "",
+        failureCompletedAt: window.__paimGithubFreshness?.failureCompletedAt ?? null,
         headCalls: window.__paimGithubFreshness?.headCalls ?? 0,
         quietStatus: document.querySelector('.overview-github-sync-quiet')?.textContent.trim() || "",
         remoteCheckAttemptedAt: repository.remoteCheckAttemptedAt || null,
@@ -12617,7 +13490,7 @@ async function verifyGithubRemoteFreshnessStates(send) {
     })()`,
   });
 
-  const staleAppState = createProjectStorage(
+  const recentAppState = createProjectStorage(
     "project-github-freshness-expired",
     "GitHub Freshness Expired",
     [
@@ -12648,7 +13521,8 @@ async function verifyGithubRemoteFreshnessStates(send) {
         syncRunId: "run-freshness-expired",
         commitSha: indexedSha,
         remoteHeadSha: indexedSha,
-        remoteCheckedAt: staleCheckedAt,
+        remoteCheckedAt: now,
+        remoteCheckAttemptedAt: now,
         remoteCheckStatus: "current",
       },
     },
@@ -12667,7 +13541,7 @@ async function verifyGithubRemoteFreshnessStates(send) {
       localStorage.setItem(${JSON.stringify(AUTH_STORAGE_KEY)}, ${JSON.stringify(JSON.stringify(AUTH_SESSION))});
       localStorage.removeItem(${JSON.stringify(LEGACY_STORAGE_KEY)});
       localStorage.setItem(${JSON.stringify(PROJECT_PANEL_COLLAPSED_STORAGE_KEY)}, 'false');
-      localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(staleAppState)});
+      localStorage.setItem(${JSON.stringify(PROJECT_STORAGE_KEY)}, ${JSON.stringify(recentAppState)});
 
       const expiredBaseFetch = window.fetch.bind(window);
       const response = (payload, status = 200) => Promise.resolve(new Response(
@@ -12770,13 +13644,14 @@ async function verifyGithubRemoteFreshnessStates(send) {
         commitSha: null,
         remoteHeadSha: indexedSha,
         remoteCheckedAt: now,
-        remoteCheckAttemptedAt: now,
-        remoteCheckStatus: "unknown",
+        remoteCheckAttemptedAt: now + 60_000,
+        remoteCheckStatus: "checking",
+        remoteCheckError: "unavailable",
       },
     },
   );
 
-  await evaluateAndNavigateToSelector(
+  await evaluateAndOpenProjectChat(
     send,
     `
       const settings = JSON.parse(
@@ -12873,8 +13748,6 @@ async function verifyGithubRemoteFreshnessStates(send) {
         return unknownBaseFetch(input, init);
       };
     `,
-    APP_URL,
-    ".project-panel-menu",
   );
   await send("Runtime.evaluate", {
     expression: `Array.from(document.querySelectorAll('.project-panel-menu button'))
@@ -12898,6 +13771,7 @@ async function verifyGithubRemoteFreshnessStates(send) {
         headCalls: window.__paimGithubUnknownAttempt?.headCalls ?? 0,
         metadataCalls: window.__paimGithubUnknownAttempt?.metadataCalls ?? 0,
         remoteCheckAttemptedAt: repository.remoteCheckAttemptedAt || null,
+        remoteCheckError: repository.remoteCheckError || null,
         remoteCheckStatus: repository.remoteCheckStatus || null,
       };
     })()`,
@@ -12944,6 +13818,8 @@ async function verifyGithubRemoteFreshnessStates(send) {
   if (value.failure.remoteCheckStatus !== "error" ||
       value.failure.remoteCheckError !== "unavailable" ||
       value.failure.headCalls !== 1 ||
+      !value.failure.failureCompletedAt ||
+      value.failure.remoteCheckAttemptedAt < value.failure.failureCompletedAt ||
       value.failure.remoteCheckAttemptedAt <= now ||
       !value.failure.cardText.includes("다시 확인") ||
       value.failure.quietStatus === "최신 상태") {
@@ -12984,7 +13860,7 @@ async function verifyGithubRemoteFreshnessStates(send) {
       value.expired.quietStatus === "최신 상태" ||
       !value.expired.syncDisabled) {
     failures.push(
-      `an expired GitHub App session should preserve the indexed repository and require reauthentication: ${JSON.stringify(value.expired)}`,
+      `a restarted GitHub App connection without its ephemeral session should ignore a recent success cache, preserve the indexed repository, and require reauthentication: ${JSON.stringify(value.expired)}`,
     );
   }
 
@@ -12992,9 +13868,10 @@ async function verifyGithubRemoteFreshnessStates(send) {
       value.unknownAutomatic.headCalls !== 0 ||
       value.unknownAutomatic.metadataCalls !== 0 ||
       value.unknownAutomatic.remoteCheckAttemptedAt !== now ||
+      value.unknownAutomatic.remoteCheckError ||
       value.unknownAutomatic.remoteCheckStatus !== "unknown") {
     failures.push(
-      "a fresh attempt should suppress automatic activity and HEAD reads even when indexed SHA is absent",
+      "a persisted checking state should hydrate as a fresh unknown attempt without stale errors or automatic reads",
     );
   }
 
@@ -14437,6 +15314,688 @@ async function verifyProjectScopedDetailAndChatDrafts(send) {
   return { value, failures };
 }
 
+// local-only 대화와 초안은 reload를 견디고, 첨부-only 변경과 저장 실패를 사용자에게 드러내야 한다.
+async function verifyLocalChatStorageSafety(send) {
+  const tauriMockScript = await installPaimTauriMock(send);
+  const failures = [];
+  const value = {};
+  const chatDraftKey = "project-smoke\u0000session-smoke";
+  const detailDraftKey = "project-smoke\u0000__project_detail__";
+
+  await send("Emulation.setDeviceMetricsOverride", {
+    width: 960,
+    height: 680,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+
+  async function seedChat(
+    language = "ko",
+    projectState = createDefaultSmokeProjectStorage(),
+  ) {
+    await setAuthScenario(send, "owner");
+    await setSmokeServerUrl(send, API_SERVER_A);
+    await evaluateAndNavigateToSelector(
+      send,
+      `(() => {
+        let settings = {};
+        try {
+          settings = JSON.parse(
+            localStorage.getItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}) || '{}',
+          );
+        } catch {
+          settings = {};
+        }
+        settings.language = ${JSON.stringify(language)};
+        settings.serverUrl = ${JSON.stringify(API_SERVER_A)};
+        localStorage.setItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}, JSON.stringify(settings));
+        localStorage.removeItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)});
+        localStorage.setItem(
+          ${JSON.stringify(PROJECT_STORAGE_KEY)},
+          ${JSON.stringify(projectState)},
+        );
+      })()`,
+      APP_URL,
+      ".portfolio-page",
+    );
+    await openProjectChatFromPortfolio(send);
+    await waitForSelector(send, ".prompt textarea:not(:disabled)");
+  }
+
+  async function setTextareaValue(selector, nextValue) {
+    await send("Runtime.evaluate", {
+      expression: `(() => {
+        const input = document.querySelector(${JSON.stringify(selector)});
+        const setter = Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          'value',
+        )?.set;
+        setter?.call(input, ${JSON.stringify(nextValue)});
+        input?.dispatchEvent(new Event('input', { bubbles: true }));
+      })()`,
+    });
+    await sleep(120);
+  }
+
+  async function blockStorageKey(storageKey) {
+    await send("Runtime.evaluate", {
+      expression: `(() => {
+        window.__paimStorageOriginalSetItem ||= Storage.prototype.setItem;
+        window.__paimStorageBlockedKey = ${JSON.stringify(storageKey)};
+        window.__paimStorageFailureCount = 0;
+        Storage.prototype.setItem = function(key, storedValue) {
+          if (String(key) === window.__paimStorageBlockedKey) {
+            window.__paimStorageFailureCount += 1;
+            throw new DOMException('Smoke quota exceeded', 'QuotaExceededError');
+          }
+          return window.__paimStorageOriginalSetItem.call(this, key, storedValue);
+        };
+      })()`,
+    });
+  }
+
+  async function restoreStorageWrites() {
+    await send("Runtime.evaluate", {
+      expression: `(() => {
+        if (window.__paimStorageOriginalSetItem) {
+          Storage.prototype.setItem = window.__paimStorageOriginalSetItem;
+        }
+        window.__paimStorageBlockedKey = null;
+      })()`,
+    });
+  }
+
+  async function observeWarningClearTimers() {
+    await send("Runtime.evaluate", {
+      expression: `(() => {
+        window.__paimWarningTimerOriginalSetTimeout ||= window.setTimeout;
+        window.__paimWarningClearTimerReservations = 0;
+        window.setTimeout = function(handler, delay, ...args) {
+          if (Number(delay) === 6000) {
+            window.__paimWarningClearTimerReservations += 1;
+          }
+          return window.__paimWarningTimerOriginalSetTimeout.call(
+            window,
+            handler,
+            delay,
+            ...args,
+          );
+        };
+      })()`,
+    });
+  }
+
+  await seedChat("ko");
+  await setTextareaValue(".prompt textarea", "재시작 후에도 남는 초안");
+  await send("Runtime.evaluate", {
+    expression: `window.__paimLayoutSelectDialogPath?.('/mock/chat-attachment.md');
+      document.querySelector('.prompt-actions button[aria-label="파일 추가"]')?.click()`,
+  });
+  await waitForSelector(send, ".draft-attachments .attachment-chip");
+  await sleep(120);
+
+  const chatDraftBeforeReloadResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const drafts = JSON.parse(
+        localStorage.getItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}) || '{}',
+      );
+      return {
+        attachmentNames: (drafts[${JSON.stringify(chatDraftKey)}]?.attachments || [])
+          .map((attachment) => attachment.name),
+        prompt: document.querySelector('.prompt textarea')?.value || '',
+        storedPrompt: drafts[${JSON.stringify(chatDraftKey)}]?.prompt || '',
+      };
+    })()`,
+  });
+  value.chatDraftBeforeReload = chatDraftBeforeReloadResult.result.value;
+
+  await navigateAndWaitForSelector(send, APP_URL, ".portfolio-page");
+  await openProjectChatFromPortfolio(send);
+  await waitForSelector(send, ".prompt textarea");
+  const chatDraftAfterReloadResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => ({
+      attachmentNames: Array.from(
+        document.querySelectorAll('.draft-attachments .attachment-name'),
+      ).map((item) => item.textContent.trim()),
+      prompt: document.querySelector('.prompt textarea')?.value || '',
+    }))()`,
+  });
+  value.chatDraftAfterReload = chatDraftAfterReloadResult.result.value;
+
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector(
+      '.draft-attachments .remove-attachment-button',
+    )?.click()`,
+  });
+  await sleep(120);
+  const chatAttachmentRemovedResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const drafts = JSON.parse(
+        localStorage.getItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}) || '{}',
+      );
+      return {
+        attachmentCount: drafts[${JSON.stringify(chatDraftKey)}]?.attachments?.length ?? -1,
+        prompt: drafts[${JSON.stringify(chatDraftKey)}]?.prompt || '',
+      };
+    })()`,
+  });
+  value.chatAttachmentRemoved = chatAttachmentRemovedResult.result.value;
+
+  await navigateAndWaitForSelector(send, APP_URL, ".portfolio-page");
+  await openProjectChatFromPortfolio(send);
+  await waitForSelector(send, ".prompt textarea");
+  const chatAfterRemovalReloadResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => ({
+      attachmentCount: document.querySelectorAll(
+        '.draft-attachments .attachment-chip',
+      ).length,
+      prompt: document.querySelector('.prompt textarea')?.value || '',
+    }))()`,
+  });
+  value.chatAfterRemovalReload = chatAfterRemovalReloadResult.result.value;
+
+  await setTextareaValue(".prompt textarea", "");
+  const clearedDraftResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const drafts = JSON.parse(
+        localStorage.getItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}) || '{}',
+      );
+      return drafts[${JSON.stringify(chatDraftKey)}] ?? null;
+    })()`,
+  });
+  value.clearedDraft = clearedDraftResult.result.value;
+
+  await send("Runtime.evaluate", {
+    expression: `window.__paimLayoutConfigureQuery({ delayMs: 0 })`,
+  });
+  await setTextareaValue(".prompt textarea", "배포 주기는 2주야");
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector('button[aria-label="메시지 보내기"]')?.click()`,
+  });
+  await sleep(900);
+  const conversationBeforeReloadResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const saved = JSON.parse(
+        localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}',
+      );
+      const project = saved.projects?.find(
+        (candidate) => candidate.id === saved.selectedProjectId,
+      );
+      const session = project?.sessions?.find(
+        (candidate) => candidate.id === saved.selectedSessionId,
+      );
+      return {
+        messages: (session?.messages || []).map(({ role, content }) => ({ role, content })),
+        sessionApiCalls: (window.__paimLayoutApiCalls || []).filter(
+          (call) => /\\/sessions(?:\\/|$)/.test(call),
+        ),
+      };
+    })()`,
+  });
+  value.conversationBeforeReload = conversationBeforeReloadResult.result.value;
+
+  await navigateAndWaitForSelector(send, APP_URL, ".portfolio-page");
+  await openProjectChatFromPortfolio(send);
+  await waitForSelector(send, ".prompt textarea");
+  await sleep(250);
+  const conversationAfterReloadResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const saved = JSON.parse(
+        localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}',
+      );
+      const project = saved.projects?.find(
+        (candidate) => candidate.id === saved.selectedProjectId,
+      );
+      const session = project?.sessions?.find(
+        (candidate) => candidate.id === saved.selectedSessionId,
+      );
+      return {
+        conversation: document.querySelector('.conversation')?.textContent || '',
+        messages: (session?.messages || []).map(({ role, content }) => ({ role, content })),
+        title: document.querySelector('.history-row[data-active="true"] .history-title')
+          ?.textContent.trim() || '',
+      };
+    })()`,
+  });
+  value.conversationAfterReload = conversationAfterReloadResult.result.value;
+
+  await send("Runtime.evaluate", {
+    expression: `window.__paimLayoutConfigureQuery({ delayMs: 0 })`,
+  });
+  await setTextareaValue(".prompt textarea", "그건 왜 바뀌었어?");
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector('button[aria-label="메시지 보내기"]')?.click()`,
+  });
+  await sleep(900);
+  const followupResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const query = window.__paimLayoutReadQueryControl?.() || {};
+      return {
+        history: query.lastRequest?.history || [],
+        question: query.lastRequest?.question || '',
+        sessionApiCalls: (window.__paimLayoutApiCalls || []).filter(
+          (call) => /\\/sessions(?:\\/|$)/.test(call),
+        ),
+      };
+    })()`,
+  });
+  value.followup = followupResult.result.value;
+
+  await seedChat("ko");
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector('.project-item[data-active="true"]')?.click()`,
+  });
+  await waitForSelector(send, '[data-testid="project-detail-chat-composer"] textarea');
+  await send("Runtime.evaluate", {
+    expression: `window.__paimLayoutSelectDialogPath?.('/mock/detail-attachment.md');
+      document.querySelector('.project-detail-composer-add')?.click()`,
+  });
+  await waitForSelector(send, ".project-detail-composer-attachment");
+  await sleep(120);
+  const detailAttachmentBeforeReloadResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const drafts = JSON.parse(
+        localStorage.getItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}) || '{}',
+      );
+      return (drafts[${JSON.stringify(detailDraftKey)}]?.attachments || [])
+        .map((attachment) => attachment.name);
+    })()`,
+  });
+  value.detailAttachmentBeforeReload = detailAttachmentBeforeReloadResult.result.value;
+
+  await navigateAndWaitForSelector(send, APP_URL, ".portfolio-page");
+  await openProjectDetailFromPortfolio(send);
+  await waitForSelector(send, ".project-detail-composer-attachment");
+  const detailAttachmentAfterReloadResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `Array.from(
+      document.querySelectorAll('.project-detail-composer-attachment > span'),
+    ).map((item) => item.textContent.trim())`,
+  });
+  value.detailAttachmentAfterReload = detailAttachmentAfterReloadResult.result.value;
+
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector(
+      '.project-detail-composer-attachment button',
+    )?.click()`,
+  });
+  await sleep(120);
+  const detailAttachmentRemovedResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const drafts = JSON.parse(
+        localStorage.getItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}) || '{}',
+      );
+      return drafts[${JSON.stringify(detailDraftKey)}] ?? null;
+    })()`,
+  });
+  value.detailAttachmentRemoved = detailAttachmentRemovedResult.result.value;
+
+  const attachmentRaceProjectState = createProjectStorage(
+    "project-attachment-race",
+    "Attachment Race",
+    [
+      {
+        id: "session-attachment-race-a",
+        title: "Attachment Race A",
+        createdAt: Date.now(),
+        messages: [
+          {
+            id: "assistant-attachment-race-a",
+            role: "assistant",
+            content: "A 응답",
+          },
+        ],
+      },
+      {
+        id: "session-attachment-race-b",
+        title: "Attachment Race B",
+        createdAt: Date.now() - 1,
+        messages: [
+          {
+            id: "assistant-attachment-race-b",
+            role: "assistant",
+            content: "B 응답",
+          },
+        ],
+      },
+    ],
+    "session-attachment-race-a",
+    [],
+    {
+      apiProjectId: 1,
+      setupCompletedAt: Date.now(),
+      setupMode: "existing",
+    },
+  );
+  const attachmentRaceDraftA =
+    "project-attachment-race\u0000session-attachment-race-a";
+  const attachmentRaceDraftB =
+    "project-attachment-race\u0000session-attachment-race-b";
+  await seedChat("ko", attachmentRaceProjectState);
+  await setTextareaValue(".prompt textarea", "A에서 작성 중인 최신 초안");
+  await send("Runtime.evaluate", {
+    expression: `window.__paimLayoutConfigureAttachmentPreview?.({ delayMs: 650 });
+      window.__paimLayoutSelectDialogPath?.('/mock/race-a.md');
+      document.querySelector('.prompt-actions button[aria-label="파일 추가"]')?.click()`,
+  });
+  await sleep(80);
+  await send("Runtime.evaluate", {
+    expression: `Array.from(document.querySelectorAll('.history-item'))
+      .find((item) => item.textContent.includes('Attachment Race B'))?.click()`,
+  });
+  await sleep(120);
+  await setTextareaValue(".prompt textarea", "B에서 작성 중인 초안");
+  await sleep(650);
+  const attachmentContextRaceResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const drafts = JSON.parse(
+        localStorage.getItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}) || '{}',
+      );
+      return {
+        activeTitle: document.querySelector(
+          '.history-row[data-active="true"] .history-title',
+        )?.textContent.trim() || '',
+        draftA: drafts[${JSON.stringify(attachmentRaceDraftA)}] || null,
+        draftB: drafts[${JSON.stringify(attachmentRaceDraftB)}] || null,
+        visibleAttachments: Array.from(
+          document.querySelectorAll('.draft-attachments .attachment-name'),
+        ).map((item) => item.textContent.trim()),
+        visiblePrompt: document.querySelector('.prompt textarea')?.value || '',
+      };
+    })()`,
+  });
+  value.attachmentContextRace = attachmentContextRaceResult.result.value;
+
+  await send("Runtime.evaluate", {
+    expression: `Array.from(document.querySelectorAll('.history-item'))
+      .find((item) => item.textContent.includes('Attachment Race A'))?.click()`,
+  });
+  await sleep(120);
+  await send("Runtime.evaluate", {
+    expression: `window.__paimLayoutConfigureAttachmentPreview?.({ delayMs: 650 });
+      window.__paimLayoutSelectDialogPath?.('/mock/deleted-session.md');
+      document.querySelector('.prompt-actions button[aria-label="파일 추가"]')?.click()`,
+  });
+  await sleep(80);
+  await send("Runtime.evaluate", {
+    expression: `Array.from(document.querySelectorAll('.history-row'))
+      .find((item) => item.textContent.includes('Attachment Race A'))
+      ?.querySelector('.history-action-menu-button')?.click()`,
+  });
+  await sleep(80);
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector(
+      '.item-action-menu [data-action="delete-session"]',
+    )?.click()`,
+  });
+  await sleep(80);
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector(
+      '.item-action-menu [data-action="delete-session"]',
+    )?.click()`,
+  });
+  await sleep(750);
+  const deletedAttachmentContextResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      const drafts = JSON.parse(
+        localStorage.getItem(${JSON.stringify(PROJECT_DRAFT_STORAGE_KEY)}) || '{}',
+      );
+      const state = JSON.parse(
+        localStorage.getItem(${JSON.stringify(PROJECT_STORAGE_KEY)}) || '{}',
+      );
+      const project = state.projects?.find(
+        (candidate) => candidate.id === 'project-attachment-race',
+      );
+      return {
+        deletedDraft: drafts[${JSON.stringify(attachmentRaceDraftA)}] || null,
+        hasDeletedAttachment: Object.values(drafts).some((draft) =>
+          (draft?.attachments || []).some(
+            (attachment) => attachment.name === 'deleted-session.md',
+          ),
+        ),
+        remainingSessionIds: (project?.sessions || []).map((session) => session.id),
+      };
+    })()`,
+  });
+  value.deletedAttachmentContext = deletedAttachmentContextResult.result.value;
+  await send("Runtime.evaluate", {
+    expression: `window.__paimLayoutConfigureAttachmentPreview?.({ delayMs: 0 })`,
+  });
+
+  await seedChat("ko");
+  await blockStorageKey(PROJECT_DRAFT_STORAGE_KEY);
+  await observeWarningClearTimers();
+  await setTextareaValue(".prompt textarea", "저장 실패 뒤에도 화면에 남는 초안");
+  await setTextareaValue(".prompt textarea", "저장 실패 뒤에도 화면에 남는 초안 2");
+  const koreanDraftFailureResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      if (window.__paimWarningTimerOriginalSetTimeout) {
+        window.setTimeout = window.__paimWarningTimerOriginalSetTimeout;
+      }
+      return {
+        failureCount: window.__paimStorageFailureCount || 0,
+        prompt: document.querySelector('.prompt textarea')?.value || '',
+        warningClearTimerReservations:
+          window.__paimWarningClearTimerReservations || 0,
+        warning: document.querySelector('.runtime-status')?.textContent.trim() || '',
+      };
+    })()`,
+  });
+  value.koreanDraftFailure = koreanDraftFailureResult.result.value;
+  await restoreStorageWrites();
+
+  await seedChat("en");
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector(
+      '.history-row .history-action-menu-button',
+    )?.click()`,
+  });
+  await sleep(80);
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector(
+      '.item-action-menu [data-action="delete-session"]',
+    )?.click()`,
+  });
+  await sleep(80);
+  const englishDeleteWarningResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => ({
+      deleteLabel: document.querySelector(
+        '.item-action-menu [data-action="delete-session"]',
+      )?.textContent.trim() || '',
+      warning: document.querySelector('.runtime-status')?.textContent.trim() || '',
+    }))()`,
+  });
+  value.englishDeleteWarning = englishDeleteWarningResult.result.value;
+
+  await blockStorageKey(PROJECT_DRAFT_STORAGE_KEY);
+  await setTextareaValue(".prompt textarea", "English draft remains visible");
+  const englishDraftFailureResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => ({
+      prompt: document.querySelector('.prompt textarea')?.value || '',
+      warning: document.querySelector('.runtime-status')?.textContent.trim() || '',
+    }))()`,
+  });
+  value.englishDraftFailure = englishDraftFailureResult.result.value;
+  await restoreStorageWrites();
+  await setTextareaValue(".prompt textarea", "English draft save recovered");
+
+  await blockStorageKey(PROJECT_STORAGE_KEY);
+  await send("Runtime.evaluate", {
+    expression: `window.__paimLayoutConfigureQuery({ delayMs: 450 })`,
+  });
+  await observeWarningClearTimers();
+  await setTextareaValue(".prompt textarea", "Conversation stays in memory");
+  await send("Runtime.evaluate", {
+    expression: `document.querySelector('button[aria-label="Send message"]')?.click()`,
+  });
+  await sleep(160);
+  await sleep(650);
+  const englishConversationFailureResult = await send("Runtime.evaluate", {
+    returnByValue: true,
+    expression: `(() => {
+      if (window.__paimWarningTimerOriginalSetTimeout) {
+        window.setTimeout = window.__paimWarningTimerOriginalSetTimeout;
+      }
+      return {
+        conversation: document.querySelector('.conversation')?.textContent || '',
+        failureCount: window.__paimStorageFailureCount || 0,
+        sessionApiCalls: (window.__paimLayoutApiCalls || []).filter(
+          (call) => /\\/sessions(?:\\/|$)/.test(call),
+        ),
+        warningClearTimerReservations:
+          window.__paimWarningClearTimerReservations || 0,
+        warning: document.querySelector('.runtime-status')?.textContent.trim() || '',
+      };
+    })()`,
+  });
+  value.englishConversationFailure = englishConversationFailureResult.result.value;
+  await restoreStorageWrites();
+
+  if (
+    value.chatDraftBeforeReload.prompt !== "재시작 후에도 남는 초안" ||
+    value.chatDraftBeforeReload.storedPrompt !== "재시작 후에도 남는 초안" ||
+    !value.chatDraftBeforeReload.attachmentNames.includes("chat-attachment.md") ||
+    value.chatDraftAfterReload.prompt !== "재시작 후에도 남는 초안" ||
+    !value.chatDraftAfterReload.attachmentNames.includes("chat-attachment.md")
+  ) {
+    failures.push("chat text and attachment-only changes should persist immediately and survive reload");
+  }
+
+  if (
+    value.chatAttachmentRemoved.attachmentCount !== 0 ||
+    value.chatAttachmentRemoved.prompt !== "재시작 후에도 남는 초안" ||
+    value.chatAfterRemovalReload.attachmentCount !== 0 ||
+    value.chatAfterRemovalReload.prompt !== "재시작 후에도 남는 초안" ||
+    value.clearedDraft !== null
+  ) {
+    failures.push("attachment removal and clearing the final draft value should persist immediately");
+  }
+
+  const restoredAnswer = "좋아요. 이 내용을 프로젝트 메모로 정리할 수 있습니다.";
+  if (
+    value.conversationBeforeReload.messages.length !== 3 ||
+    value.conversationBeforeReload.sessionApiCalls.length !== 0 ||
+    value.conversationAfterReload.messages.length !== 3 ||
+    !value.conversationAfterReload.messages.some(
+      (message) => message.content === restoredAnswer,
+    ) ||
+    !value.conversationAfterReload.conversation.includes("배포 주기는 2주야") ||
+    value.conversationAfterReload.title !== "Smoke Chat"
+  ) {
+    failures.push("local conversation title, question, and answer should survive reload without session API calls");
+  }
+
+  if (
+    value.followup.question !== "그건 왜 바뀌었어?" ||
+    value.followup.history.length !== 3 ||
+    value.followup.history[1]?.content !== "배포 주기는 2주야" ||
+    value.followup.history[2]?.content !== restoredAnswer ||
+    value.followup.sessionApiCalls.length !== 0
+  ) {
+    failures.push("a follow-up after reload should send only restored prior messages to the stateless query");
+  }
+
+  if (
+    !value.detailAttachmentBeforeReload.includes("detail-attachment.md") ||
+    !value.detailAttachmentAfterReload.includes("detail-attachment.md") ||
+    value.detailAttachmentRemoved !== null
+  ) {
+    failures.push("project-detail attachment-only drafts should persist, restore, and clear immediately");
+  }
+
+  if (
+    value.attachmentContextRace.activeTitle !== "Attachment Race B" ||
+    value.attachmentContextRace.visiblePrompt !== "B에서 작성 중인 초안" ||
+    value.attachmentContextRace.visibleAttachments.length !== 0 ||
+    value.attachmentContextRace.draftA?.prompt !== "A에서 작성 중인 최신 초안" ||
+    !value.attachmentContextRace.draftA?.attachments?.some(
+      (attachment) => attachment.name === "race-a.md",
+    ) ||
+    value.attachmentContextRace.draftB?.prompt !== "B에서 작성 중인 초안" ||
+    value.attachmentContextRace.draftB?.attachments?.length !== 0
+  ) {
+    failures.push("a delayed attachment should merge into its original draft without mutating the new composer");
+  }
+
+  if (
+    value.deletedAttachmentContext.deletedDraft !== null ||
+    value.deletedAttachmentContext.hasDeletedAttachment ||
+    value.deletedAttachmentContext.remainingSessionIds.includes(
+      "session-attachment-race-a",
+    )
+  ) {
+    failures.push("a delayed attachment should be discarded when its original session is deleted");
+  }
+
+  if (
+    !value.koreanDraftFailure.warning.includes(
+      "로컬 저장 공간이 부족해 최신 초안을 저장하지 못했습니다",
+    ) ||
+    value.koreanDraftFailure.prompt !== "저장 실패 뒤에도 화면에 남는 초안 2" ||
+    value.koreanDraftFailure.failureCount < 2 ||
+    value.koreanDraftFailure.warningClearTimerReservations !== 1
+  ) {
+    failures.push("Korean draft quota failures should warn once while preserving the live draft");
+  }
+
+  if (
+    value.englishDeleteWarning.deleteLabel !== "Delete again" ||
+    !value.englishDeleteWarning.warning.includes(
+      "Press again to delete this chat and its conversation history from this device",
+    ) ||
+    !value.englishDraftFailure.warning.includes(
+      "Local storage is full, so the latest draft could not be saved",
+    ) ||
+    value.englishDraftFailure.prompt !== "English draft remains visible"
+  ) {
+    failures.push("English mode should translate the device-only delete and draft persistence warnings");
+  }
+
+  if (
+    !value.englishConversationFailure.warning.includes(
+      "Local storage is full, so the latest conversation could not be saved",
+    ) ||
+    !value.englishConversationFailure.conversation.includes("Conversation stays in memory") ||
+    !value.englishConversationFailure.conversation.includes(restoredAnswer) ||
+    value.englishConversationFailure.failureCount < 2 ||
+    value.englishConversationFailure.warningClearTimerReservations !== 1 ||
+    value.englishConversationFailure.sessionApiCalls.length !== 0
+  ) {
+    failures.push("conversation quota failures should stay deduplicated and preserve in-memory chat");
+  }
+
+  debugLayout("local chat storage safety", value);
+  await send("Runtime.evaluate", {
+    expression: `(() => {
+      const settings = JSON.parse(
+        localStorage.getItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}) || '{}',
+      );
+      settings.language = 'ko';
+      localStorage.setItem(${JSON.stringify(SETTINGS_STORAGE_KEY)}, JSON.stringify(settings));
+    })()`,
+  });
+  await send("Page.removeScriptToEvaluateOnNewDocument", {
+    identifier: tauriMockScript.identifier,
+  });
+  await navigateAndWaitForSelector(send, APP_URL, ".app-shell");
+  return { value, failures };
+}
+
 // 초안은 다른 세션으로 새지 않되 원래 세션으로 돌아오면 복원되는지 확인한다.
 async function verifyDraftScopingOnSessionChange(send) {
   const seededSessions = [
@@ -14864,6 +16423,15 @@ try {
     } else {
       console.log("PASS meeting audio uploads, polls, and remains non-previewable");
     }
+  } else if (process.env.PAIM_LAYOUT_FOCUS === "local-chat-storage") {
+    const result = await verifyLocalChatStorageSafety(send);
+    if (result.failures.length > 0) {
+      hasFailures = true;
+      console.log("FAIL local chat storage safety");
+      result.failures.forEach((failure) => console.log(`  - ${failure}`));
+    } else {
+      console.log("PASS local chat reload, attachment drafts, and storage failure warnings");
+    }
   } else if (process.env.PAIM_LAYOUT_FOCUS === "project-regressions") {
     const focusedChecks = [
       ["project-scoped detail and chat drafts", await verifyProjectScopedDetailAndChatDrafts(send)],
@@ -14905,6 +16473,20 @@ try {
       ["project-scoped detail return", await verifyProjectScopedSessions(send)],
       ["chat and detail composer focus", await verifyPromptFocusFlow(send)],
       ["session draft scoping", await verifyDraftScopingOnSessionChange(send)],
+    ];
+    for (const [label, result] of focusedChecks) {
+      if (result.failures.length > 0) {
+        hasFailures = true;
+        console.log(`FAIL ${label}`);
+        result.failures.forEach((failure) => console.log(`  - ${failure}`));
+      } else {
+        console.log(`PASS ${label}`);
+      }
+    }
+  } else if (process.env.PAIM_LAYOUT_FOCUS === "github-freshness") {
+    const focusedChecks = [
+      ["GitHub repository read ownership", await verifyGithubRepositoryReadOwnership(send)],
+      ["GitHub remote freshness states", await verifyGithubRemoteFreshnessStates(send)],
     ];
     for (const [label, result] of focusedChecks) {
       if (result.failures.length > 0) {
@@ -15346,6 +16928,16 @@ try {
     console.log("PASS project chat question uses the demo response flow");
   }
 
+  const localChatStorageSafetyResult = await verifyLocalChatStorageSafety(send);
+
+  if (localChatStorageSafetyResult.failures.length > 0) {
+    hasFailures = true;
+    console.log("FAIL local chat storage safety");
+    localChatStorageSafetyResult.failures.forEach((failure) => console.log(`  - ${failure}`));
+  } else {
+    console.log("PASS local chat reload, attachment drafts, and storage failure warnings");
+  }
+
   const meetingAudioResult = await verifyMeetingAudioFlow(send);
 
   if (meetingAudioResult.failures.length > 0) {
@@ -15384,6 +16976,26 @@ try {
     githubOperationOwnershipResult.failures.forEach((failure) => console.log(`  - ${failure}`));
   } else {
     console.log("PASS GitHub delayed operations stay cancelled and identify only their target repo");
+  }
+
+  const githubRepositoryReadOwnershipResult = await verifyGithubRepositoryReadOwnership(send);
+
+  if (githubRepositoryReadOwnershipResult.failures.length > 0) {
+    hasFailures = true;
+    console.log("FAIL GitHub repository read ownership");
+    githubRepositoryReadOwnershipResult.failures.forEach((failure) => console.log(`  - ${failure}`));
+  } else {
+    console.log("PASS GitHub repository and activity reads reject stale responses");
+  }
+
+  const githubRemoteFreshnessResult = await verifyGithubRemoteFreshnessStates(send);
+
+  if (githubRemoteFreshnessResult.failures.length > 0) {
+    hasFailures = true;
+    console.log("FAIL GitHub remote freshness states");
+    githubRemoteFreshnessResult.failures.forEach((failure) => console.log(`  - ${failure}`));
+  } else {
+    console.log("PASS GitHub freshness failures and expired sessions stay explicit and recoverable");
   }
 
   const sidebarToggleChromeGeometryResult = await verifySidebarToggleChromeGeometry(send);

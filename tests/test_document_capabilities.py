@@ -8,15 +8,19 @@ from fastapi.testclient import TestClient
 
 from backend.api import query as query_api
 from backend.document_content import (
+    ALLOWED_SUFFIXES,
     DOCUMENT_PARSERS,
     PROJECT_DOCUMENT_MAX_FILE_BYTES,
     QUERY_ATTACHMENT_MAX_FILE_BYTES,
     QUERY_ATTACHMENT_MAX_TOTAL_BYTES,
     extract_document_text,
+    supported_extensions,
 )
 from backend.main import app
+from backend.pipeline.converters import supported_suffixes
 
 client = TestClient(app, raise_server_exceptions=False)
+EXPECTED_DOCUMENT_SUFFIXES = {".docx", ".markdown", ".md", ".pdf", ".txt"}
 
 
 def _make_docx(text: str) -> bytes:
@@ -60,11 +64,17 @@ def _make_pdf(text: str) -> bytes:
     return output.getvalue()
 
 
-def test_capabilities_exactly_match_parser_registry():
+def test_capabilities_exactly_match_converter_registry():
     response = client.get("/api/v1/capabilities")
     assert response.status_code == 200
     body = response.json()
-    expected = sorted(suffix.removeprefix(".") for suffix in DOCUMENT_PARSERS)
+    converter_suffixes = set(supported_suffixes())
+    assert converter_suffixes == EXPECTED_DOCUMENT_SUFFIXES
+    assert set(DOCUMENT_PARSERS) == converter_suffixes
+    assert ALLOWED_SUFFIXES == converter_suffixes
+
+    expected = sorted(suffix.removeprefix(".") for suffix in converter_suffixes)
+    assert supported_extensions() == expected
     assert body == {
         "schema_version": 1,
         "project_documents": {
@@ -151,6 +161,7 @@ def test_query_total_size_is_checked_after_text_context_is_full(monkeypatch):
 
 def test_advertised_parsers_extract_content():
     assert extract_document_text("notes.md", b"markdown body") == "markdown body"
+    assert extract_document_text("notes.markdown", b"long markdown body") == "long markdown body"
     assert extract_document_text("notes.txt", b"text body") == "text body"
     assert "PDF body" in extract_document_text("notes.pdf", _make_pdf("PDF body"))
     docx_text = extract_document_text("meeting.docx", _make_docx("DOCX 본문 추출 성공"))

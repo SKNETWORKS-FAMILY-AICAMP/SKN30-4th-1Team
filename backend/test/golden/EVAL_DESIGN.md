@@ -155,7 +155,7 @@ phase 계약: `dev`(lite, judge gpt-4.1-mini — 개발 반복용) / `final`(보
    기대/실제 경로·stage 대조. 미탐·오탐 목록의 원천.
 5. **`results/pair_coverage_<corpus>_<phase>_<runid>.csv`** — 계층 2 판별기의
    골든 pair 적중(hit)/미제안(miss)/오류(error)·negative 오제안(관측 지표).
-6. **`docs/EVAL_REPORT.md`** — 사람이 읽는 종합 보고(발표 수치 원천): 요약 →
+6. **`docs/archive/evaluation/golden-v1/EVAL_REPORT.md`** — 사람이 읽는 과거 종합 보고(발표 수치 원천): 요약 →
    매트릭스 표·단계 기여 → 세트별 분해(양성 5 vs 음성 4) → 라우팅 감사 →
    체인 포함률(+e2e/oracle 델타) → 기권률 → 판별기 pair 커버리지 → 한계 →
    재현 커맨드.

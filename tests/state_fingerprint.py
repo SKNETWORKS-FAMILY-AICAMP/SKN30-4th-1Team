@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """검증 로그를 현재 Git 작업 트리에 결속하는 읽기 전용 지문 도구.
 
-직렬화의 정본은 이 파일이다. ``docs/validation-rules.md``의 State fingerprint
-절은 레코드 형식과 제외 규칙을 설명한다. 이 도구는 Git index나 작업 트리를
-수정하지 않으며 digest 한 줄만 stdout에 출력한다.
+직렬화의 정본은 이 파일이다. 이 도구는 Git index나 작업 트리를 수정하지 않으며
+digest 한 줄만 stdout에 출력한다.
 """
 
 import argparse

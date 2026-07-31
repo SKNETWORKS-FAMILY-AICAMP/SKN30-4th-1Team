@@ -17,6 +17,7 @@ import tablerAlertCircle from "./assets/tabler-icons/alert-circle.svg?raw";
 import tablerGitCommit from "./assets/tabler-icons/git-commit.svg?raw";
 import tablerGitPullRequest from "./assets/tabler-icons/git-pull-request.svg?raw";
 import { formatRelativeAge } from "./format";
+import { GITHUB_REMOTE_HEAD_TTL_MS, getGithubRemoteCheckStatus } from "./github";
 import { useI18n } from "./i18n";
 import type { LanguageSetting } from "./settings";
 import type {
@@ -55,6 +56,7 @@ type GithubPanelProps = {
   onLoadRepositories: () => void;
   onOpenVerification: () => void;
   onQueryChange: (query: string) => void;
+  onRefreshRepository: () => void;
   onResetLogin: () => void;
   onStartLogin: () => void;
   onStartPrivateLogin: () => void;
@@ -353,6 +355,7 @@ export function GithubPanel({
   onLoadRepositories,
   onOpenVerification,
   onQueryChange,
+  onRefreshRepository,
   onResetLogin,
   onStartLogin,
   onStartPrivateLogin,
@@ -372,6 +375,21 @@ export function GithubPanel({
   const linkedMemoryItems = memoryItems.filter((item) => isGithubMemoryLinked(item, repository));
   const memoryDisplayItems = getGithubMemoryDisplayItems(memoryItems, repository);
   const isRepositorySyncing = repository?.syncStatus === "syncing";
+  const [remoteFreshnessNow, setRemoteFreshnessNow] = useState(Date.now());
+  const remoteCheckStatus = repository
+    ? getGithubRemoteCheckStatus(repository, remoteFreshnessNow)
+    : "unknown";
+  const hasRemoteChanges = remoteCheckStatus === "needs_sync";
+  const isRemoteCheckError = remoteCheckStatus === "error";
+  const isRemoteCheckUnknown = remoteCheckStatus === "unknown";
+  const isRemoteSessionExpired =
+    isRemoteCheckError && repository?.remoteCheckError === "session_expired";
+  const isRepositoryUnsynced = repository
+    ? !repository.syncStatus || repository.syncStatus === "connected" || hasRemoteChanges
+    : false;
+  const isRepositoryIndexed = repository?.syncStatus === "indexed";
+  const isRepositoryLatest =
+    isRepositoryIndexed && remoteCheckStatus === "current";
   const repositoryWarning = repository?.syncWarnings?.[0] ?? null;
   const [syncElapsedSeconds, setSyncElapsedSeconds] = useState(0);
   const [isCodeCopied, setIsCodeCopied] = useState(false);
@@ -396,6 +414,35 @@ export function GithubPanel({
 
     return () => window.clearInterval(intervalId);
   }, [isRepositorySyncing, repository?.syncStartedAt]);
+
+  useEffect(() => {
+    const attemptedAt = repository?.remoteCheckAttemptedAt ?? repository?.remoteCheckedAt;
+    const now = Date.now();
+    setRemoteFreshnessNow(now);
+    if (
+      typeof attemptedAt !== "number" ||
+      repository?.remoteCheckStatus === "checking" ||
+      repository?.remoteCheckStatus === "error"
+    ) {
+      return;
+    }
+
+    const remainingMs = attemptedAt + GITHUB_REMOTE_HEAD_TTL_MS - now;
+    if (remainingMs <= 0) {
+      setRemoteFreshnessNow(Date.now());
+      return;
+    }
+
+    const timeoutId = window.setTimeout(
+      () => setRemoteFreshnessNow(Date.now()),
+      remainingMs + 25,
+    );
+    return () => window.clearTimeout(timeoutId);
+  }, [
+    repository?.remoteCheckAttemptedAt,
+    repository?.remoteCheckedAt,
+    repository?.remoteCheckStatus,
+  ]);
 
   async function handleCopyGithubCode() {
     if (!session?.userCode) {
@@ -691,11 +738,34 @@ export function GithubPanel({
                 <p className="overview-github-meta">
                   {getGithubRepoOwner(repository)} · {repository.branch}
                 </p>
+                {isRepositoryIndexed ? (
+                  <span
+                    className="overview-github-sync-quiet"
+                    data-verified={isRepositoryLatest ? "true" : "false"}
+                  >
+                    {t(
+                      remoteCheckStatus === "current"
+                        ? "최신 상태"
+                        : remoteCheckStatus === "needs_sync"
+                          ? "최신화 필요"
+                          : remoteCheckStatus === "checking"
+                            ? "최신 상태 확인 중"
+                            : remoteCheckStatus === "error"
+                              ? "최신 상태 확인 실패"
+                              : "최신 상태 확인 필요",
+                    )}
+                  </span>
+                ) : null}
               </div>
               <IconButton
                 className="overview-github-sync-button"
                 icon={<RefreshCcw size={15} />}
-                isDisabled={!canManage || isSyncing || isRepositorySyncing}
+                isDisabled={
+                  !canManage ||
+                  isSyncing ||
+                  isRepositorySyncing ||
+                  isRemoteSessionExpired
+                }
                 label={t("GitHub 동기화")}
                 onClick={onSyncRepository}
                 size="sm"
@@ -724,6 +794,90 @@ export function GithubPanel({
               />
             </div>
           </div>
+
+          {isRepositoryIndexed && (isRemoteCheckError || isRemoteCheckUnknown) ? (
+            <div
+              className="overview-github-sync-summary"
+              data-status={isRemoteCheckError ? "error" : "unknown"}
+            >
+              <div>
+                <Badge
+                  label={t(
+                    isRemoteSessionExpired
+                      ? "GitHub 연결 만료"
+                      : isRemoteCheckError
+                        ? "확인 실패"
+                        : "확인 필요",
+                  )}
+                  variant={isRemoteCheckError ? "warning" : "blue"}
+                />
+                <span>
+                  <strong>
+                    {t(
+                      isRemoteSessionExpired
+                        ? "GitHub 인증을 다시 연결해 주세요"
+                        : isRemoteCheckError
+                          ? "최신 상태를 확인하지 못했습니다"
+                          : "최신 상태 확인 필요",
+                    )}
+                  </strong>
+                  <small>
+                    {t(
+                      isRemoteSessionExpired
+                        ? "검색 인덱스는 유지됩니다. 다시 인증하면 코드 최신 여부를 확인합니다."
+                        : "마지막 성공 결과로 최신 상태를 표시하지 않습니다.",
+                    )}
+                  </small>
+                </span>
+              </div>
+              <Button
+                icon={<RefreshCcw size={13} />}
+                isDisabled={!canManage || isSyncing}
+                label={t(isRemoteSessionExpired ? "다시 인증" : "다시 확인")}
+                onClick={isRemoteSessionExpired ? onStartPrivateLogin : onRefreshRepository}
+                size="sm"
+                variant="secondary"
+              />
+            </div>
+          ) : null}
+
+          {isRepositoryUnsynced ? (
+            <div
+              className="overview-github-sync-summary"
+              data-status={hasRemoteChanges ? "needs_sync" : "connected"}
+            >
+              <div>
+                <Badge
+                  label={t(hasRemoteChanges ? "최신화 필요" : "동기화 필요")}
+                  variant="warning"
+                />
+                <span>
+                  <strong>
+                    {t(
+                      hasRemoteChanges
+                        ? "새 GitHub 코드 변경사항이 있습니다"
+                        : "저장소만 연결된 상태입니다",
+                    )}
+                  </strong>
+                  <small>
+                    {t(
+                      hasRemoteChanges
+                        ? "최신 커밋을 검색과 프로젝트 메모리에 반영해 주세요."
+                        : "커밋·이슈·PR을 사용하려면 첫 동기화를 실행해 주세요.",
+                    )}
+                  </small>
+                </span>
+              </div>
+              <Button
+                icon={<RefreshCcw size={13} />}
+                isDisabled={!canManage || isSyncing || isRepositorySyncing}
+                label={isSyncing || isRepositorySyncing ? t("동기화 중") : t("지금 동기화")}
+                onClick={onSyncRepository}
+                size="sm"
+                variant="secondary"
+              />
+            </div>
+          ) : null}
 
           <div className="overview-github-summary-strip">
             <span className="overview-github-strip-stat" data-type="commit">
