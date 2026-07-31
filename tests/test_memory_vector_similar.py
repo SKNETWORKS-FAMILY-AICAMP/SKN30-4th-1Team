@@ -1,5 +1,5 @@
 """find_similar_memories — supersede 후보 recall 단위 테스트."""
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from backend.retriever import memory_vector
 from backend.retriever.index_scope import ProjectIndexScope

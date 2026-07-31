@@ -3,7 +3,6 @@ import importlib
 import json
 import sys
 from copy import deepcopy
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest

@@ -8,7 +8,6 @@ import csv
 import json
 import os
 import statistics
-import subprocess
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -49,6 +48,18 @@ Tool 선택은 별도로 채점하므로 답변 판정에 섞지 마세요. 한�
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--results-dir",
+        type=Path,
+        default=RESULTS,
+        help="Directory containing current_csbot.json and current_modu.json.",
+    )
+    parser.add_argument(
+        "--report-output",
+        type=Path,
+        default=HERE / "CURRENT_BRANCH_REPORT.md",
+        help="Markdown report output path.",
+    )
     parser.add_argument(
         "--reuse-judgments",
         action="store_true",
@@ -144,6 +155,7 @@ def _clean_markdown_text(value: object) -> str:
 
 def main() -> int:
     args = _parse_args()
+    results_dir = args.results_dir.resolve()
     load_dotenv(HERE.parents[1] / ".env")
     questions = json.loads((HERE / "questions.json").read_text(encoding="utf-8"))[
         "questions"
@@ -153,10 +165,12 @@ def main() -> int:
     golden_by_id = {item["id"]: item for item in golden}
 
     records = []
+    run_payloads = []
     for corpus in ("csbot", "modu"):
         payload = json.loads(
-            (RESULTS / f"current_{corpus}.json").read_text(encoding="utf-8")
+            (results_dir / f"current_{corpus}.json").read_text(encoding="utf-8")
         )
+        run_payloads.append(payload)
         records.extend(payload["records"])
     record_by_id = {item["id"]: item for item in records}
     if set(record_by_id) != set(question_by_id) or set(record_by_id) != set(golden_by_id):
@@ -165,7 +179,7 @@ def main() -> int:
     judgments: dict[str, dict]
     if args.reuse_judgments:
         previous = json.loads(
-            (RESULTS / "current_scored.json").read_text(encoding="utf-8")
+            (results_dir / "current_scored.json").read_text(encoding="utf-8")
         )
         judgments = {
             item["id"]: item["judgment"] for item in previous["records"]
@@ -206,7 +220,7 @@ def main() -> int:
                     flush=True,
                 )
 
-    state_validation_path = RESULTS / "current_state_validation.json"
+    state_validation_path = results_dir / "current_state_validation.json"
     state_validation = (
         json.loads(state_validation_path.read_text(encoding="utf-8"))
         if state_validation_path.exists()
@@ -232,21 +246,22 @@ def main() -> int:
 
     verdicts = Counter(item["judgment"]["verdict"] for item in scored)
     latencies = [float(item["latency_ms"]) for item in scored]
+    run_metadata = {
+        key: {payload.get(key) for payload in run_payloads}
+        for key in ("branch", "commit", "working_tree_dirty")
+    }
+    inconsistent_metadata = {
+        key: values for key, values in run_metadata.items() if len(values) != 1
+    }
+    if inconsistent_metadata:
+        raise RuntimeError(
+            f"csbot/modu run metadata does not match: {inconsistent_metadata}"
+        )
     summary = {
         "dataset_id": "routing_v2",
-        "branch": "feat/이동욱-프롬프트_수정",
-        "commit": subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            cwd=HERE.parents[1],
-            text=True,
-        ).strip(),
-        "working_tree_dirty": bool(
-            subprocess.check_output(
-                ["git", "status", "--porcelain"],
-                cwd=HERE.parents[1],
-                text=True,
-            ).strip()
-        ),
+        "branch": next(iter(run_metadata["branch"])),
+        "commit": next(iter(run_metadata["commit"])),
+        "working_tree_dirty": next(iter(run_metadata["working_tree_dirty"])),
         "scored_at": datetime.now(timezone.utc).isoformat(),
         "total": len(scored),
         "api_success": sum(item["http_status"] == 200 for item in scored),
@@ -293,8 +308,8 @@ def main() -> int:
         family_rows[item["family"]].append(item)
         corpus_rows[item["corpus"]].append(item)
 
-    RESULTS.mkdir(parents=True, exist_ok=True)
-    (RESULTS / "current_scored.json").write_text(
+    results_dir.mkdir(parents=True, exist_ok=True)
+    (results_dir / "current_scored.json").write_text(
         json.dumps(
             {"summary": summary, "records": scored},
             ensure_ascii=False,
@@ -302,11 +317,11 @@ def main() -> int:
         ),
         encoding="utf-8",
     )
-    (RESULTS / "current_summary.json").write_text(
+    (results_dir / "current_summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    with (RESULTS / "current_per_question.csv").open(
+    with (results_dir / "current_per_question.csv").open(
         "w", newline="", encoding="utf-8-sig"
     ) as handle:
         writer = csv.writer(handle)
@@ -474,7 +489,8 @@ def main() -> int:
         "",
         "답변 평가는 `gpt-4.1` 구조화 Judge를 temperature 0으로 실행했다.",
     ])
-    (HERE / "CURRENT_BRANCH_REPORT.md").write_text(
+    args.report_output.parent.mkdir(parents=True, exist_ok=True)
+    args.report_output.write_text(
         "\n".join(lines) + "\n",
         encoding="utf-8",
     )

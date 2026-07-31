@@ -294,9 +294,8 @@
 │   │   └── query.py                 <span class="c"># Q&A 질의 엔드포인트 (첨부파일 임시 컨텍스트 지원)</span>
 │   │
 │   ├── chat/                        <span class="c"># deprecated 서버 세션 호환 계층 (구형 클라이언트용)</span>
-│   │   ├── router.py                <span class="c"># /projects/{id}/sessions — deprecated 세션 CRUD·질의</span>
-│   │   ├── session_store.py         <span class="c"># 레거시 세션·메시지 암호화 저장/조회</span>
-│   │   └── context_builder.py       <span class="c"># 레거시 세션 질의의 토큰 예산 관리</span>
+│   │   ├── router.py                <span class="c"># /projects/{id}/sessions — deprecated 세션 CRUD·질의, 토큰 예산 관리</span>
+│   │   └── session_store.py         <span class="c"># 레거시 세션·메시지 암호화 저장/조회</span>
 │   │
 │   ├── pipeline/                    <span class="c"># 문서 → 구조화 메모리 변환</span>
 │   │   ├── extractor.py             <span class="c"># 소스 타입별 지침 LLM 추출, 청크 분할·중복 제거</span>
@@ -439,7 +438,7 @@ ingestor.ingest()
     <ul>
       <li>현재 데스크톱은 채팅 제목·질문·답변·작성 중 초안을 계정·서버 범위의 WebView <code>localStorage</code>에 저장하고, <code>POST /projects/{id}/query</code>에 최근 대화를 요청 컨텍스트로 전달합니다.</li>
       <li><code>/query</code>가 받은 질문과 최근 대화는 답변 생성 중 PaiM 서버와 설정된 외부 LLM에 전달될 수 있지만, <code>chat_sessions</code>, <code>chat_messages</code>, <code>chat_summaries</code>에는 저장하지 않습니다.</li>
-      <li><code>chat/router.py</code>, <code>session_store.py</code>, <code>context_builder.py</code>는 deprecated <code>/sessions/*</code>를 사용하는 구형 클라이언트 호환용입니다. 이 경로는 서버 세션을 AES-256-GCM으로 암호화 저장하며 현재 데스크톱의 기본 저장 경로가 아닙니다.</li>
+      <li><code>chat/router.py</code>, <code>session_store.py</code>는 deprecated <code>/sessions/*</code>를 사용하는 구형 클라이언트 호환용입니다. 이 경로는 서버 세션을 AES-256-GCM으로 암호화 저장하며 현재 데스크톱의 기본 저장 경로가 아닙니다.</li>
       <li>WebView <code>localStorage</code>는 현재 앱 전용 암호화 저장소가 아닙니다. 안전한 전용 저장소 이전은 별도 후속 범위입니다.</li>
     </ul>
 
@@ -447,7 +446,7 @@ ingestor.ingest()
     <p>용도가 다른 두 팩토리가 존재합니다.</p>
     <ul>
       <li><code>factory.py</code> (<code>get_llm_client</code>): 구조화 추출 전용, SDK 직접 래핑 (Claude/OpenAI/Google Client)</li>
-      <li><code>chat_model_factory.py</code> (<code>get_chat_model</code>): 자유 대화형 Q&A/RAG용 LangChain <code>BaseChatModel</code> 반환, <code>LLM_PROVIDER</code> 환경변수로 openai/claude/google/local 선택, <code>tier="fast"|"quality"</code> 지원</li>
+      <li><code>chat_model_factory.py</code> (<code>get_chat_model</code>): 자유 대화형 Q&A/RAG용 LangChain <code>BaseChatModel</code> 반환, <code>LLM_PROVIDER</code> 환경변수로 openai/claude/google/local 선택</li>
     </ul>
     <div class="note">Google Gemini는 중첩 스키마 구조화 출력을 지원하지 않아 구조화 추출에는 사용하지 않고 Q&A에만 사용합니다.</div>
 
@@ -526,7 +525,7 @@ ingestor.ingest()
   → 데스크톱이 질문·답변을 로컬 대화에 저장
 
 레거시 세션 질의 (chat/router.py, deprecated)
-  → context_builder.py 로 암호화 대화 이력과 함께 컨텍스트 조립
+  → router.py가 암호화 대화 이력·롤링 요약을 컨텍스트로 조립
   → Agentic Q&amp;A (프로젝트 질의와 동일한 도구 오케스트레이터)
   → 구형 클라이언트 호환을 위해 서버 세션 저장·롤링 요약·응답 형식 유지</div>
 

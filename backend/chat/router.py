@@ -7,16 +7,33 @@ from typing import List, Optional
 from datetime import datetime
 import tiktoken
 
-from backend.agentic_graph import run_agentic_qa
+from backend.agentic_graph import DEFAULT_HISTORY_TOKEN_BUDGET, run_agentic_qa
 from backend.db.mysql import get_connection
 from backend.security.session_crypto import get_session_crypto
 from backend.chat.session_store import SessionStore
-from backend.chat.context_builder import ContextBuilder
 from backend.api.auth import get_current_user_id, require_project_access
 from backend.rate_limit import RATE_LIMIT_CHAT, authenticated_user_key, limiter
 
 router = APIRouter(prefix="/projects/{project_id}/sessions", tags=["Session Memory API"])
 logger = logging.getLogger(__name__)
+SESSION_SUMMARY_TOKEN_BUDGET = DEFAULT_HISTORY_TOKEN_BUDGET // 4
+_SESSION_SUMMARY_PREFIX = "[이전 대화 요약 — 최근 대화보다 앞선 내용]: "
+_SESSION_SUMMARY_TRUNCATION_MARKER = "[이전 대화 요약 앞부분 생략]\n"
+
+
+def _session_summary_message(summary: str, encoder) -> str:
+    """Keep the newest part of the untrusted session recap within its share."""
+    text = f"{_SESSION_SUMMARY_PREFIX}{summary.strip()}"
+    tokens = encoder.encode(text, disallowed_special=())
+    if len(tokens) <= SESSION_SUMMARY_TOKEN_BUDGET:
+        return text
+
+    marker_tokens = encoder.encode(
+        _SESSION_SUMMARY_TRUNCATION_MARKER,
+        disallowed_special=(),
+    )
+    tail_size = SESSION_SUMMARY_TOKEN_BUDGET - len(marker_tokens)
+    return _SESSION_SUMMARY_TRUNCATION_MARKER + encoder.decode(tokens[-tail_size:])
 
 # --- 실제 DB 커넥션 종속성 주입기 (다른 라우터와 동일하게 backend.db.mysql.get_connection 사용) ---
 def get_db():
@@ -36,7 +53,6 @@ class SessionUpdateRequest(BaseModel):
 
 class QueryRequest(BaseModel):
     current_question: str
-    rag_context: Optional[str] = ""
 
 class MessageResponse(BaseModel):
     id: int
@@ -79,44 +95,6 @@ def _verify_session_ownership(cursor, project_id: int, session_id: str):
         )
     if not cursor.fetchone():
         raise HTTPException(status_code=404, detail="해당 프로젝트에서 요청하신 세션을 찾을 수 없습니다.")
-
-
-def _to_agentic_prepared_context(
-    final_prompt_messages: List[dict], current_question: str
-) -> List[dict]:
-    """Keep the session context builder's budget and message order for Agentic Q&A.
-
-    The Agentic runner owns its orchestrator system prompt and appends the
-    current question itself.  The remaining server-prepared summary, message
-    window, and optional RAG text must retain their original roles so a long
-    session does not silently lose its rolling summary.
-    """
-    context_messages = list(final_prompt_messages)
-    if context_messages and context_messages[0].get("role") == "system":
-        context_messages = context_messages[1:]
-    if (
-        context_messages
-        and context_messages[-1].get("role") == "user"
-        and context_messages[-1].get("content") == current_question
-    ):
-        context_messages = context_messages[:-1]
-    # The session handler has already appended this turn to recent_messages
-    # before ContextBuilder runs.  The Agentic runner appends ``question`` at
-    # the end, so remove that copied message as well instead of asking the
-    # orchestrator the same question twice.
-    for index in range(len(context_messages) - 1, -1, -1):
-        message = context_messages[index]
-        if (
-            message.get("role") == "user"
-            and message.get("content") == current_question
-        ):
-            del context_messages[index]
-            break
-    return [
-        {"role": message["role"], "content": message["content"]}
-        for message in context_messages
-        if message.get("content")
-    ]
 
 
 # --- [1] POST /projects/{project_id}/sessions (세션 생성) ---
@@ -254,7 +232,7 @@ def handle_session_query(
     store = SessionStore(db, project_id)
 
     # DB로부터 암호화 세션 상태를 복호화하여 런타임 메모리에 안착
-    current_summary, recent_messages, last_summary_id = store.get_session_context(session_id)
+    current_summary, recent_messages, _ = store.get_session_context(session_id)
 
     encoder = tiktoken.encoding_for_model("gpt-4o")
     u_token = len(encoder.encode(request.current_question))
@@ -267,74 +245,29 @@ def handle_session_query(
         token_count=u_token
     )
 
-    # 실시간 컨텍스트 토큰 예산 검증을 위해 최신 메시지 리스트에 유저 질문 우선 추가
-    recent_messages.append({"id": user_msg_id, "role": "user", "text": request.current_question, "token_count": u_token})
-
-    # 기획서 규격 연동을 위해 RAG 컨텍스트 평문을 스코어를 가진 구조형 객체 배열화
-    retrieved_rag_chunks = [
-        {"text": request.rag_context, "score": 0.85}
-    ] if request.rag_context else []
-
-    # =========================================================================
-    # 📍 [조건 1 & 2]: 예산 수립 및 출력 Reserve 공간 정의 구간
-    # =========================================================================
-    CONTEXT_WINDOW = 128000
-    MAX_TOTAL_BUDGET = int(CONTEXT_WINDOW * 0.65)  # 조건 1: 컨텍스트 윈도우의 60~70% 예산 지정 (65%)
-    OUTPUT_RESERVE = 4000                          # 조건 2: 최소 2~4k tokens 출력 공간 확보 (4000)
-
-    # 현재 조립 완료 단계의 총합 토큰을 연산하는 헬퍼 함수 정의
-    def calculate_current_total_tokens() -> int:
-        t_summary = len(encoder.encode(current_summary)) if current_summary else 0
-        t_recent_msgs = sum(msg.get("token_count", 0) for msg in recent_messages)
-        t_rag = sum(len(encoder.encode(chunk["text"])) for chunk in retrieved_rag_chunks)
-        t_current_q = u_token
-        return t_summary + t_recent_msgs + t_rag + t_current_q
-
-    # =========================================================================
-    # 📍 [조건 3]: 입력 예산 초과 시 제거 우선순위 순차 루프 작동 구간
-    # 제거 순서: 오래된 recent messages → 낮은 점수 RAG context → summary 재압축
-    # =========================================================================
-    while calculate_current_total_tokens() > MAX_TOTAL_BUDGET:
-        # 순서 1: 오래된 recent messages 우선 제거 (단, 방금 던진 유저 질문인 마지막 인덱스는 무조건 수호)
-        if len(recent_messages) > 1:
-            recent_messages.pop(0)
+    # 세션 전용 우회 입력을 만들지 않고 일반 Q&A와 같은 history 경로를 사용한다.
+    # 오케스트레이터가 현재 질문을 직접 붙이므로 여기에는 과거 대화만 넣는다.
+    history = []
+    for message in recent_messages:
+        if not message["text"]:
             continue
+        history.append({
+            "role": message["role"],
+            "content": message["text"],
+        })
+    if current_summary:
+        # recap을 마지막 history 항목에 두면 공통 최신-우선 토큰 예산에서도 보존된다.
+        # 내용은 여전히 HumanMessage로 취급되어 system 권한을 얻지 않는다.
+        history.append({
+            "role": "user",
+            "content": _session_summary_message(current_summary, encoder),
+        })
 
-        # 순서 2: 검색 점수가 낮은 RAG context 제거
-        if len(retrieved_rag_chunks) > 0:
-            retrieved_rag_chunks.sort(key=lambda x: x["score"])  # 오름차순 정렬
-            retrieved_rag_chunks.pop(0)                          # 가장 점수가 낮은 RAG 요소 탈락
-            continue
-
-        # 순서 3: 이전 단계를 거쳐도 한도가 부족할 시 최종 summary 컨텍스트 재압축 단행
-        if current_summary:
-            current_summary = "[LLM 강제 재압축 요약]: 컨텍스트 입력 임계치를 준수하기 위해 기존 요약 데이터가 재압축되었습니다."
-            break
-        break
-
-    # -------------------------------------------------------------------------
-    # 정제 완료된 안전한 최적화 데이터 컴포넌트들을 전달하여 최종 시스템 프롬프트 조립
-    # -------------------------------------------------------------------------
-    builder = ContextBuilder(model_name="gpt-4o")
-    final_prompt_messages = builder.build_final_prompt(
-        system_prompt="당신은 개발 프로젝트 통합 도우미 PaiM입니다.",
-        decrypted_summary=current_summary,
-        decrypted_recent_messages=recent_messages,
-        rag_chunks=retrieved_rag_chunks,
-        current_question=request.current_question,
-        max_total_budget=MAX_TOTAL_BUDGET
-    )
-    # -------------------------------------------------------------------------
-
-    # 세션의 암호화 이력·요약·임시 RAG 입력은 기존 ContextBuilder 예산을 그대로
-    # 적용한 뒤, 프로젝트 Q&A와 같은 Agentic 오케스트레이터에 전달한다.
     try:
         agentic_result = run_agentic_qa(
             project_id=project_id,
             question=request.current_question,
-            prepared_context=_to_agentic_prepared_context(
-                final_prompt_messages, request.current_question
-            ),
+            history=history,
         )
         llm_response_text = agentic_result["answer"]
     except Exception:
@@ -350,8 +283,21 @@ def handle_session_query(
         token_count=a_token
     )
 
-    # 다음 턴 처리를 위해 AI 답변을 최신 메시지 윈도우에 최종 포함
-    recent_messages.append({"id": assistant_msg_id, "role": "assistant", "text": llm_response_text, "token_count": a_token})
+    # 다음 턴과 rolling summary를 위해 이번 사용자·AI 메시지를 함께 포함한다.
+    recent_messages.extend([
+        {
+            "id": user_msg_id,
+            "role": "user",
+            "text": request.current_question,
+            "token_count": u_token,
+        },
+        {
+            "id": assistant_msg_id,
+            "role": "assistant",
+            "text": llm_response_text,
+            "token_count": a_token,
+        },
+    ])
 
     # =========================================================================
     # 📍 [조건 4]: 평시 대화 누적에 따른 Rolling Summary 병합 제어부

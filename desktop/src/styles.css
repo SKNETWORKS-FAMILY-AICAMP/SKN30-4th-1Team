@@ -4113,8 +4113,7 @@ button:not(:disabled):not([aria-disabled="true"]) {
   min-width: 0;
 }
 
-.settings-copy p,
-.settings-status {
+.settings-copy p {
   margin: 0;
   color: var(--muted);
   font-size: 12px;
@@ -4122,35 +4121,10 @@ button:not(:disabled):not([aria-disabled="true"]) {
   line-height: 1.45;
 }
 
-.settings-status {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.settings-inline-control {
-  display: flex;
-  min-width: 0;
-  gap: 8px;
-}
-
 .settings-confirm-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-}
-
-.settings-control-stack {
-  display: grid;
-  min-width: 0;
-  gap: 7px;
-}
-
-.settings-inline-control > :first-child {
-  min-width: 0;
-  flex: 1 1 auto;
 }
 
 .settings-range {
@@ -4172,25 +4146,6 @@ button:not(:disabled):not([aria-disabled="true"]) {
   justify-self: end;
 }
 
-.settings-draft-status {
-  margin: 0;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 550;
-  line-height: 1.45;
-}
-
-.settings-draft-status[data-status="ok"] {
-  color: var(--accent-green);
-}
-
-.settings-draft-status[data-status="error"] {
-  color: var(--danger);
-}
-
-.settings-draft-status[data-status="warning"] {
-  color: var(--issue-fg);
-}
 .settings-danger-group {
   margin-top: 14px;
 }
@@ -8404,8 +8359,7 @@ button:not(:disabled):not([aria-disabled="true"]) {
   font-weight: 650;
 }
 
-.settings-copy p,
-.settings-status {
+.settings-copy p {
   font-size: 13px;
   line-height: 1.5;
 }

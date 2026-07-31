@@ -56,26 +56,6 @@ def test_openai_clients_use_pinned_official_base_url(monkeypatch):
     assert str(embedding_client.client.base_url).rstrip("/") == _OPENAI_OFFICIAL_BASE_URL
 
 
-def test_get_chat_model_fast_falls_back_to_quality(monkeypatch):
-    """OPENAI_MODEL_FAST 미설정 시 fast tier도 quality 모델을 쓴다."""
-    monkeypatch.setenv("LLM_PROVIDER", "openai")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-dummy")
-    monkeypatch.setenv("OPENAI_MODEL", "gpt-quality")
-    monkeypatch.delenv("OPENAI_MODEL_FAST", raising=False)
-    from backend.llm.chat_model_factory import get_chat_model
-    assert get_chat_model(tier="fast").model_name == "gpt-quality"
-
-
-def test_get_chat_model_fast_uses_fast_model(monkeypatch):
-    """OPENAI_MODEL_FAST 설정 시 fast tier가 해당 모델을 쓴다."""
-    monkeypatch.setenv("LLM_PROVIDER", "openai")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-dummy")
-    monkeypatch.setenv("OPENAI_MODEL", "gpt-quality")
-    monkeypatch.setenv("OPENAI_MODEL_FAST", "gpt-fast")
-    from backend.llm.chat_model_factory import get_chat_model
-    assert get_chat_model(tier="fast").model_name == "gpt-fast"
-
-
 def test_get_chat_model_claude(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "claude")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-dummy")

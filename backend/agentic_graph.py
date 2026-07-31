@@ -73,8 +73,9 @@ ORCHESTRATOR_SYSTEM_PROMPT = """당신은 PaiM의 프로젝트 Q&A 오케스트�
 - include_history는 번복·대체된 과거 기록이 필요할 때만 true로 두세요. 현재 상태를 묻는
   질문에 true면 폐기된 값이 섞입니다. 한 주제로 좁히려면 history_topic에 그 주제를
   직접 적으세요(후속 질문이 이전 대화 주제를 이어받을 때도 마찬가지).
-- query_sql_state가 1건 이상 정상 반환하면 같은 조건을 다시 검색하지 말고 그 결과로
-  답하세요. 0건이어도 곧바로 부재를 단정하지 말고 원문 검색으로 확인하세요.
+- query_sql_state가 정상 반환하면 같은 조건을 다시 검색하지 말고 그 결과로 답하세요.
+  0건은 "0건"이라는 확인된 사실이며 확인 불가가 아닙니다. 다만 질문의 조건이 구조화
+  스키마로 표현되지 않는 것이었다면 원문 검색으로 확인하세요.
 
 근거 판단:
 - 질문이 지목한 대상·역할·구성요소·산출물·시점의 경계를 검색 결과에서도 유지하고,
@@ -285,13 +286,10 @@ def build_agentic_qa_graph(model=None, max_tool_rounds: Optional[int] = None):
     def increment_round_node(state: AgenticQAState) -> dict:
         return {"tool_rounds": state.get("tool_rounds", 0) + 1}
 
-    tool_node = ToolNode(
-        QA_TOOLS,
-        handle_tool_errors=(
-            "도구 실행에 실패했습니다. 다른 도구로 재시도하거나 "
-            "근거 부족을 명시하세요."
-        ),
-    )
+    # 재시도해도 _collect_result 가 실패한 도구 하나만으로 전체를 무효화하므로
+    # 결과는 어차피 503 이다. 예외를 삼켜 모델에게 재시도를 시키지 않고 그대로
+    # 전파해 라운드와 LLM 호출을 낭비하지 않는다.
+    tool_node = ToolNode(QA_TOOLS, handle_tool_errors=False)
 
     def partitioned_tool_node(state: AgenticQAState, config) -> dict:
         """Execute unique calls while resolving duplicates in the same batch."""
@@ -316,6 +314,19 @@ def build_agentic_qa_graph(model=None, max_tool_rounds: Optional[int] = None):
             for message in executed_messages
             if isinstance(message, ToolMessage)
         }
+        for message in executed_messages:
+            status = (
+                message.artifact.get("status")
+                if isinstance(getattr(message, "artifact", None), dict)
+                else None
+            )
+            # 실패한 도구는 뒤이은 성공으로 복구되지 않는다. 남은 라운드를 돌려
+            # 답을 만든 뒤 버리지 말고 여기서 끝낸다.
+            if status in {"error", "invalid_query"}:
+                raise RuntimeError(
+                    f"tool {message.name or '<unknown>'} returned {status}: "
+                    "no valid evidence result"
+                )
         ordered_messages = []
         for call in getattr(last, "tool_calls", None) or []:
             call_id = call["id"]
@@ -446,31 +457,10 @@ def _initial_messages(
     question: str,
     history: Optional[list],
     attachment_context: str = "",
-    prepared_context: Optional[list] = None,
 ) -> list[BaseMessage]:
-    """Build the orchestrator input without widening the public Q&A contract.
-
-    ``prepared_context`` is an internal, server-created message sequence for
-    callers that already applied their own context budget (the encrypted
-    session API).  Unlike client-supplied ``history``, it preserves explicit
-    system messages such as the rolling session summary.  Normal Q&A callers
-    continue to use the existing, bounded history path.
-    """
+    """Build one bounded message path for ordinary and deprecated-session Q&A."""
     messages: list[BaseMessage] = [SystemMessage(content=ORCHESTRATOR_SYSTEM_PROMPT)]
-    if prepared_context is not None:
-        for item in prepared_context:
-            content = str(item.get("content", "")).strip()
-            if not content:
-                continue
-            role = item.get("role")
-            if role == "system":
-                messages.append(SystemMessage(content=content))
-            elif role == "assistant":
-                messages.append(AIMessage(content=content))
-            else:
-                messages.append(HumanMessage(content=content))
-    else:
-        messages.extend(_history_messages(history))
+    messages.extend(_history_messages(history))
     if attachment_context.strip():
         messages.append(HumanMessage(content=(
             "[임시 첨부 근거]\n"
@@ -508,7 +498,6 @@ def _collect_result(
     project_error_results = 0
     project_invalid_results = 0
     project_contextless_ok_results = 0
-    search_empty_results = 0
     search_lookup_completed = False
     project_source_ids: list[str] = []
     project_model_contexts: list[str] = []
@@ -582,9 +571,10 @@ def _collect_result(
                 for source in raw_sources
                 if source.strip()
             ]
+            # 0건 count 는 "못 찾음"이 아니라 "조회했고 답이 0" 이다. 근거에서
+            # 제외하면 모델이 쓴 "0건입니다" 가 근거 없음 문구로 교체된다.
             is_substantive = (
                 status == "ok"
-                and not is_zero_count
                 and bool(artifact_contexts)
             )
             if status in _PROJECT_LOOKUP_STATUSES:
@@ -597,10 +587,8 @@ def _collect_result(
                         unresolved_empty_lookup = True
                 if is_zero_count:
                     project_zero_count_results += 1
-                elif status == "empty":
+                if status == "empty":
                     project_empty_results += 1
-                    if message.name == "search_hybrid_vector_rag":
-                        search_empty_results += 1
                 elif is_substantive:
                     project_has_substantive_evidence = True
                     for source in artifact_sources:
@@ -717,7 +705,6 @@ def run_agentic_qa(
     attachment_context: str = "",
     attachment_sources: Optional[list[str]] = None,
     attachment_evidence: Optional[list[dict]] = None,
-    prepared_context: Optional[list] = None,
     *,
     model=None,
     max_tool_rounds: Optional[int] = None,
@@ -742,7 +729,6 @@ def run_agentic_qa(
             question,
             history,
             attachment_context,
-            prepared_context=prepared_context,
         ),
         "tool_rounds": 0,
     })

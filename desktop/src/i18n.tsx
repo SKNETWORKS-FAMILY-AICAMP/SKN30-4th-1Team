@@ -4,7 +4,6 @@ import type { LanguageSetting } from "./settings";
 type Vars = Record<string, number | string>;
 
 const ko: Record<string, string> = {
-  "Settings": "설정",
   "New Project": "새 프로젝트",
   "New Project 1": "새 프로젝트 1",
   "Name change": "이름 변경",
@@ -170,14 +169,12 @@ const en: Record<string, string> = {
   "{count}개": "{count}",
   "새 프로젝트": "New Project",
   "프로젝트": "Projects",
-  "프로젝트 이름 변경": "Rename project",
   "{name} 메뉴": "{name} menu",
   "채팅 이름 변경": "Rename chat",
   "사이드바 크기 조절": "Resize sidebar",
   "이름 변경": "Rename",
   "삭제": "Delete",
   "다시 삭제": "Delete again",
-  "한 번 더 누르면 이 채팅과 대화 기록을 삭제합니다": "Press again to delete this chat and its conversation history",
   "한 번 더 누르면 이 기기에 저장된 채팅과 대화 기록을 삭제합니다":
     "Press again to delete this chat and its conversation history from this device",
   "로컬 저장 공간이 부족해 최신 대화를 저장하지 못했습니다":
@@ -474,7 +471,6 @@ const en: Record<string, string> = {
   "폴더 · {count}개 항목": "Folder · {count} items",
   "{name} 관리": "Manage {name}",
   "검색 결과가 없습니다.": "No search results.",
-  "PaiM에게 제공할 파일이나 폴더를 업로드하세요.": "Upload files or folders for PaiM to use.",
   "등록된 자료가 없습니다": "No sources added",
   "자료함": "Source library",
   "파일 목록 펼치기": "Expand file list",
@@ -525,13 +521,10 @@ const en: Record<string, string> = {
   "GitHub 동기화 실패": "GitHub sync failed",
   "서버에서 찾을 수 없는 프로젝트에는 문서를 업로드할 수 없습니다": "Documents cannot be uploaded to a project that is missing from the server.",
   "지원 문서 {count}개 서버 업로드 중...": "Uploading {count} supported documents to the server...",
-  "취소한 업로드의 서버 문서를 정리하지 못했습니다":
-    "The server copy of the cancelled upload could not be removed",
   "취소한 업로드의 서버 정리를 계속 재시도합니다":
     "Retrying cleanup of the canceled server upload.",
   "삭제 예약을 저장하지 못했습니다. 앱을 닫기 전에 서버 정리를 다시 시도합니다":
     "Could not save the cleanup request. Retrying server cleanup before the app closes.",
-  "서버에 연결되지 않아 로컬 채팅만 삭제했습니다": "The server is offline, so only the local chat was deleted.",
   "서버에 연결되지 않아 프로젝트를 삭제할 수 없습니다": "The project cannot be deleted while the server is offline.",
   "드롭한 파일이나 폴더를 등록할 수 없습니다": "Could not add the dropped files or folders.",
   "데스크톱 앱에서 파일을 업로드할 수 있습니다": "Files can be uploaded from the desktop app.",
@@ -581,8 +574,6 @@ const en: Record<string, string> = {
   "서버에 다시 연결한 뒤 전사를 시작할 수 있습니다":
     "Reconnect to the server before starting transcription.",
   "회의 음성을 서버에 업로드하는 중입니다": "Uploading meeting audio to the server.",
-  "취소한 회의 음성의 서버 문서를 정리하지 못했습니다":
-    "Could not remove the canceled meeting audio from the server.",
   "취소한 회의 음성의 서버 정리를 계속 재시도합니다":
     "Retrying cleanup of the canceled meeting audio on the server.",
   "회의 음성 전사를 시작했습니다 · {provider} · 화자 분리 지원":
@@ -637,9 +628,7 @@ const en: Record<string, string> = {
   "브라우저 모드에서는 채팅 첨부를 LLM에 전달하지 않습니다": "Chat attachments are not sent to the model in browser mode.",
   "Q&A 응답 시간이 초과되었습니다. 다시 시도해 주세요": "The response timed out. Try again.",
   "Q&A 응답을 가져올 수 없습니다": "Could not get a response.",
-  "한 번 더 누르면 서버의 문서·메모리·채팅까지 삭제됩니다": "Press again to delete the server documents, memory, and chats.",
   "한 번 더 누르면 로컬 프로젝트를 삭제합니다": "Press again to delete the local project.",
-  "{name}은 10 MB를 초과해 첨부할 수 없습니다": "{name} exceeds 10 MB and cannot be attached.",
 };
 
 const dictionaries: Record<LanguageSetting, Record<string, string>> = { en, ko };

@@ -83,12 +83,12 @@ HTTP 질문
 
 `POST /api/v1/projects/{project_id}/sessions/{session_id}/query`
 
-이 경로는 암호화된 세션 요약, 최근 메시지, 클라이언트가 보낸 `rag_context`를 `ContextBuilder`로 조립한 뒤 같은 Agentic 오케스트레이터를 호출한다.
+이 경로는 암호화된 세션 요약과 최근 메시지를 `chat/router.py`에서 조립한 뒤 같은 Agentic 오케스트레이터를 호출한다.
 
 주의:
 
 - 일반 `/query`와 입력 계층·토큰 예산·응답 DTO가 다르다.
-- `rag_context`가 SystemMessage로 올라가는 신뢰 경계 문제가 아직 남아 있다.
+- 클라이언트 제공 `rag_context`, `ContextBuilder`, 세션 전용 `prepared_context` 우회 경로는 제거됐다. 세션도 일반 Q&A와 동일한 bounded `history` 경로를 사용한다.
 - #13 local-only chat이 최종 통합되면 이 경로의 MVP 사용 여부가 바뀐 수 있다.
 - 따라서 **핵심 Q&A 성능 점수에 서버 세션 결과를 섞지 않는다.** 세션은 별도 suite로 평가한다.
 
@@ -423,13 +423,11 @@ uv run pytest -q \
 
 ```bash
 uv run pytest -q \
-  --ignore=tests/integration/mysql \
-  --ignore=tests/test_check_scope_secrets.py
+  --ignore=tests/integration/mysql
 ```
 
-`tests/test_check_scope_secrets.py`는 제품 저장소에 없는 개인용
-`.agent-workflow/scripts/check-scope.sh`를 전제로 하는 고아 harness이므로 제품 성능
-게이트에 포함하지 않는다. 실제 MySQL 테스트는 격리된 DB 접속 정보를 주입한 별도
+제품 저장소에 없는 개인용 `.agent-workflow/scripts/check-scope.sh`를 전제로 하던
+고아 테스트는 제거했다. 실제 MySQL 테스트는 격리된 DB 접속 정보를 주입한 별도
 게이트에서 실행한다.
 
 ## 12. 성능 작업자에게 전달할 요청문

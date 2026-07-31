@@ -43,7 +43,6 @@ import { ResizeHandle, useResizable } from "@astryxdesign/core/Resizable";
 import { SegmentedControl, SegmentedControlItem } from "@astryxdesign/core/SegmentedControl";
 import { SideNav } from "@astryxdesign/core/SideNav";
 import { Spinner } from "@astryxdesign/core/Spinner";
-import { StatusDot } from "@astryxdesign/core/StatusDot";
 import { TextArea } from "@astryxdesign/core/TextArea";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
@@ -1274,16 +1273,6 @@ function createServerDocumentAttachment(
   };
 }
 
-function mapAttachments(
-  attachments: Attachment[],
-  updater: (attachment: Attachment) => Attachment,
-): Attachment[] {
-  return attachments.map((attachment) => ({
-    ...updater(attachment),
-    children: attachment.children ? mapAttachments(attachment.children, updater) : undefined,
-  }));
-}
-
 function collectFileAttachments(attachments: Attachment[]): Attachment[] {
   return attachments.flatMap((attachment) =>
     attachment.kind === "directory"
@@ -2004,7 +1993,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     selectedSession,
     selectedSessionId,
     selectedSessionIdRef,
-    sessions,
     setProjects,
     setSelectedProjectId,
     setSelectedSessionId,

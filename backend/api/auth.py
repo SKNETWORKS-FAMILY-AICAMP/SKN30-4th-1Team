@@ -182,33 +182,6 @@ def _is_public_path(path: str) -> bool:
     return path in _PUBLIC_PATHS or path.startswith(_PUBLIC_PREFIXES)
 
 
-async def auth_middleware(request, call_next):
-    """JWT 검증 미들웨어. Bearer 토큰을 검증해 contextvar에 user_id를 심는다.
-    이후 get_current_user_id()가 이 값을 읽으므로 기존 호출부는 수정 불필요.
-    dev 모드에서는 검증을 생략하고 DEV_USER_ID fallback에 맡긴다."""
-    if _auth_mode() == "dev":
-        return await call_next(request)
-
-    # CORS preflight는 브라우저가 헤더 없이 보냄
-    if request.method == "OPTIONS" or _is_public_path(request.url.path):
-        return await call_next(request)
-
-    authorization = request.headers.get("Authorization", "")
-    if not authorization.startswith("Bearer "):
-        return error_response(401, "로그인이 필요합니다.")
-
-    try:
-        user_id = decode_access_token(authorization[len("Bearer "):].strip())
-    except HTTPException as exc:
-        return error_response(exc.status_code, exc.detail)
-
-    reset_token = _current_user_id.set(user_id)
-    try:
-        return await call_next(request)
-    finally:
-        _current_user_id.reset(reset_token)
-
-
 class AuthMiddleware:
     """Pure ASGI auth boundary, avoiding BaseHTTPMiddleware exception deadlocks."""
 

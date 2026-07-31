@@ -12,7 +12,7 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Set, Tuple
+from typing import List, Set
 
 
 def _git(repo: bytes, *args: bytes) -> bytes:
@@ -96,7 +96,7 @@ def _untracked_records(repo: bytes, excluded: Set[bytes]) -> List[bytes]:
     if paths[-1] != b"":
         raise RuntimeError("git ls-files -z 출력에 종단 NUL이 없다")
 
-    records = []  # type: List[Tuple[bytes, bytes]]
+    records: List[tuple[bytes, bytes]] = []
     for path in paths[:-1]:
         if path in excluded:
             continue

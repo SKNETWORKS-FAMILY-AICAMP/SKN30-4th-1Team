@@ -127,7 +127,7 @@ def cors_origins() -> list[str]:
             _fail(["CORS_ORIGINS"], "origin 원문에 금지된 문법이 있습니다")
         try:
             parsed = urlsplit(origin)
-            port = parsed.port
+            _ = parsed.port
         except ValueError:
             _fail(["CORS_ORIGINS"], "port가 유효해야 합니다")
         if not parsed.hostname or (

@@ -31,7 +31,6 @@ class _StructuredLLM:
 def test_run_supersede_uses_structured_output(monkeypatch):
     """run_supersede() — Pydantic structured output으로 매칭 결과를 받는다."""
     llm = _StructuredLLM()
-    supersede._app = None
     monkeypatch.setattr(supersede, "get_chat_model", lambda: llm)
 
     result = supersede.run_supersede(

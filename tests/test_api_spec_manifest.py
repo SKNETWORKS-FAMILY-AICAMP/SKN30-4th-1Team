@@ -258,17 +258,6 @@ def _has_stale_auth(text: str) -> bool:
     return False
 
 
-def _visible_text(doc: Path) -> str:
-    """표시 텍스트만 남긴다(구조화 주석 표식은 제거). HTML 파일만 태그를
-    벗긴다 — Markdown의 리터럴 `<`/`>`(예: "viewer < member")를 태그로 오인해
-    본문을 삭제하지 않도록 한다."""
-    text = doc.read_text(encoding="utf-8")
-    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
-    if doc.suffix.lower() in (".html", ".htm"):
-        text = re.sub(r"<[^>]+>", " ", text)
-    return re.sub(r"\s+", " ", text)
-
-
 def _visible_text_keeplines(doc: Path) -> str:
     """표시 텍스트를 남기되 **블록 경계(개행)를 보존**한다. 인증 지연 가드가
     문장 단위로 검사하려면 서로 다른 문단·표 셀·리스트 항목이 한 문장으로

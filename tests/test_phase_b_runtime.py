@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from fastapi import FastAPI, HTTPException
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
 

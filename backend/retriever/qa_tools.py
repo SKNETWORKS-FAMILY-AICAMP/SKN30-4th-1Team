@@ -491,7 +491,9 @@ def query_structured_memory(
         content = json.dumps(payload, ensure_ascii=False, default=str)
         return content, _with_latency(started, {
             "tool": "query_sql_state",
-            "status": "ok" if rows else "empty",
+            # count는 조회 성공 자체가 결과다. 0은 "못 찾음"이 아니라 "0건"이므로
+            # empty로 내리면 서버가 근거 없음 문구로 답을 덮어쓴다.
+            "status": "ok",
             "operation": operation,
             "sources": sources,
             "model_contexts": [content],
