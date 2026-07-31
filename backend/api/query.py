@@ -281,6 +281,17 @@ def execute_project_query(project_id: int, body: QueryRequest):
         raise HTTPException(status_code=503, detail="Q&A 처리 중 오류가 발생했습니다. 서버 로그를 확인하세요.")
 
 
+def _public_query_response(result: Dict) -> Dict:
+    """Remove evaluation-only context from the HTTP response without mutating it."""
+    public_result = dict(result)
+    debug = public_result.get("debug")
+    if isinstance(debug, dict):
+        public_debug = dict(debug)
+        public_debug.pop("model_contexts", None)
+        public_result["debug"] = public_debug
+    return public_result
+
+
 @router.post(
     "/projects/{project_id}/query",
     summary="Query project knowledge without server chat persistence",
@@ -293,4 +304,4 @@ def execute_project_query(project_id: int, body: QueryRequest):
 @limiter.limit(RATE_LIMIT_QUERY, key_func=authenticated_user_key)
 def query(request: Request, project_id: int, body: QueryRequest):
     require_project_access(project_id)
-    return execute_project_query(project_id, body)
+    return _public_query_response(execute_project_query(project_id, body))

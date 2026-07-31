@@ -96,6 +96,45 @@ def test_query_without_attachment_still_uses_agentic_orchestrator():
     }
 
 
+def test_model_contexts_remain_internal_to_evaluation_calls():
+    from backend.api import query as query_api
+
+    internal_result = {
+        "answer": "답",
+        "sources": ["meeting.md"],
+        "route": "semantic",
+        "debug": {
+            "route": "semantic",
+            "model_contexts": ["(출처: meeting.md) 공개 응답에 포함하면 안 되는 원문"],
+        },
+    }
+
+    with patch("backend.api.query.require_project_access"), \
+         patch("backend.api.query.get_connection", return_value=_project_conn()), \
+         patch("backend.api.query.run_agentic_qa", return_value=internal_result):
+        response = _client.post(
+            "/api/v1/projects/1/query",
+            json={"question": "현재 상태는?"},
+        )
+
+    assert response.status_code == 200
+    assert "model_contexts" not in response.json()["debug"]
+    assert internal_result["debug"]["model_contexts"] == [
+        "(출처: meeting.md) 공개 응답에 포함하면 안 되는 원문"
+    ]
+
+    with patch("backend.api.query.get_connection", return_value=_project_conn()), \
+         patch("backend.api.query.run_agentic_qa", return_value=internal_result):
+        evaluation_result = query_api.execute_project_query(
+            1,
+            query_api.QueryRequest(question="현재 상태는?"),
+        )
+
+    assert evaluation_result["debug"]["model_contexts"] == [
+        "(출처: meeting.md) 공개 응답에 포함하면 안 되는 원문"
+    ]
+
+
 def test_agentic_tool_failure_is_hidden_as_503_at_query_boundary():
     with patch("backend.api.query.require_project_access"), \
          patch("backend.api.query.get_connection", return_value=_project_conn()), \
