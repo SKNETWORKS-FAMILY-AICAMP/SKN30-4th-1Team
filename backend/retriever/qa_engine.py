@@ -2,10 +2,12 @@
 # - 신뢰도 향상을 위해 항상 두 소스를 모두 조회한다.
 # - 원문 검색은 하이브리드: dense(OpenAI 임베딩) 0.4 + BM25(한국어 형태소) 0.4 + recency(날짜) 0.2
 #   를 축별 정규화 RRF(순위 융합)로 합쳐 상위 CHROMA_TOP_N 청크만 사용한다.
-# - MySQL 구조화 기록도 행이 많으면 BM25로 질문 유관 상위 MYSQL_TOP_N만 선별(노이즈 컷).
+# - MySQL 구조화 기록은 신뢰 질의와 토큰이 겹치는 행만 허용하고, 행이 많으면
+#   BM25·memory vector로 상위 MYSQL_TOP_N을 선별한다.
 # - 생성은 LangChain ChatPromptTemplate + ChatOpenAI 체인(LCEL).
 import hashlib
 import os
+import unicodedata
 from datetime import date, datetime
 from typing import List, Dict, Optional, Set, Tuple
 
@@ -33,9 +35,8 @@ from ..llm.chat_model_factory import get_chat_model
 MAX_HISTORY = 10    # 대화 히스토리 최대 유지 턴 수 (컨텍스트 길이 제한)
 CHROMA_K = 8        # 리트리버별(BM25/dense) 후보 청크 수 — 넉넉히 뽑고 융합으로 거른다
 CHROMA_TOP_N = 5    # RRF 융합 후 컨텍스트에 넣을 최종 원문 청크 수
-MYSQL_TOP_N = 12    # 구조화 기록 상한 (category 미매칭 시) — 초과 시 BM25 유관 상위 선별
+MYSQL_TOP_N = 12    # 구조화 기록 상한 — 초과 시 전체 행에서 BM25 유관 상위 선별
 QA_MYSQL_ROWS_LIMIT = max(1, int(os.getenv("QA_MYSQL_ROWS_LIMIT", "60")))
-MYSQL_SUPPLEMENT = 5  # category 매칭 시 타 카테고리에서 BM25 유관 상위 보충 개수
 BM25_WEIGHT = 0.5   # 구조화 기록(MySQL) 융합 가중치 (BM25 : memory vector = 0.5 : 0.5)
 _RRF_K = 60         # RRF 표준 상수 (score = w / (k + rank))
 # 원문 청크 융합 가중치 (로드맵 권고 0.4/0.4/0.2). 축별로 정규화해
@@ -116,15 +117,9 @@ SYSTEM_QA = """당신은 프로젝트 회의록·문서 기록을 근거로 답�
 - [원문 맥락]의 문서에는 번복 표시가 없을 수 있다 — 원문과 [구조화 기록]의 최신 결정이
   충돌하면 [구조화 기록]의 `[최신]` 항목을 우선하라.
 
-출처 인용:
-- 근거를 제시할 때는 그 근거가 나온 컨텍스트 항목에 표기된 실제 출처를
-  `(출처: 표기된_출처)` 형태로 그대로 인용하라. 컨텍스트에는 구조화 기록·원문
-  맥락·첨부 항목마다 `(출처: …)`가 붙어 있으니 그 값을 복사해 쓰면 된다.
-- 컨텍스트에 없는 출처를 지어내지 마라.
-- '구조화 기록', '프로젝트 메모리', '원문 맥락' 같은 컨텍스트 유형 이름을
-  출처로 쓰지 마라 — 사람이 실제 문서를 찾을 수 없다.
-- [프로젝트 메모리]는 요약이라 파일 출처가 없다. 구체 사실·수치의 출처는
-  구조화 기록·원문 맥락·첨부에서 인용하라.
+출처 표시:
+- 출처는 화면에 별도 목록으로 이미 표시되므로, 답변 본문에 `(출처: …)` 같은
+  인용 표기를 넣지 마라. 중복 표시를 피하기 위함이다.
 
 출력 형식:
 - 첫 줄은 질문에 대한 한 문장 직답으로 쓰고, 핵심 결론은 **굵게** 표시하라.
@@ -139,7 +134,7 @@ MULTI_QUERY_PROMPT = """당신은 PaiM semantic 검색을 위한 질문 재표�
 원칙:
 - 원 질문에 없는 요구사항이나 사실을 추가하지 않는다.
 - 동의어와 관점 변화를 사용한다. 예: 원인↔결과, 한글↔영문 용어, 약어↔풀어쓴 말.
-- 제품/프로젝트 용어도 바꿔 쓴다. 예: 고객 이탈 방지↔고객 유지↔리텐션↔retention.
+- 제품·프로젝트 고유 용어도 의미를 바꾸지 않는 범위에서 표기만 바꾼다.
 - 프로젝트 기록 검색에 도움이 되는 명사구를 포함한다.
 - 원 질문과 거의 같은 문장은 제외한다.
 """
@@ -149,30 +144,6 @@ class MultiQueryResult(BaseModel):
     """semantic 검색용 질문 재표현 목록."""
 
     queries: List[str] = Field(default_factory=list)
-
-
-# 질문에서 category 필터를 추출하기 위한 키워드 사전.
-# 한 유형만 매칭될 때만 좁히고, 여러 유형이 섞이면 필터를 걸지 않는다(정보 누락 방지).
-_CATEGORY_KEYWORDS = {
-    "decision": ["결정", "의사결정", "확정", "합의"],
-    "action":   ["액션", "할 일", "할일", "작업", "태스크"],
-    "issue":    ["이슈", "문제", "쟁점"],
-    "risk":     ["리스크", "위험"],
-}
-
-
-def _extract_category(question: str) -> Optional[str]:
-    """질문에서 category 필터를 추출한다. 한 유형의 키워드만 매칭되면 그 category,
-    여러 유형이 섞이거나 없으면 None(전체 조회)을 반환해 정보 누락을 막는다.
-
-    owner(담당자) 필터는 사용하지 않는다 — 정확매칭으로 거르면 관련 행을 놓칠 수 있다.
-    담당자 판별은 구조화 기록 메타데이터를 컨텍스트에 포함해 답변 단계에서 처리한다.
-    """
-    matched = [
-        cat for cat, kws in _CATEGORY_KEYWORDS.items()
-        if any(k in question for k in kws)
-    ]
-    return matched[0] if len(matched) == 1 else None
 
 
 _vectorstore = None
@@ -237,6 +208,59 @@ def _rrf_fuse(rank_lists: List[list], weights: List[float], n_docs: int) -> List
     return scores
 
 
+def _normalize_multi_queries(question: str, candidates: list[str]) -> list[str]:
+    """원 질문을 먼저 보존하고 검색어를 정규화·중복 제거해 최대 4개로 제한한다."""
+    queries = []
+    seen = set()
+    for candidate in [question, *candidates]:
+        cleaned = " ".join(
+            unicodedata.normalize("NFKC", str(candidate or "")).split()
+        )
+        key = cleaned.casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        queries.append(cleaned)
+        if len(queries) >= 4:
+            break
+    return queries
+
+
+def _content_token_union(values) -> Set[str]:
+    """Put trusted query text in the shared canonical content-token space."""
+    tokens: Set[str] = set()
+    for value in values:
+        tokens.update(history_intent.content_tokens(str(value or "")))
+    return tokens
+
+
+def _authoritative_query_tokens(
+    question: str,
+    query_variants: Optional[List[str]],
+) -> Set[str]:
+    """Return the only tokens allowed to admit evidence into this request.
+
+    The current user question is authoritative.  When the caller supplies
+    variants, its first item is the server-built history-effective question.
+    Later variants can rank already-admitted evidence but cannot make an
+    otherwise unrelated row or chunk substantive.
+    """
+    authoritative = [question]
+    if query_variants:
+        authoritative.append(query_variants[0])
+    return _content_token_union(authoritative)
+
+
+def _shares_content_token(text: str, authoritative_tokens: Set[str]) -> bool:
+    """Fail closed unless text shares a canonical token with trusted input."""
+    return bool(
+        authoritative_tokens
+        and authoritative_tokens.intersection(
+            history_intent.content_tokens(str(text or ""))
+        )
+    )
+
+
 def _generate_multi_queries(question: str) -> List[str]:
     """LLM으로 2~3개 재표현을 만들고, 실패하면 원 질문만 반환한다."""
     prompt = ChatPromptTemplate.from_messages([
@@ -247,16 +271,9 @@ def _generate_multi_queries(question: str) -> List[str]:
         result = (prompt | get_chat_model(tier=MULTI_QUERY_MODEL_TIER, temperature=0.3)
                   .with_structured_output(MultiQueryResult)).invoke({"question": question})
     except Exception:
-        return [question]
+        return _normalize_multi_queries(question, [])
 
-    queries = [question]
-    for query in result.queries:
-        cleaned = query.strip()
-        if cleaned and cleaned not in queries:
-            queries.append(cleaned)
-        if len(queries) >= 4:
-            break
-    return queries
+    return _normalize_multi_queries(question, result.queries)
 
 
 def _memory_vector_rank_lists(
@@ -344,32 +361,133 @@ def _short_date(value) -> str:
     return str(value)[:10] if value else ""
 
 
-_NO_REPO = -1   # ingestor._NO_ID — Chroma 메타 repo_id 부재 센티넬
+_NO_SOURCE_ID = -1   # ingestor._NO_ID — Chroma 메타 source id 부재 센티넬
 
 
-def _source_label(source, *, repo_id=None, path=None) -> str:
-    """추적 가능한 출처 라벨(충돌 없는 식별자, 리뷰 R-002). 문서는 파일명을,
-    저장소 연결 파일은 동명 충돌 방지를 위해 repo 식별자를 덧붙인다. 한
-    프로젝트에 저장소가 여러 개면 각기 README.md 등 동일 파일명을 적재할 수
-    있어, repo_id 없이는 어느 파일인지 추적할 수 없기 때문."""
+def _source_id(value):
+    """Normalize a persisted source id, excluding Chroma's absence sentinel."""
+    if value in (None, "", _NO_SOURCE_ID, str(_NO_SOURCE_ID)):
+        return None
+    return str(value)
+
+
+def _source_label(source, *, repo_id=None, doc_id=None, path=None) -> str:
+    """추적 가능한 충돌 없는 출처 라벨. 문서는 파일명을,
+    저장소 연결 파일은 repo 식별자를, 업로드 문서는 doc 식별자를 덧붙인다.
+    같은 프로젝트 안에서 저장소 또는 업로드 문서가 같은 파일명을 가질 수 있어
+    파일명만으로는 실제 근거를 고유하게 추적할 수 없기 때문이다."""
     base = str(path or source or "?").strip() or "?"
-    rid = repo_id if repo_id not in (None, "", _NO_REPO) else None
-    return f"{base} (repo#{rid})" if rid is not None else base
+    rid = _source_id(repo_id)
+    did = _source_id(doc_id)
+    if rid is not None:
+        return f"{base} (repo#{rid})"
+    if did is not None:
+        return f"{base} (doc#{did})"
+    return base
+
+
+def _row_label_from_info(r: Dict, info: Dict) -> str:
+    repo_id = info.get("repo_id")
+    if _source_id(repo_id) is None:
+        repo_id = r.get("repo_id")
+    doc_id = info.get("doc_id")
+    if _source_id(doc_id) is None:
+        doc_id = r.get("doc_id")
+    return _source_label(
+        r.get("source"),
+        repo_id=repo_id,
+        doc_id=doc_id,
+        path=info.get("path"),
+    )
+
+
+def _row_source_labels(r: Dict) -> List[str]:
+    """Return every deterministic canonical provenance label for one row."""
+    raw_infos = r.get("source_infos")
+    if isinstance(raw_infos, list):
+        infos = [info for info in raw_infos if isinstance(info, dict)]
+        if not infos and isinstance(r.get("source_info"), dict):
+            infos = [r["source_info"]]
+    else:
+        primary = r.get("source_info")
+        infos = [primary] if isinstance(primary, dict) else []
+
+    if not infos:
+        infos = [{
+            "repo_id": r.get("repo_id"),
+            "doc_id": r.get("doc_id"),
+            "path": r.get("source"),
+        }]
+
+    labels: List[str] = []
+    for info in infos:
+        label = _row_label_from_info(r, info)
+        if label != "?" and label not in labels:
+            labels.append(label)
+    return labels
 
 
 def _row_source_label(r: Dict) -> str:
-    """구조화 기록 행의 출처 라벨. mysql_search가 붙인 source_info(repo_id·path)를
-    쓰고, 이력 체인 행처럼 source_info가 없으면 source로 폴백한다."""
-    info = r.get("source_info") or {}
-    return _source_label(r.get("source"), repo_id=info.get("repo_id"),
-                         path=info.get("path"))
+    """Primary canonical provenance label kept for compatibility."""
+    primary = r.get("source_info")
+    if isinstance(primary, dict):
+        return _row_label_from_info(r, primary)
+    labels = _row_source_labels(r)
+    return labels[0] if labels else "?"
 
 
 def _chunk_source_label(meta: Dict) -> str:
-    """원문 청크의 출처 라벨. Chroma 메타데이터의 source/source_path/repo_id 사용."""
+    """원문 청크의 충돌 없는 출처 라벨."""
     meta = meta or {}
-    return _source_label(meta.get("source"), repo_id=meta.get("repo_id"),
-                         path=meta.get("source_path"))
+    return _source_label(
+        meta.get("source"),
+        repo_id=meta.get("repo_id"),
+        doc_id=meta.get("doc_id"),
+        path=meta.get("source_path"),
+    )
+
+
+def _chunk_metadata_identity(meta: Dict):
+    """Identity used to map dense results back to the exact corpus record.
+
+    A parent source id plus chunk index is preferred.  Legacy metadata without
+    ids falls back to its canonical source label and is accepted only when that
+    identity resolves to one corpus record.
+    """
+    meta = meta or {}
+    source_label = _chunk_source_label(meta)
+    if source_label == "?":
+        return None
+    chunk_index = meta.get("chunk_index")
+    return (
+        source_label,
+        str(chunk_index) if chunk_index not in (None, "") else None,
+    )
+
+
+def _dense_result_index(
+    doc,
+    *,
+    id_to_idx: Dict[str, int],
+    text_to_idxs: Dict[str, List[int]],
+    metas: List[Dict],
+) -> Optional[int]:
+    """Resolve a dense hit without collapsing equal text from distinct sources."""
+    dense_id = getattr(doc, "id", None)
+    if dense_id not in (None, ""):
+        return id_to_idx.get(str(dense_id))
+
+    candidates = list(text_to_idxs.get(str(getattr(doc, "page_content", "")), []))
+    if not candidates:
+        return None
+
+    identity = _chunk_metadata_identity(getattr(doc, "metadata", None) or {})
+    if identity is not None:
+        candidates = [
+            idx for idx in candidates
+            if _chunk_metadata_identity(metas[idx]) == identity
+        ]
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _row_line_body(r: Dict) -> str:
@@ -396,7 +514,9 @@ def _row_line_body(r: Dict) -> str:
             meta.append(f"상태 근거: {r['completion_status_source']}")
 
     meta_text = f" ({', '.join(meta)})" if meta else ""
-    line = f"{r['content']}{meta_text} (출처: {_row_source_label(r)})"
+    source_labels = _row_source_labels(r)
+    source_marker = ", ".join(source_labels) if source_labels else "?"
+    line = f"{r['content']}{meta_text} (출처: {source_marker})"
     # reason 은 여기서 한 번만 붙인다 — 일반 행·이력 행·structured tool 출력이 모두
     # 이 함수를 거치므로, 호출부에서 또 붙이면 "이유: X 이유: X" 가 된다.
     if r.get("reason"):
@@ -434,8 +554,8 @@ def _annotation_for(r: Dict, preds: Dict[int, List[int]]) -> str:
 def _format_history_row(r: Dict, annotation: str) -> str:
     """관계 참여 행의 컨텍스트 라인: 주석 접두 + 공통 꼬리.
 
-    reason 렌더링은 _row_line_body() 가 전담한다 — 여기서 또 붙이면 LLM 입력과
-    RAGAS rendered 컨텍스트에 "이유: X 이유: X" 가 들어간다.
+    reason 렌더링은 _row_line_body() 가 전담한다 — 여기서 또 붙이면 모델 입력에
+    "이유: X 이유: X"가 들어간다.
     """
     return f"{annotation} {_row_line_body(r)}"
 
@@ -541,7 +661,16 @@ def _build_history_sections(
             relevance = len(topic_tokens & history_intent.content_tokens(text))
         comps.append({"ids": comp_ids, "anchor": anchor, "latest": latest, "relevance": relevance})
 
+    # 슬롯 행은 현재 질의 검색에서 이미 선택된 근거다. 이력 추가 예산이나 주제
+    # 관련도와 무관하게 관계 주석을 유지하되, topical 이력에서 관련도 0인
+    # 컴포넌트의 과거 행을 새 증거로 추가하지는 않는다.
+    slot_annotations: Dict[int, str] = {}
+    for comp in comps:
+        for rid in sorted(comp["ids"] & slot_ids):
+            slot_annotations[rid] = _annotation_for(by_id[rid], preds)
+
     if history_scope == "topical":
+        comps = [comp for comp in comps if comp["relevance"] > 0]
         comps.sort(key=lambda c: (-c["relevance"], -c["latest"].toordinal(), -c["anchor"]))
     else:
         comps.sort(key=lambda c: (-c["latest"].toordinal(), -c["anchor"]))
@@ -552,16 +681,9 @@ def _build_history_sections(
     soft, hard = _history_limits()
     used = 0
     truncated = False
-    slot_annotations: Dict[int, str] = {}
     chain_entries: List[Tuple[Dict, str]] = []
     chains_added = 0
     for i, comp in enumerate(comps):
-        # 슬롯 주석은 예산과 무관하게 전 컴포넌트에 부여한다(round-1 R-002) —
-        # 행 추가가 아니라 이미 출력되는 라인의 포맷 교체라 예산 소비가 0이고,
-        # 컴포넌트가 생략돼도 관계 참여 슬롯 행의 supersede 상태 표시는 유지돼야 한다.
-        for rid in sorted(comp["ids"] & slot_ids):
-            slot_annotations[rid] = _annotation_for(by_id[rid], preds)
-
         addable = [rid for rid in comp["ids"] if rid not in slot_ids]
         if i == 0:
             if len(addable) > hard:
@@ -598,7 +720,7 @@ def _build_history_sections(
 
 def _chunk_tie_key(chunk_id, source: str, text: str) -> str:
     """청크 동률 정렬 보조 키. 운영 경로는 결정론적 Chroma 적재 ID가 항상 있고,
-    폴백(sha256)은 fixture·구버전 적재분 한정. 길이-prefix 인코딩으로
+    폴백(sha256)은 ID가 없는 입력·구버전 적재분 한정. 길이-prefix 인코딩으로
     ("a|b","c") vs ("a","b|c") 같은 경계 모호성을 제거한다."""
     if chunk_id:
         return str(chunk_id)
@@ -638,16 +760,24 @@ def _build_context(
     debug dict는 프론트엔드 디버그 expander에 표시됨.
 
     history_mode: 이력 질문이면 supersede 체인을 컨텍스트에 포함한다.
-    None이면 호출 시점의 질문으로 이력 의도를 감지한다. 호출자가 history mode와
-    scope·토큰을 명시하면 그 값을 그대로 사용한다.
+    호출자가 명시하지 않으면 현재 상태만 조회한다. 이력 scope와 주제는 요청
+    단위의 구조화 해석 결과를 전달받는다.
     """
     if history_mode is None:
-        history_mode = history_intent.detect_history_intent(question)
+        history_mode = False
+    if history_mode:
+        if history_scope not in {"topical", "global"}:
+            raise ValueError("history_mode requires explicit history_scope")
+        if history_scope == "topical":
+            canonical_topic_tokens = _content_token_union(history_topic_tokens or [])
+            if not canonical_topic_tokens:
+                raise ValueError("topical history_scope requires nonempty topic tokens")
+            history_topic_tokens = sorted(canonical_topic_tokens)
+        else:
+            history_topic_tokens = []
+    else:
         history_scope = None
-    if history_mode and history_scope is None:
-        tokens = history_intent.extract_content_tokens(question)
-        history_topic_tokens = sorted(tokens)
-        history_scope = "topical" if tokens else "global"
+        history_topic_tokens = None
 
     # One immutable pointer snapshot drives every MySQL and Chroma read in
     # this hybrid request, even if a repository publishes concurrently.
@@ -661,45 +791,28 @@ def _build_context(
     else:
         # Tool-calling 오케스트레이터는 첫 LLM 호출에서 검색어 변형까지 함께 만든다.
         # 이 경우 검색 내부에서 LLM을 다시 호출하지 않고 원 질문을 첫 검색어로 보존한다.
-        multi_queries = [question]
-        for candidate in query_variants:
-            cleaned = str(candidate).strip()
-            if cleaned and cleaned not in multi_queries:
-                multi_queries.append(cleaned)
-            if len(multi_queries) >= 4:
-                break
+        multi_queries = _normalize_multi_queries(question, query_variants)
         multi_query_source = "tool_agent"
+    authoritative_tokens = _authoritative_query_tokens(question, query_variants)
     debug["multi_queries"] = multi_queries
     debug["multi_query_model_tier"] = (
         MULTI_QUERY_MODEL_TIER if multi_query_source == "generator" else None
     )
     debug["multi_query_source"] = multi_query_source
 
-    # 1) 구조화 기록 — MySQL memory 테이블.
-    #    category는 하드 필터가 아니라 소프트 우선순위로 쓴다: 추출기의 decision/action 분류
-    #    경계가 모호해("~하기로 결정"은 양쪽 다 가능) 하드 컷은 recall을 깎는다.
-    #    - category 매칭: 그 카테고리 전체 + 타 카테고리에서 BM25 유관 상위 보충
-    #    - category 미매칭: 전체에서 BM25 유관 상위 MYSQL_TOP_N
-    category = _extract_category(question)
-    debug["filters"] = {"category": category}
-    rows = mysql_search.search(project_id, index_scope=index_scope)
+    # 1) 구조화 기록 — MySQL memory 테이블. 질문 문자열로 category를 추정하지
+    #    않는다. 전체 유형을 조회하되 신뢰 질의와 canonical token이 겹치는 행만
+    #    허용하고, 상한을 넘으면 허용된 후보 안에서 semantic/BM25 순위를 매긴다.
+    debug["filters"] = {"category": None}
+    candidate_rows = mysql_search.search(project_id, index_scope=index_scope)
+    rows = [
+        row for row in candidate_rows
+        if _shares_content_token(_row_content_text(row), authoritative_tokens)
+    ]
+    debug["mysql_candidate_count"] = len(candidate_rows)
+    debug["mysql_admitted_count"] = len(rows)
     memory_vector_hits: List[Dict] = []
-    if category is not None:
-        matched = [r for r in rows if r["category"] == category]
-        others = [r for r in rows if r["category"] != category]
-        supplement = []
-        if others:
-            supplement, hits = _rank_mysql_rows(
-                project_id, others, multi_queries, MYSQL_SUPPLEMENT, index_scope
-            )
-            memory_vector_hits.extend(hits)
-        matched_limit = max(1, QA_MYSQL_ROWS_LIMIT - len(supplement))
-        matched, hits = _rank_mysql_rows(
-            project_id, matched, multi_queries, matched_limit, index_scope
-        )
-        memory_vector_hits.extend(hits)
-        rows = matched + supplement
-    elif len(rows) > MYSQL_TOP_N:
+    if len(rows) > MYSQL_TOP_N:
         rows, memory_vector_hits = _rank_mysql_rows(
             project_id, rows, multi_queries, MYSQL_TOP_N, index_scope
         )
@@ -735,12 +848,14 @@ def _build_context(
     mysql_body = "\n".join(mysql_lines)
     mysql_ctx = f"[구조화 기록]\n{mysql_body}" if mysql_body else ""
     for r in rows:
-        if r["source"] not in sources:
-            sources.append(r["source"])
+        for source_label in _row_source_labels(r):
+            if source_label not in sources:
+                sources.append(source_label)
     for chain_row, _ in chain_entries:
-        if chain_row.get("source") and chain_row["source"] not in sources:
-            sources.append(chain_row["source"])
-    # 체인 행도 mysql_rows에 포함한다(round-1 R-004) — 실제 LLM 입력과 일치해야
+        for source_label in _row_source_labels(chain_row):
+            if source_label not in sources:
+                sources.append(source_label)
+    # 체인 행도 mysql_rows에 포함한다. 실제 LLM 입력과 일치해야
     # verify_answer_node가 체인 전용 컨텍스트(예: 전 행 superseded 순환)를
     # "컨텍스트 없음"으로 오판해 불필요한 재검색을 돌지 않는다.
     debug["mysql_rows"] = [
@@ -749,6 +864,7 @@ def _build_context(
             "content": r["content"],
             "source": r["source"],
             "source_label": _row_source_label(r),
+            "source_labels": _row_source_labels(r),
             "owner": r.get("owner"),
             "date": _short_date(r.get("date")),
             "due_date": _short_date(r.get("due_date")),
@@ -770,6 +886,8 @@ def _build_context(
     raw_texts = raw.get("documents") or []
     raw_metas = raw.get("metadatas") or []
     raw_ids = raw.get("ids") or []
+    if len(raw_metas) < len(raw_texts):
+        raw_metas = raw_metas + [{}] * (len(raw_texts) - len(raw_metas))
     if len(raw_ids) < len(raw_texts):
         raw_ids = raw_ids + [""] * (len(raw_texts) - len(raw_ids))
     doc_records = []
@@ -778,21 +896,33 @@ def _build_context(
         meta = meta or {}
         if meta.get("item_type") == "memory":
             continue
-        tie_key = _chunk_tie_key(chunk_id, meta.get("source") or "", text)
+        if not _shares_content_token(text, authoritative_tokens):
+            continue
+        tie_key = _chunk_tie_key(chunk_id, _chunk_source_label(meta), text)
         if tie_key in seen_tie_keys:
             continue  # 완전 중복(동일 ID / 동일 source·text 폴백)은 첫 항목만 유지
         seen_tie_keys.add(tie_key)
-        doc_records.append((text, meta, tie_key))
-    texts = [text for text, _, _ in doc_records]
-    metas = [meta for _, meta, _ in doc_records]
-    tie_keys = [key for _, _, key in doc_records]
+        doc_records.append((text, meta, tie_key, str(chunk_id or "")))
+    texts = [text for text, _, _, _ in doc_records]
+    metas = [meta for _, meta, _, _ in doc_records]
+    tie_keys = [key for _, _, key, _ in doc_records]
+    chunk_ids = [chunk_id for _, _, _, chunk_id in doc_records]
+    debug["chroma_candidate_count"] = sum(
+        1 for meta in raw_metas if (meta or {}).get("item_type") != "memory"
+    )
+    debug["chroma_admitted_count"] = len(texts)
     kept: list = []  # (idx, {"bm25_rank": r|None, "dense_rank": r|None, "recency_rank": r|None, "rrf": s})
     if texts:
         dense_lists: List[List[int]] = []
         bm25_lists: List[List[int]] = []
         dense_debug: dict[int, int] = {}
         bm25_debug: dict[int, int] = {}
-        text2idx = {t: i for i, t in enumerate(texts)}
+        id_to_idx = {
+            chunk_id: idx for idx, chunk_id in enumerate(chunk_ids) if chunk_id
+        }
+        text_to_idxs: Dict[str, List[int]] = {}
+        for idx, text in enumerate(texts):
+            text_to_idxs.setdefault(text, []).append(idx)
 
         for query in multi_queries:
             # a. dense 순위 — 벡터 검색 상위 K를 코퍼스 인덱스로 매핑
@@ -803,9 +933,14 @@ def _build_context(
             )
             dense_ranks = []
             for doc, _score in scored:
-                if (doc.metadata or {}).get("item_type") == "memory":
+                if (getattr(doc, "metadata", None) or {}).get("item_type") == "memory":
                     continue
-                idx = text2idx.get(doc.page_content)
+                idx = _dense_result_index(
+                    doc,
+                    id_to_idx=id_to_idx,
+                    text_to_idxs=text_to_idxs,
+                    metas=metas,
+                )
                 if idx is not None and idx not in dense_ranks:
                     dense_ranks.append(idx)
                 if len(dense_ranks) >= CHROMA_K:
@@ -817,7 +952,7 @@ def _build_context(
 
             # b. BM25 순위 — 양수 점수 게이트: 질문과 전혀 안 겹치는 0점 문서가
             #    상위 K 후보로 끼어들던 결함 수정(전 경로 적용, 의도된 변경).
-            #    동점은 tie key 보조 정렬(round-1 R-003) — stable sort의 입력 순서
+            #    동점은 tie key 보조 정렬한다. stable sort의 입력 순서
             #    의존이 RRF 점수 단계로 전파돼 최종 정렬로는 복구되지 않기 때문.
             b_scores = _bm25_scores(query, texts)
             bm25_ranks = [
@@ -883,16 +1018,16 @@ def _build_context(
         ]
 
     # 청크마다 출처 마커를 앞에 붙인다 — 메타데이터에는 출처가 있으나 본문만
-    # 프롬프트에 실으면 LLM이 원문 근거의 파일명을 인용할 수 없기 때문(TASK-007).
+    # 프롬프트에 실으면 LLM이 원문 근거의 파일명을 인용할 수 없기 때문이다.
     chroma_body = "\n".join(
         f"(출처: {_chunk_source_label(metas[i])}) {texts[i]}" for i, _ in kept)
     chroma_ctx = f"[원문 맥락]\n{chroma_body}" if chroma_body else ""
     for i, _ in kept:
-        src = (metas[i] or {}).get("source", "")
-        if src and src not in sources:
-            sources.append(src)
+        source_label = _chunk_source_label(metas[i])
+        if source_label != "?" and source_label not in sources:
+            sources.append(source_label)
     debug["chroma_chunks"] = [
-        # 디버그용: 앞 200자 + 융합 근거(순위·점수). text_full은 평가 스크립트용 전체 본문.
+        # 진단용 요약과 실제 모델 근거 본문, 융합 순위·점수를 함께 보존한다.
         {"text": texts[i][:200], "text_full": texts[i], **info,
          "source": (metas[i] or {}).get("source", ""),
          "source_label": _chunk_source_label(metas[i]),

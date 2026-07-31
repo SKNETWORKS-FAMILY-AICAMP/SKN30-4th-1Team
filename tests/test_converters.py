@@ -421,7 +421,7 @@ def test_upload_rejects_corrupted_archive_with_corrupt_file_code():
 
 
 def test_query_attachment_handles_corrupted_docx_without_500():
-    """R3B02: 손상 첨부는 500 없이 실패 placeholder로 처리된다."""
+    """R3B02: 손상 첨부는 500 없이 근거와 분리된 diagnostics로 처리된다."""
     import base64
     from unittest.mock import MagicMock, patch
 
@@ -453,7 +453,15 @@ def test_query_attachment_handles_corrupted_docx_without_500():
         )
 
     assert response.status_code == 200, response.text
-    assert "(텍스트를 추출할 수 없습니다.)" in captured["attachment_context"]
+    assert captured["attachment_context"] == ""
+    assert captured["attachment_sources"] == []
+    assert captured["attachment_evidence"] == [{
+        "filename": "변조.docx",
+        "file_type": "docx",
+        "extraction_status": "failed",
+        "source_location": "attachment:변조.docx",
+        "truncated": False,
+    }]
 
 
 def test_upload_rejects_oversized_archive_with_400(monkeypatch):
@@ -482,12 +490,12 @@ def test_upload_rejects_oversized_archive_with_400(monkeypatch):
     assert "나누거나" in body["detail"] and "줄여서" in body["detail"]
 
 
-def test_query_attachment_replaces_rejected_docx_with_placeholder(monkeypatch):
-    """R001·R2B01: 질의 첨부에서 거절된 DOCX는 본문으로 쓰이지 않고 대체된다.
+def test_query_attachment_keeps_rejected_docx_out_of_evidence(monkeypatch):
+    """R001·R2B01: 거절된 DOCX는 모델 근거가 아니라 diagnostics에만 남는다.
 
     이전 테스트는 `status_code in (200, 404, 500)`이라 사실상 아무것도 보장하지
     않았다(500까지 성공으로 간주). 프로젝트 존재와 Agentic Q&A를 정상 mock해서
-    거절된 첨부가 실제로 placeholder가 되는지 단언한다.
+    거절된 첨부가 실제 근거와 public source에 들어가지 않는지 단언한다.
     """
     import base64
     from unittest.mock import MagicMock, patch
@@ -524,8 +532,14 @@ def test_query_attachment_replaces_rejected_docx_with_placeholder(monkeypatch):
 
     assert response.status_code == 200, response.text
     context = captured["attachment_context"]
-    assert "(텍스트를 추출할 수 없습니다.)" in context
+    assert context == ""
     assert "평범한 회의록 본문입니다." not in context
+    assert captured["attachment_sources"] == []
+    assert captured["attachment_evidence"][0]["extraction_status"] == "failed"
+    assert (
+        captured["attachment_evidence"][0]["source_location"]
+        == "attachment:보통.docx"
+    )
 
 
 def test_chunk_overlap_preserves_all_source_pages():

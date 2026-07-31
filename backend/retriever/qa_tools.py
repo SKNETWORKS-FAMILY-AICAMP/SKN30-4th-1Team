@@ -8,6 +8,8 @@ orchestrator LLM is the single component responsible for the final response.
 from __future__ import annotations
 
 import json
+import time
+import unicodedata
 from typing import Annotated, Literal, Optional
 
 from langchain_core.tools import tool
@@ -17,33 +19,63 @@ from . import history_context, mysql_search, qa_engine
 from .index_scope import load_project_index_scope
 from .sql_project_state import fetch_project_overview_context
 
-
 # Keep the private alias for test and tool-local compatibility. The old router
 # module is not a runtime dependency anymore.
 _fetch_overview_context = fetch_project_overview_context
 
 
 MemoryCategory = Literal["decision", "action", "issue", "risk", "all"]
-MemoryOperation = Literal["list", "count"]
+MemoryOperation = Literal["list", "count", "overview"]
 CompletionStatus = Literal["open", "completed", "unknown"]
 MEMORY_TOOL_MAX_ROWS = 10
-_ALL_SCOPE_WORDS = frozenset({"전체", "모든", "프로젝트", "기록", "항목", "메모리"})
-_ATTACHMENT_EVIDENCE_MARKERS = ("[첨부 자료]", "[임시 첨부 근거]")
 
 
-def _count_text_filter(category: MemoryCategory, text_query: str) -> Optional[str]:
-    """Return a real count target, excluding phrases that only mean all rows."""
-    normalized = " ".join(text_query.split())
+def _with_latency(started: float, artifact: dict) -> dict:
+    """Tool 실행 시간을 공통 trace 필드로 추가한다."""
+    artifact["latency_ms"] = round((time.perf_counter() - started) * 1000, 3)
+    return artifact
+
+
+def _strict_text(value, field: str, *, optional: bool = False) -> Optional[str]:
+    if value is None and optional:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    normalized = unicodedata.normalize("NFKC", value).strip()
     if not normalized:
-        return None
-    if category == "all" and set(normalized.split()) <= _ALL_SCOPE_WORDS:
-        return None
+        raise ValueError(f"{field} cannot be empty")
     return normalized
 
 
+def _strict_project_id(value) -> int:
+    if type(value) is not int or value <= 0:
+        raise ValueError("project_id must be a positive integer")
+    return value
+
+
+def _row_source_labels(row: dict) -> list[str]:
+    """Return every canonical source label attached to one memory row."""
+    labels = list(row.get("_source_labels") or [])
+    raw_infos = row.get("source_infos") or []
+    infos = list(raw_infos) if isinstance(raw_infos, list) else []
+    primary = row.get("source_info")
+    if isinstance(primary, dict) and primary and primary not in infos:
+        infos.append(primary)
+    if infos:
+        for info in infos:
+            label = qa_engine._row_source_label({**row, "source_info": info})
+            if label != "?":
+                labels.append(label)
+    else:
+        label = qa_engine._row_source_label(row)
+        if label != "?":
+            labels.append(label)
+    return sorted(set(labels))
+
+
 def _dedupe_rows(rows: list[dict]) -> list[dict]:
-    """Deduplicate JOIN-expanded memory rows without losing their DB order."""
-    seen: set[object] = set()
+    """Deduplicate memory rows while preserving every canonical source."""
+    by_key: dict[object, dict] = {}
     result: list[dict] = []
     for row in rows:
         key = row.get("id")
@@ -54,10 +86,17 @@ def _dedupe_rows(rows: list[dict]) -> list[dict]:
                 row.get("owner"),
                 row.get("source"),
             )
-        if key in seen:
+        labels = _row_source_labels(row)
+        if key in by_key:
+            existing = by_key[key]
+            existing["_source_labels"] = sorted(set(
+                list(existing.get("_source_labels") or []) + labels
+            ))
             continue
-        seen.add(key)
-        result.append(row)
+        kept = dict(row)
+        kept["_source_labels"] = labels
+        by_key[key] = kept
+        result.append(kept)
     return result
 
 
@@ -83,7 +122,7 @@ def _compact_retrieval_debug(debug: dict) -> dict:
     }
 
 
-@tool(response_format="content_and_artifact")
+@tool("search_hybrid_vector_rag", response_format="content_and_artifact")
 def search_project_evidence(
     query: Annotated[
         str,
@@ -93,7 +132,6 @@ def search_project_evidence(
         ),
     ],
     project_id: Annotated[int, InjectedState("project_id")],
-    messages: Annotated[list, InjectedState("messages")],
     current_question: Annotated[str, InjectedState("current_question")],
     alternate_queries: Annotated[
         Optional[list[str]],
@@ -105,10 +143,18 @@ def search_project_evidence(
     include_history: Annotated[
         bool,
         (
-            "변화 과정, 이전 상태, 번복·대체 관계를 묻는 경우에 true입니다. "
-            "단순 이유·현재 상태 질문만으로 true를 추측하지 않습니다."
+            "번복·대체된 과거 기록까지 검색할 때만 true입니다. 현재 상태만 필요하면 "
+            "false로 두세요."
         ),
     ] = False,
+    history_topic: Annotated[
+        Optional[str],
+        (
+            "include_history가 true일 때 이력을 한 주제로 좁히는 문구입니다. "
+            "생략하면 프로젝트 이력 전체를 검색합니다. 질문이 이전 대화의 주제를 "
+            "이어받는 경우 그 주제를 여기에 직접 적습니다."
+        ),
+    ] = None,
 ) -> tuple[str, dict]:
     """현재 프로젝트에 수집된 기록에서 특정 대상의 근거를 검색합니다.
 
@@ -116,71 +162,100 @@ def search_project_evidence(
     모를 때 사용합니다. 이미 주어진 구조화 조건으로 목록이나 정확한 개수를 구하는 요청,
     프로젝트 전반의 조망 요청에는 사용하지 않습니다.
     """
+    started = time.perf_counter()
+    try:
+        project_id = _strict_project_id(project_id)
+        normalized_query = _strict_text(query, "query")
+        runtime_question = _strict_text(current_question, "current_question")
+        normalized_alternates: list[str] = []
+        if alternate_queries is not None:
+            if not isinstance(alternate_queries, list):
+                raise ValueError("alternate_queries must be a list")
+            if len(alternate_queries) > 3:
+                raise ValueError("alternate_queries accepts at most 3 values")
+            for alternate in alternate_queries:
+                normalized_alternates.append(
+                    _strict_text(alternate, "alternate_queries item")
+                )
+        if type(include_history) is not bool:
+            raise ValueError("include_history must be a boolean")
+        history_topic = _strict_text(history_topic, "history_topic", optional=True)
+        if history_topic is not None and not include_history:
+            raise ValueError("history_topic requires include_history")
+    except (TypeError, ValueError) as exc:
+        content = f"요청 범위를 검증할 수 없어 검색을 거부했습니다: {exc}"
+        return content, _with_latency(started, {
+            "tool": "search_hybrid_vector_rag",
+            "status": "invalid_query",
+            "sources": [],
+            "model_contexts": [],
+            "debug": {},
+        })
+
     # ``messages`` is the same bounded sequence shown to the orchestrator.  Its
-    # last human turn is the current question, so only earlier human turns are
-    # eligible as the topic of a conversational history follow-up.  Attachment
-    # blocks are evidence, not conversation turns.
-    user_turns = [
-        str(message.content).strip()
-        for message in messages
-        if getattr(message, "type", None) == "human"
-        and str(getattr(message, "content", "")).strip()
-    ]
-    if user_turns:
-        user_turns.pop()
-    conversation_history = [
-        {"role": "user", "content": content}
-        for content in user_turns
-        if not content.startswith(_ATTACHMENT_EVIDENCE_MARKERS)
-    ]
-    history_mode, history_scope, history_tokens, effective_question = (
-        history_context.resolve_history_context(
-            current_question or query,
-            conversation_history,
-            # An explicit true from the model is authoritative.  False (the
-            # schema default) still permits deterministic intent detection so
-            # a missed flag cannot disconnect a conversational follow-up.
-            history_mode=True if include_history else None,
+    # The orchestrator sees the conversation and writes the inherited topic into
+    # ``history_topic`` itself, so a topic is what narrows the history rather
+    # than a server-derived previous turn.
+    try:
+        history_mode, history_scope, history_tokens, effective_question = (
+            history_context.resolve_history_context(
+                runtime_question,
+                history_mode=include_history,
+                history_scope=(
+                    ("topical" if history_topic else "global")
+                    if include_history
+                    else None
+                ),
+                history_topic=history_topic,
+            )
         )
-    )
-    retrieval_query = effective_question if history_mode else query
-    retrieval_variants = []
-    if history_mode and query.strip() != retrieval_query.strip():
-        retrieval_variants.append(query)
-    retrieval_variants.extend(alternate_queries or [])
+    except (TypeError, ValueError) as exc:
+        content = f"이력 범위를 검증할 수 없어 검색을 거부했습니다: {exc}"
+        return content, _with_latency(started, {
+            "tool": "search_hybrid_vector_rag",
+            "status": "invalid_query",
+            "sources": [],
+            "model_contexts": [],
+            "debug": {},
+        })
+    # The user question stays first: ``_authoritative_query_tokens`` trusts only
+    # that entry to admit evidence, so model-authored variants can rerank what
+    # was already admitted but cannot pull in an unrelated row or chunk.
+    retrieval_variants = [
+        effective_question,
+        normalized_query,
+        *normalized_alternates,
+    ]
 
     context, sources, debug = qa_engine._build_context(
         project_id,
-        retrieval_query,
+        runtime_question,
         history_mode=history_mode,
         history_scope=history_scope,
         history_topic_tokens=history_tokens,
-        query_variants=retrieval_variants[:3],
+        query_variants=retrieval_variants,
     )
     # _build_context captures one repository-generation scope for all MySQL
     # and Chroma evidence. The unversioned project summary is intentionally not
-    # mixed into this targeted tool result; overview requests have a dedicated
-    # tool and summary lifecycle.
+    # mixed into this targeted tool result; query_sql_state handles overview
+    # with its own summary lifecycle.
     content = context or "프로젝트 기록에서 관련 근거를 찾지 못했습니다."
-    return content, {
-        "tool": "search_project_evidence",
+    return content, _with_latency(started, {
+        "tool": "search_hybrid_vector_rag",
         "status": "ok" if context else "empty",
         "sources": sources,
+        "model_contexts": [content] if context else [],
         "debug": _compact_retrieval_debug(debug),
-    }
+    })
 
 
-@tool(response_format="content_and_artifact")
+@tool("query_sql_state", response_format="content_and_artifact")
 def query_structured_memory(
     operation: Annotated[
         MemoryOperation,
-        "사용자가 요구한 결과 형태입니다. list는 목록, count는 개수입니다.",
-    ],
-    text_query: Annotated[
-        str,
         (
-            "목록의 관련도 정렬에 쓸 구체 대상 문구입니다. 구조화 필터만으로 "
-            "대상 집합이 완전히 정의되면 빈 문자열입니다."
+            "사용자가 요구한 결과 형태입니다. list는 목록, count는 개수, "
+            "overview는 프로젝트 전반 조망입니다."
         ),
     ],
     project_id: Annotated[int, InjectedState("project_id")],
@@ -196,6 +271,13 @@ def query_structured_memory(
         Optional[str],
         "질문에 조건으로 이미 주어진 담당자만 넣습니다. 사용자가 묻는 미지의 담당자를 추측하지 않습니다.",
     ] = None,
+    include_history: Annotated[
+        bool,
+        (
+            "번복·대체된 과거 행까지 포함할 때만 true입니다. 현재 상태만 필요하면 "
+            "false로 두세요. overview에는 사용할 수 없습니다."
+        ),
+    ] = False,
     completion_status: Annotated[
         Optional[CompletionStatus],
         (
@@ -217,51 +299,186 @@ def query_structured_memory(
         "목록 표시 희망 상한이며 서버 최대값을 넘을 수 없습니다.",
     ] = 8,
 ) -> tuple[str, dict]:
-    """질문에 이미 명시된 구조화 조건으로 프로젝트 기록을 목록 조회하거나 개수 집계합니다.
+    """프로젝트의 구조화 상태를 목록·개수·전반 조망 형태로 조회합니다.
 
+    목록·개수는 category, owner, completion_status, due_within_days, overdue처럼
+    스키마로 표현되는 조건만 정확하게 조회합니다. 작업명이나 자연어 대상 문구처럼
+    스키마 밖 조건이 필요하면 search_hybrid_vector_rag를 사용합니다.
+    프로젝트 브리핑·전반 현황 요청은 overview·all로 조회해 저장된 요약과
+    유효한 Action Plan을 반환합니다.
+    completion_status가 unknown이면 완료 여부 미확인으로 유지하고
+    status_counts를 Action Plan 상태 집계의 권위 있는 값으로 사용합니다.
+    1건 이상의 정상 결과를 얻으면 같은 조건을 search_hybrid_vector_rag로 다시 검색하지 않습니다.
     사용자가 모르는 담당자·상태·수치·이유를 발견하는 용도가 아닙니다.
-    그 경우 search_project_evidence를 사용합니다. 원시 SQL은 지원하지 않으며 목록 결과에는 서버 상한이 적용됩니다.
+    그 경우 search_hybrid_vector_rag를 사용합니다. 원시 SQL은 지원하지 않으며 목록 결과에는 서버 상한이 적용됩니다.
     """
-    text_query = str(text_query or "").strip()
-    limit = max(1, min(int(limit), MEMORY_TOOL_MAX_ROWS))
+    started = time.perf_counter()
+    requested_filters = {
+        "category": category,
+        "owner": owner,
+        "completion_status": completion_status,
+        "due_within_days": due_within_days,
+        "overdue": overdue,
+    }
+    invalid_reason = None
+    try:
+        project_id = _strict_project_id(project_id)
+        if type(operation) is not str or operation not in (
+            "list", "count", "overview"
+        ):
+            raise ValueError("operation is invalid")
+        if type(category) is not str or category not in (
+            "decision", "action", "issue", "risk", "all"
+        ):
+            raise ValueError("category is invalid")
+        owner = _strict_text(owner, "owner", optional=True)
+        if completion_status is not None and (
+            type(completion_status) is not str
+            or completion_status not in ("open", "completed", "unknown")
+        ):
+            raise ValueError("completion_status is invalid")
+        if due_within_days is not None and type(due_within_days) is not int:
+            raise ValueError("due_within_days must be an integer")
+        if overdue is not None and type(overdue) is not bool:
+            raise ValueError("overdue must be a boolean")
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("limit must be a positive integer")
+        limit = min(limit, MEMORY_TOOL_MAX_ROWS)
+        if type(include_history) is not bool:
+            raise ValueError("include_history must be a boolean")
+    except (TypeError, ValueError) as exc:
+        invalid_reason = f"요청 범위를 검증할 수 없습니다: {exc}"
+
+    include_superseded = bool(include_history)
+    if invalid_reason is None and include_history and operation == "overview":
+        invalid_reason = (
+            "프로젝트 이력 전체의 조망은 현재 구조화 조회가 지원하지 않습니다."
+        )
+
+    if invalid_reason is None and category != "action" and any(
+        value is not None for value in (completion_status, due_within_days, overdue)
+    ):
+        invalid_reason = "상태·마감 필터는 action 범위에서만 사용할 수 있습니다."
+    elif invalid_reason is None and due_within_days is not None and not (
+        0 <= due_within_days <= 365
+    ):
+        invalid_reason = "due_within_days는 0 이상 365 이하여야 합니다."
+    elif invalid_reason is None and overdue is False:
+        invalid_reason = "overdue는 기한 초과 조건을 요구할 때 true만 사용할 수 있습니다."
+    elif (
+        invalid_reason is None
+        and overdue is True
+        and due_within_days is not None
+    ):
+        invalid_reason = "overdue와 due_within_days는 함께 사용할 수 없습니다."
+    elif (
+        invalid_reason is None
+        and overdue is True
+        and completion_status not in (None, "open")
+    ):
+        invalid_reason = "overdue는 open action에만 사용할 수 있습니다."
+    if invalid_reason:
+        return invalid_reason, _with_latency(started, {
+            "tool": "query_sql_state",
+            "status": "invalid_query",
+            "operation": operation,
+            "sources": [],
+            "requested_filters": requested_filters,
+            "applied_filters": {},
+            "total_rows": 0,
+            "returned_rows": 0,
+            "model_contexts": [],
+        })
+    if operation == "overview":
+        if category != "all" or any(
+            value is not None
+            for value in (owner, completion_status, due_within_days, overdue)
+        ):
+            return "overview에는 추가 필터를 사용할 수 없습니다.", _with_latency(started, {
+                "tool": "query_sql_state",
+                "status": "invalid_query",
+                "operation": operation,
+                "sources": [],
+                "requested_filters": requested_filters,
+                "applied_filters": {},
+                "total_rows": 0,
+                "returned_rows": 0,
+                "model_contexts": [],
+            })
+        context = _fetch_overview_context(project_id)
+        rows = list((context.get("action_plan") or {}).get("items") or [])
+        sources = list(dict.fromkeys(
+            source
+            for row in rows
+            for source in _row_source_labels(row)
+        ))
+        content = "[프로젝트 조망]\n" + json.dumps(
+            context, ensure_ascii=False, default=str
+        )
+        has_evidence = bool(context.get("overview_summary") or rows)
+        return content, _with_latency(started, {
+            "tool": "query_sql_state",
+            "status": "ok" if has_evidence else "empty",
+            "operation": operation,
+            "sources": sources,
+            "model_contexts": [content] if has_evidence else [],
+            "requested_filters": requested_filters,
+            "applied_filters": {
+                "category": "all",
+                "include_superseded": False,
+            },
+            "category_stats": context.get("category_stats") or {},
+            "total_rows": len(rows),
+            "returned_rows": len(rows),
+            "truncated": False,
+        })
     db_category = None if category == "all" else category
-    has_filter = any(
+    has_filter = include_superseded or any(
         value is not None
         for value in (owner, db_category, completion_status, due_within_days, overdue)
     )
-    if operation == "list" and not text_query and not has_filter:
+    if operation == "list" and not has_filter:
         content = (
-            "구조화 조건과 검색 대상이 모두 비어 있어 전체 기록 조회를 거부했습니다. "
-            "구체적인 근거 검색에는 search_project_evidence를 사용하세요."
+            "구조화 조건이 비어 있어 전체 기록 조회를 거부했습니다. "
+            "구체적인 근거 검색에는 search_hybrid_vector_rag를 사용하세요."
         )
-        return content, {
-            "tool": "query_structured_memory",
+        return content, _with_latency(started, {
+            "tool": "query_sql_state",
             "status": "invalid_query",
+            "operation": operation,
             "sources": [],
+            "requested_filters": requested_filters,
+            "applied_filters": {},
             "total_rows": 0,
             "returned_rows": 0,
-        }
+            "model_contexts": [],
+        })
 
-    count_text_filter = (
-        _count_text_filter(category, text_query)
-        if operation == "count" else None
-    )
+    applied_filters = {
+        "category": category,
+        "owner": owner,
+        "completion_status": completion_status,
+        "due_within_days": due_within_days,
+        "overdue": overdue,
+        "include_superseded": include_superseded,
+    }
     index_scope = load_project_index_scope(project_id)
     rows = _dedupe_rows(mysql_search.search(
         project_id,
         category=db_category,
         owner=owner,
-        text_query=count_text_filter,
+        text_query=None,
         completion_status=completion_status,
         due_within_days=due_within_days,
         overdue=overdue,
+        include_superseded=include_superseded,
         index_scope=index_scope,
     ))
     sources = []
     for row in rows:
-        source = row.get("source")
-        if source and source not in sources:
-            sources.append(source)
+        for source in _row_source_labels(row):
+            if source not in sources:
+                sources.append(source)
 
     if operation == "count":
         payload = {"count": len(rows), "filters": {
@@ -271,73 +488,43 @@ def query_structured_memory(
             "due_within_days": due_within_days,
             "overdue": overdue,
         }}
-        return json.dumps(payload, ensure_ascii=False, default=str), {
-            "tool": "query_structured_memory",
-            "status": "ok",
+        content = json.dumps(payload, ensure_ascii=False, default=str)
+        return content, _with_latency(started, {
+            "tool": "query_sql_state",
+            "status": "ok" if rows else "empty",
             "operation": operation,
             "sources": sources,
+            "model_contexts": [content],
+            "requested_filters": requested_filters,
+            "applied_filters": applied_filters,
             "total_rows": len(rows),
             "returned_rows": 0,
-        }
+        })
 
-    ranked = rows
-    vector_hits: list[dict] = []
-    if text_query and rows:
-        ranked, vector_hits = qa_engine._rank_mysql_rows(
-            project_id, rows, [text_query], limit, index_scope
-        )
-    ranked = ranked[:limit]
+    ranked = rows[:limit]
     if ranked:
         content = "\n".join(_row_evidence(row) for row in ranked)
     else:
         content = (
             "구조화 조건으로 일치하는 행을 찾지 못했습니다. 이것만으로 기록 부재를 "
-            "확정하지 말고 search_project_evidence로 원문을 확인하세요."
+            "확정하지 말고 search_hybrid_vector_rag로 원문을 확인하세요."
         )
-    return content, {
-        "tool": "query_structured_memory",
+    return content, _with_latency(started, {
+        "tool": "query_sql_state",
         "status": "ok" if ranked else "empty",
         "operation": operation,
-        "sources": [
-            row.get("source") for row in ranked
-            if row.get("source")
-        ],
+        "sources": list(dict.fromkeys(
+            source
+            for row in ranked
+            for source in _row_source_labels(row)
+        )),
+        "model_contexts": [content] if ranked else [],
+        "requested_filters": requested_filters,
+        "applied_filters": applied_filters,
         "total_rows": len(rows),
         "returned_rows": len(ranked),
         "truncated": len(rows) > len(ranked),
-        "memory_vector_hits": vector_hits[:10],
-    }
+    })
 
 
-@tool(response_format="content_and_artifact")
-def get_project_overview(
-    project_id: Annotated[int, InjectedState("project_id")],
-) -> tuple[str, dict]:
-    """현재 프로젝트 전체를 폭넓게 조망할 때 저장된 요약, 분류별 집계와 유효한 Action Plan을 반환합니다.
-
-    프로젝트 브리핑·전반 현황·전체 위험과 다음 할 일을 묻는 요청에만 사용합니다.
-    "전체 정답률"처럼 범위 단어가 있어도 결과가 하나의 지표·수치·대상 속성이면
-    search_project_evidence를 사용합니다. completion_status가 unknown이면 완료 여부 미확인으로 유지하고,
-    status_counts를 Action Plan 상태 집계의 권위 있는 값으로 사용합니다.
-    """
-    context = _fetch_overview_context(project_id)
-    rows = list((context.get("action_plan") or {}).get("items") or [])
-    sources = []
-    for row in rows:
-        source = row.get("source")
-        if source and source not in sources:
-            sources.append(source)
-    return "[프로젝트 조망]\n" + json.dumps(
-        context, ensure_ascii=False, default=str
-    ), {
-        "tool": "get_project_overview",
-        "status": "ok" if context.get("overview_summary") or rows else "empty",
-        "sources": sources,
-        "category_stats": context.get("category_stats") or {},
-        "total_rows": len(rows),
-        "returned_rows": len(rows),
-        "truncated": False,
-    }
-
-
-QA_TOOLS = [search_project_evidence, query_structured_memory, get_project_overview]
+QA_TOOLS = [search_project_evidence, query_structured_memory]

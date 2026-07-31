@@ -1,6 +1,5 @@
 from unittest.mock import MagicMock
 
-import pytest
 from langchain_core.messages import AIMessage
 
 from backend.agentic_graph import run_agentic_qa
@@ -18,90 +17,136 @@ class _ToolCallingFake:
         return next(self.responses)
 
 
-def _evidence_call(query: str, *, include_history: bool = False) -> AIMessage:
+def _evidence_call(query: str, call_id: str = "call_evidence", **args) -> AIMessage:
     return AIMessage(content="", tool_calls=[{
-        "name": "search_project_evidence",
-        "args": {"query": query, "include_history": include_history},
-        "id": "call_evidence",
+        "name": "search_hybrid_vector_rag",
+        "args": {"query": query, **args},
+        "id": call_id,
         "type": "tool_call",
     }])
 
 
-@pytest.mark.parametrize("question", ["그 전에는?", "이전 결정은?"])
-def test_history_followup_reaches_retrieval_with_previous_topic(monkeypatch, question):
+def test_orchestrator_topic_makes_a_pronoun_follow_up_retrievable(monkeypatch):
     fake = _ToolCallingFake([
-        _evidence_call(question),
-        AIMessage(content="기존에는 세션 인증을 사용했습니다."),
+        _evidence_call(
+            "Nimbus42 authentication 이전 상태",
+            include_history=True,
+            history_topic="Nimbus42 authentication",
+        ),
+        AIMessage(content="An earlier state was found."),
     ])
-    build_context = MagicMock(return_value=("이력 근거", ["decision.md"], {}))
+    build_context = MagicMock(
+        return_value=("history evidence", ["repo#1:notes.md"], {})
+    )
     monkeypatch.setattr(qa_tools.qa_engine, "_build_context", build_context)
 
     result = run_agentic_qa(
         1,
-        question,
+        "What preceded it?",
         history=[
-            {"role": "user", "content": "인증 방식을 어떻게 결정했어?"},
-            {"role": "assistant", "content": "OAuth로 결정했습니다."},
+            {"role": "user", "content": "Explain Nimbus42 authentication."},
+            {"role": "assistant", "content": "An unsupported prior answer."},
         ],
         model=fake,
     )
 
-    assert result["answer"] == "기존에는 세션 인증을 사용했습니다."
+    assert result["answer"] == "An earlier state was found."
     args, kwargs = build_context.call_args
-    assert args == (1, f"인증 방식을 어떻게 결정했어? {question}")
+    assert args == (1, "What preceded it?")
     assert kwargs["history_mode"] is True
     assert kwargs["history_scope"] == "topical"
-    assert "인증" in kwargs["history_topic_tokens"]
-    assert kwargs["query_variants"] == [question]
+    assert {"nimbus", "42"} <= set(kwargs["history_topic_tokens"])
+    # The topic is prepended to the authoritative variant, so a question that
+    # carries no content token of its own can still admit evidence.
+    assert kwargs["query_variants"][0] == (
+        "Nimbus42 authentication What preceded it?"
+    )
 
 
-def test_non_history_question_keeps_tool_query_unchanged(monkeypatch):
+def test_current_state_search_never_widens_into_history(monkeypatch):
     fake = _ToolCallingFake([
-        _evidence_call("현재 인증 담당자"),
-        AIMessage(content="현재 담당자는 민지입니다."),
+        _evidence_call("current Nimbus42 state"),
+        AIMessage(content="The current state was found."),
     ])
-    build_context = MagicMock(return_value=("현재 근거", ["action.md"], {}))
+    build_context = MagicMock(
+        return_value=("current evidence", ["repo#1:notes.md"], {})
+    )
     monkeypatch.setattr(qa_tools.qa_engine, "_build_context", build_context)
 
     run_agentic_qa(
         1,
-        "지금 누가 담당해?",
-        history=[{"role": "user", "content": "예전 인증 결정은?"}],
+        "What changed in Nimbus42?",
+        history=[{"role": "user", "content": "Discuss an unrelated release."}],
         model=fake,
     )
 
-    args, kwargs = build_context.call_args
-    assert args == (1, "현재 인증 담당자")
+    kwargs = build_context.call_args.kwargs
     assert kwargs["history_mode"] is False
     assert kwargs["history_scope"] is None
     assert kwargs["history_topic_tokens"] == []
+    assert kwargs["query_variants"] == [
+        "What changed in Nimbus42?",
+        "current Nimbus42 state",
+    ]
 
 
-@pytest.mark.parametrize("attachment_marker", ["[첨부 자료]", "[임시 첨부 근거]"])
-def test_attachment_evidence_is_not_used_as_the_followup_topic(
-    monkeypatch, attachment_marker
-):
+def test_history_without_a_topic_is_a_global_scope(monkeypatch):
     fake = _ToolCallingFake([
-        _evidence_call("그 전에는?"),
-        AIMessage(content="기존 인증 결정을 답했습니다."),
+        _evidence_call("project chronology", include_history=True),
+        AIMessage(content="The chronology was found."),
     ])
-    build_context = MagicMock(return_value=("이력 근거", ["decision.md"], {}))
+    build_context = MagicMock(
+        return_value=("history evidence", ["repo#1:notes.md"], {})
+    )
     monkeypatch.setattr(qa_tools.qa_engine, "_build_context", build_context)
 
-    run_agentic_qa(
-        1,
-        "그 전에는?",
-        history=[{"role": "user", "content": "인증 방식을 어떻게 결정했어?"}],
-        attachment_context=f"{attachment_marker}\n릴리즈명은 Bluefin",
-        model=fake,
+    run_agentic_qa(1, "Summarize the project chronology.", model=fake)
+
+    kwargs = build_context.call_args.kwargs
+    assert kwargs["history_mode"] is True
+    assert kwargs["history_scope"] == "global"
+    assert kwargs["history_topic_tokens"] == []
+
+
+def test_history_choice_is_per_call_not_sticky(monkeypatch):
+    fake = _ToolCallingFake([
+        _evidence_call(
+            "Nimbus42 origin",
+            "call_1",
+            include_history=True,
+            history_topic="Nimbus42",
+        ),
+        _evidence_call("Nimbus42 current outcome", "call_2"),
+        AIMessage(content="Both evidence slices were found."),
+    ])
+    build_context = MagicMock(
+        return_value=("evidence", ["repo#1:notes.md"], {})
     )
+    monkeypatch.setattr(qa_tools.qa_engine, "_build_context", build_context)
 
-    assert build_context.call_args.args == (
-        1,
-        "인증 방식을 어떻게 결정했어? 그 전에는?",
-    )
+    run_agentic_qa(1, "Compare the origin and outcome of Nimbus42.", model=fake)
+
+    assert build_context.call_count == 2
+    assert [
+        call.kwargs["history_mode"]
+        for call in build_context.call_args_list
+    ] == [True, False]
+    assert [
+        call.kwargs["history_scope"]
+        for call in build_context.call_args_list
+    ] == ["topical", None]
 
 
-def test_history_runtime_fields_are_not_exposed_to_the_model():
-    assert "messages" not in qa_tools.search_project_evidence.args
-    assert "current_question" not in qa_tools.search_project_evidence.args
+def test_runtime_fields_stay_hidden_from_the_tool_schema():
+    properties = qa_tools.search_project_evidence.tool_call_schema.model_json_schema()[
+        "properties"
+    ]
+
+    assert set(properties) == {
+        "query",
+        "alternate_queries",
+        "include_history",
+        "history_topic",
+    }
+    for name in ("messages", "current_question", "project_id", "question_scope"):
+        assert name not in properties

@@ -46,7 +46,7 @@ HTTP 질문
 
 ```json
 {
-  "question": "SDK 연동 담당자가 누구야?",
+  "question": "특정 작업의 담당자가 누구야?",
   "history": [],
   "attachments": []
 }
@@ -105,14 +105,14 @@ HTTP 질문
 
 | 사용자가 원하는 결과 | 기대 Tool | 핵심 인자 | 대표 질문 |
 | --- | --- | --- | --- |
-| 특정 대상의 담당자·수치·날짜·이유·배경 | `search_project_evidence` | `query`, `alternate_queries`, `include_history` | `SDK 연동은 누가 담당했어?` |
-| 질문에 이미 명시된 조건의 목록 | `query_structured_memory` | `operation=list`, `category`, 선택 필터 | `김민수의 미완료 액션 목록은?` |
-| 질문에 이미 명시된 조건의 정확한 개수 | `query_structured_memory` | `operation=count`, `category`, 선택 필터 | `완료된 액션이 몇 개야?` |
-| 프로젝트 전반 현황·브리핑·전체 리스크 | `get_project_overview` | 사용자 인자 없음 | `현재 프로젝트 전반 상태를 브리핑해줘` |
+| 특정 대상의 담당자·수치·날짜·이유·배경 | `search_hybrid_vector_rag` | `query`, `alternate_queries` | `특정 작업은 누가 담당했어?` |
+| 질문에 이미 명시된 조건의 목록 | `query_sql_state` | `operation=list`, `category`, 선택 필터 | `특정 담당자의 미완료 액션 목록은?` |
+| 질문에 이미 명시된 조건의 정확한 개수 | `query_sql_state` | `operation=count`, `category`, 선택 필터 | `완료된 액션이 몇 개야?` |
+| 프로젝트 전반 현황·브리핑·전체 리스크 | `query_sql_state` | `operation=overview`, `category=all` | `현재 프로젝트 전반 상태를 브리핑해줘` |
 | 구조화 상태와 이유·배경을 함께 요구 | 복수 Tool | 각 Tool에 필요한 인자 | `미완료 액션과 그것이 남은 이유를 설명해줘` |
-| 변경·번복·이전 상태 | `search_project_evidence` | `include_history=true` 또는 deterministic 이력 감지 | `인증 방식은 왜 바뀌었어?` |
+| 변경·번복·이전 상태 | `search_hybrid_vector_rag` | 서버가 요청당 한 번 해석한 `question_scope` | `이 결정은 왜 바뀌었어?` |
 
-### 4.1 `search_project_evidence`
+### 4.1 `search_hybrid_vector_rag`
 
 용도:
 
@@ -136,14 +136,14 @@ HTTP 질문
 - 정답 근거가 있을 때 답변이 그 근거를 정확히 사용했는지
 - 근거가 없을 때 추측하지 않는지
 
-### 4.2 `query_structured_memory`
+### 4.2 `query_sql_state`
 
 용도:
 
 - 사용자가 이미 제공한 구조화 조건의 목록·개수
 - `category`: `decision | action | issue | risk | all`
 - `completion_status`: `open | completed | unknown`
-- 기타 조건: `owner`, `due_within_days`, `overdue`, `text_query`
+- 기타 조건: `owner`, `due_within_days`, `overdue`
 - list 최대 10행
 
 금지 사항:
@@ -160,7 +160,7 @@ HTTP 질문
 - list는 정확도와 함께 `total_rows`, `returned_rows`, `truncated`를 확인한다.
 - count 0건은 `status=ok`, list 0건은 `status=empty`로 반환될 수 있다.
 
-### 4.3 `get_project_overview`
+### 4.3 `query_sql_state(operation=overview)`
 
 용도:
 
@@ -183,16 +183,19 @@ HTTP 질문
 예:
 
 ```text
-user: 인증 방식은 어떻게 결정했어?
-assistant: OAuth로 결정했습니다.
+user: 배포 방침은 어떻게 결정했어?
+assistant: 현재 방침을 설명했습니다.
 user: 그 전에는?
 ```
 
 처리:
 
-1. `그 전에는?`를 이력 질문으로 deterministic 감지한다.
-2. 직전 user 주제를 결합해 `인증 방식은 어떻게 결정했어? 그 전에는?`를 실제 검색어로 사용한다.
-3. 주제 token이 있으면 topical supersede chain, 없으면 global history를 조회한다.
+1. 서버가 최신 질문과 제한된 이전 user turn을 구조화된 `QuestionScope`로 한 번 해석한다.
+2. `include_history`, `history_scope`, `history_topic`, `inherit_previous_topic`을 graph state에 고정한다.
+3. 검색 Tool은 고정된 scope만 주입받아 topical 또는 global supersede chain을 조회한다.
+
+`include_history`는 모델이 생성하는 공개 Tool 인자가 아니다. 이력 여부를 문구 목록이나
+정규식으로 다시 판정하지 않으며, assistant 답변은 주제 사실의 출처로 사용하지 않는다.
 
 평가 필수 항목:
 
@@ -204,8 +207,8 @@ user: 그 전에는?
 
 제한:
 
-- 이 결합은 `search_project_evidence`에 연결돼 있다.
-- 모델이 history list/count 질문을 `query_structured_memory`로 잘못 선택하면 동일한 이력 결합이 적용되지 않는다.
+- 이 결합은 `search_hybrid_vector_rag`에 연결돼 있다.
+- 모델이 history list/count 질문을 `query_sql_state`로 잘못 선택하면 동일한 이력 결합이 적용되지 않는다.
 - rolling summary에만 주제가 남고 최근 user turn이 사라진 세션은 별도 검증이 필요하다.
 
 ### 5.2 임시 첨부
@@ -215,8 +218,11 @@ user: 그 전에는?
 1. 서버가 base64, 확장자, MIME·인코딩·제어문자, 파일별·전체 크기를 검증한다.
 2. 텍스트를 추출하고 파일당 기본 20,000자, 전체 40,000자로 제한한다.
 3. 첨부는 저장·임베딩·Chroma 색인하지 않고 `[\uC784\uC2DC \uCCA8\uBD80 \uADFC\uAC70]` HumanMessage로 현재 질문에만 제공한다.
-4. 첨부가 있어도 Agent는 프로젝트 Tool을 최소 1개 호출한다.
+4. 첨부가 있어도 첫 프로젝트 Tool 확인은 생략하지 않는다. 첨부가 프로젝트 사실
+   조회의 성공이나 실패를 대신하지 못하게 두 근거 채널을 분리한다.
 5. 첨부 출처 최대 5개와 프로젝트 Tool 출처 최대 5개를 독립적으로 보존한다.
+   첨부 source ID는 `attachment:<request-local-name>` namespace를 사용해 같은
+   파일명의 프로젝트 문서와 충돌하지 않는다.
 
 평가 세트:
 
@@ -257,13 +263,15 @@ user: 그 전에는?
   "debug": {
     "router_stage": "tool_agent",
     "tool_rounds": 1,
-    "tools_used": ["search_project_evidence"],
+    "tools_used": ["search_hybrid_vector_rag"],
     "tool_calls": [
-      {"name": "search_project_evidence", "args": {"query": "..."}}
+      {"name": "search_hybrid_vector_rag", "args": {"query": "..."}}
     ],
     "tool_results": [
-      {"tool": "search_project_evidence", "status": "ok"}
+      {"tool": "search_hybrid_vector_rag", "status": "ok", "latency_ms": 12.3}
     ],
+    "llm_calls": 2,
+    "llm_usage": {"input_tokens": 100, "output_tokens": 40, "total_tokens": 140},
     "tool_sources": ["meeting.md"],
     "mysql_rows": [],
     "chroma_chunks": [],
@@ -281,6 +289,8 @@ user: 그 전에는?
 - HTTP status와 응답 시간
 - `answer`, `sources`
 - `debug.tools_used`, `debug.tool_calls`, `debug.tool_results`
+- 구조화 조회의 요청·적용 필터와 집계 대상 수
+- 첨부 파일 유형, 추출 상태, 원문 위치, 잘림 여부
 - `debug.mysql_rows`, `debug.chroma_chunks`, `debug.multi_queries`
 - 정답 근거가 검색 결과에 있었는지
 - 본문 citation이 실제 검색 출처와 일치하는지
@@ -301,15 +311,19 @@ user: 그 전에는?
   "fixture_id": "project-fixture-v1",
   "question": "그 전에는?",
   "history": [
-    {"role": "user", "content": "인증 방식은 어떻게 결정했어?"},
-    {"role": "assistant", "content": "OAuth로 결정했습니다."}
+    {"role": "user", "content": "배포 방침은 어떻게 결정했어?"},
+    {"role": "assistant", "content": "현재 방침을 설명했습니다."}
   ],
   "attachments": [],
   "expected": {
     "http_status": 200,
-    "required_tools": ["search_project_evidence"],
-    "forbidden_tools": ["get_project_overview"],
-    "required_args": {"include_history": true},
+    "required_tools": ["search_hybrid_vector_rag"],
+    "forbidden_tools": [],
+    "required_scope": {
+      "include_history": true,
+      "history_scope": "topical",
+      "inherit_previous_topic": true
+    },
     "required_facts": ["..."],
     "forbidden_facts": ["..."],
     "required_sources": ["meeting-01.md"],
