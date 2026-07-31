@@ -88,7 +88,7 @@ SUMMARY_COLUMNS = [
     "abstain_rate",
 ]
 
-# 기권(환각 방지) 판정 패턴 — SYSTEM_QA가 지시하는 "기록에서 확인되지 않는다" 계열
+# 기권(환각 방지) 판정 패턴 — 현 Agentic prompt의 "기록에서 확인되지 않는다" 계열
 ABSTAIN_PATTERNS = [
     "확인되지 않", "확인할 수 없", "기록에 없", "기록에서 찾을 수 없",
     "나타나 있지 않", "포함되어 있지 않", "언급되어 있지 않", "정보가 없",
@@ -716,7 +716,8 @@ def _build_context_configured(project_id: int, question: str, *, history_mode,
     from backend.retriever import qa_engine
     context, sources, debug = qa_engine._build_context(
         project_id, question, history_mode=history_mode,
-        history_scope=history_scope, history_topic_tokens=history_topic_tokens)
+        history_scope=history_scope, history_topic_tokens=history_topic_tokens,
+        query_variants=[question])
     # RAGAS context 지표용: 출처 마커 없는 원문(검색 품질 측정 입력 불변).
     contexts = ([r["content"] for r in debug.get("mysql_rows", [])]
                 + [c["text_full"] for c in debug.get("chroma_chunks", [])])
@@ -1344,7 +1345,7 @@ def cmd_measure(args) -> None:
             rows_out.append(row)
 
         # 환각 기권률 — dev·final 동일 수행(plan 리뷰 3-P2d)
-        from backend.retriever import qa_engine
+        from evals.agentic_v2.context_answer import answer_from_context
         abstains = 0
         for q in hallu:
             collector = get_collector(config, q)
@@ -1352,9 +1353,7 @@ def cmd_measure(args) -> None:
             # 서비스 렌더링 컨텍스트로 생성(출처 마커 포함, R-001). R0는 렌더링
             # 컨텍스트가 없으므로 수집 원문으로 폴백한다(빈 컨텍스트 생성 방지, C5-002).
             gen_ctx = _gen_context(debug, contexts)
-            answer = qa_engine._get_chain().invoke(
-                {"history": [], "context": gen_ctx,
-                 "question": q["question"]})
+            answer = answer_from_context(gen_ctx, q["question"])
             ok = is_abstain(answer)
             abstains += int(ok)
             sql_ctx, vec_ctx = split_contexts(debug)
@@ -1371,9 +1370,10 @@ def cmd_measure(args) -> None:
         if need_generation:
             for row in rows_out:
                 if row["tag"] != "hallucination":
-                    row["response"] = qa_engine._get_chain().invoke(
-                        {"history": [], "context": row.get("rendered_context", ""),
-                         "question": row["question"]})
+                    row["response"] = answer_from_context(
+                        row.get("rendered_context", ""),
+                        row["question"],
+                    )
                     # 출처 추적성 — 답변이 실제 검색 출처를 마커로 인용했는지
                     # (환각 문항은 기권이 정답이라 인용 대상 아님, TASK-007)
                     row["citation_grounding"] = citation_grounding(
@@ -1442,7 +1442,7 @@ def cmd_measure(args) -> None:
 def _install_vertexai_shim() -> None:
     """ragas(0.4.3 실측)가 langchain-community 0.4에서 제거된
     `langchain_community.chat_models.vertexai`를 임포트해 ModuleNotFoundError로
-    죽는 문제 우회 — rag_eval.py의 동일 shim을 재사용한 것."""
+    죽는 문제를 우회한다."""
     name = "langchain_community.chat_models.vertexai"
     if name in sys.modules:
         return

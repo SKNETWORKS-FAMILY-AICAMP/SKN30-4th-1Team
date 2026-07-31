@@ -174,13 +174,14 @@ phase 계약: `dev`(lite, judge gpt-4.1-mini — 개발 반복용) / `final`(보
   행이 달라진다 → 코퍼스 적재는 1회 수행 후 DB 상태를 고정하고, 전 구성을
   같은 상태에서 측정. 적재 결과(행 덤프)를 runid에 귀속해 저장, 재현 시 참조.
 
-## 9. 알려진 하네스 결함 (TASK-006에서 수정)
+## 9. 하네스 정리 내역
 
-- `rag_eval.py`·`rag_eval_langsmith.py`가 현 엔진에 없는
-  `qa_engine.CHROMA_MAX_DISTANCE`를 참조 → 실행 즉시 AttributeError.
-- `rag_eval.py`의 `collect()`는 실서비스 경로(`_build_context`)를 타지 않는 자체
-  재구현(하이브리드 이전) — E0~E2 측정에는 실경로 호출로 교체, R0 재현에는
-  이 패턴 재사용.
+- 현 엔진에 없는 `qa_engine.CHROMA_MAX_DISTANCE`를 참조하던 deprecated
+  `rag_eval.py`·`rag_eval_langsmith.py`는 제거했다. Legacy 재현은
+  `archive/legacy_qa_v1/`의 동결본만 사용한다.
+- E0~E2 측정은 현 검색 경로(`_build_context`)를 직접 호출한다. 현 검색기의
+  기본 호출은 숨은 재작성 LLM 없이 원 질문 하나를 사용하며, Agentic 경로는
+  Tool이 만든 `query_variants`를 명시적으로 전달한다.
 - 하드코딩 `TESTS` → 골든 JSON 로더로 교체.
 - 기존 로드맵 수치 0.571은 옛 코퍼스(project 6) + 하이브리드 이전 검색 기준이라
   새 골든셋 수치와 직접 비교 불가(보고서에 명시).

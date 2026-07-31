@@ -19,6 +19,11 @@ from backend.main import app
 client = TestClient(app, raise_server_exceptions=False)
 
 
+def _query_attachment_context(attachments):
+    evidence = query_api._prepare_attachment_evidence(attachments)
+    return query_api._render_attachment_evidence(evidence)
+
+
 def _make_docx(text: str) -> bytes:
     import docx
 
@@ -96,7 +101,7 @@ def test_unsupported_query_attachment_returns_400():
         content_base64=base64.b64encode(b"content").decode(),
     )
     with pytest.raises(HTTPException) as exc:
-        query_api._prepare_attachment_context([attachment])
+        _query_attachment_context([attachment])
     assert exc.value.status_code == 400
 
 
@@ -107,14 +112,14 @@ def test_query_attachment_size_boundary(monkeypatch):
         filename="exact.txt",
         content_base64=base64.b64encode(b"abc").decode(),
     )
-    assert "abc" in query_api._prepare_attachment_context([exact])[0]
+    assert "abc" in _query_attachment_context([exact])[0]
 
     oversized = query_api.QueryAttachment(
         filename="large.txt",
         content_base64=base64.b64encode(b"abcd").decode(),
     )
     with pytest.raises(HTTPException) as exc:
-        query_api._prepare_attachment_context([oversized])
+        _query_attachment_context([oversized])
     assert exc.value.status_code == 413
 
 
@@ -129,7 +134,7 @@ def test_query_attachment_total_decoded_size_returns_413(monkeypatch):
         for index in range(2)
     ]
     with pytest.raises(HTTPException) as exc:
-        query_api._prepare_attachment_context(attachments)
+        _query_attachment_context(attachments)
     assert exc.value.status_code == 413
 
 
@@ -145,7 +150,7 @@ def test_query_total_size_is_checked_after_text_context_is_full(monkeypatch):
         for index in range(2)
     ]
     with pytest.raises(HTTPException) as exc:
-        query_api._prepare_attachment_context(attachments)
+        _query_attachment_context(attachments)
     assert exc.value.status_code == 413
 
 

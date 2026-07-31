@@ -85,7 +85,6 @@ def main() -> int:
         "DB_PASSWORD": args.db_password,
         "DB_NAME": manifest["database"],
         "PAIM_AUTH_MODE": "dev",
-        "PAIM_QUERY_ROUTING_MODE": "agentic",
         "CHROMA_PERSIST_DIR": str(state_dir / "chroma"),
         "CHROMA_COLLECTION_NAME": manifest.get("chroma_collection_name", "paiM_openai_v1"),
     })

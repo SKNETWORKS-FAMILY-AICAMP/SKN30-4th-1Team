@@ -560,7 +560,6 @@ const AUDIO_STATUS_POLL_INTERVAL_MS = 5000;
 const AUDIO_STATUS_POLL_TIMEOUT_MS = 15 * 60 * 1000;
 const GITHUB_REPOSITORY_SYNC_POLL_INTERVAL_MS = 3000;
 const GITHUB_REPOSITORY_SYNC_TIMEOUT_MS = 600000;
-const QUERY_HISTORY_LIMIT = 20;
 const QUERY_TIMEOUT_MS = 60000;
 const ACTION_MENU_WIDTH = 132;
 const ACTION_MENU_SESSION_HEIGHT = 76;
@@ -4860,7 +4859,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       .filter((message): message is Message & ApiQueryHistoryMessage =>
         message.role === "assistant" || message.role === "user",
       )
-      .slice(-QUERY_HISTORY_LIMIT)
       .map((message) => ({
         role: message.role,
         content: message.content,

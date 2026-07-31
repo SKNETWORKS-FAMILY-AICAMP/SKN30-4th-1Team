@@ -38,7 +38,11 @@ def test_query_attachment_becomes_temporary_agentic_evidence():
             "answer": "Nebula",
             "sources": kwargs["attachment_sources"],
             "route": "semantic",
-            "debug": {"attachments": kwargs["attachment_sources"]},
+            "debug": {
+                "attachments": kwargs["attachment_sources"],
+                "route": "semantic",
+                "router_stage": "tool_agent",
+            },
         }
 
     with patch("backend.api.query.require_project_access"), \
@@ -66,7 +70,12 @@ def test_query_without_attachment_still_uses_agentic_orchestrator():
 
     def fake_run_agentic_qa(**kwargs):
         captured.update(kwargs)
-        return {"answer": "답", "sources": [], "route": "semantic", "debug": {}}
+        return {
+            "answer": "답",
+            "sources": [],
+            "route": "semantic",
+            "debug": {"route": "semantic", "router_stage": "tool_agent"},
+        }
 
     with patch("backend.api.query.require_project_access"), \
          patch("backend.api.query.get_connection", return_value=_project_conn()), \
@@ -85,23 +94,6 @@ def test_query_without_attachment_still_uses_agentic_orchestrator():
         "attachment_sources": [],
         "attachment_evidence": [],
     }
-
-
-def test_legacy_routing_mode_cannot_bypass_agentic_runtime():
-    with patch("backend.api.query.require_project_access"), \
-         patch("backend.api.query.get_connection", return_value=_project_conn()), \
-         patch.dict("os.environ", {"PAIM_QUERY_ROUTING_MODE": "legacy"}), \
-         patch(
-             "backend.api.query.run_agentic_qa",
-             return_value={"answer": "답", "sources": [], "route": "semantic", "debug": {}},
-         ) as run_agentic_qa:
-        response = _client.post(
-            "/api/v1/projects/1/query",
-            json={"question": "현재 상태는?"},
-        )
-
-    assert response.status_code == 200
-    run_agentic_qa.assert_called_once()
 
 
 def test_agentic_tool_failure_is_hidden_as_503_at_query_boundary():
@@ -128,16 +120,14 @@ def test_query_attachment_context_marks_truncation(monkeypatch):
     monkeypatch.setattr(query_api, "_ATTACHMENT_MAX_CHARS_TOTAL", 30)
 
     encoded = base64.b64encode("12345678901234567890".encode()).decode()
-    context, sources = query_api._prepare_attachment_context([
+    evidence = query_api._prepare_attachment_evidence([
         query_api.QueryAttachment(filename="long.md", content_base64=encoded)
     ])
+    context, sources = query_api._render_attachment_evidence(evidence)
 
     assert sources == ["attachment:long.md"]
     assert "12345" in context
     assert "첨부 내용 잘림" in context
-    evidence = query_api._prepare_attachment_evidence([
-        query_api.QueryAttachment(filename="long.md", content_base64=encoded)
-    ])
     assert evidence[0].truncated is True
     assert evidence[0].extraction_status == "ok"
     assert evidence[0].source_location == "attachment:long.md"

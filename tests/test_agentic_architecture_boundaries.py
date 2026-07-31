@@ -6,8 +6,10 @@ import ast
 import sys
 from pathlib import Path
 
-from backend.retriever import qa_tools
-from evals.agentic_v2 import pipeline
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+from backend.retriever import qa_engine, qa_tools
+from evals.agentic_v2 import context_answer, pipeline
 
 
 _REPO = Path(__file__).resolve().parent.parent
@@ -41,6 +43,41 @@ def test_production_modules_do_not_import_evaluation_packages():
             violations.append((str(path.relative_to(_REPO)), sorted(forbidden)))
 
     assert violations == []
+
+
+def test_production_retriever_has_no_legacy_answer_generation_chain():
+    for name in (
+        "SYSTEM_QA",
+        "MULTI_QUERY_PROMPT",
+        "MultiQueryResult",
+        "_generate_multi_queries",
+        "_prompt",
+        "_chain",
+        "_get_chain",
+    ):
+        assert not hasattr(qa_engine, name)
+
+
+def test_fixed_evidence_eval_uses_current_agentic_prompt(monkeypatch):
+    model = type("FakeModel", (), {
+        "invocations": [],
+        "invoke": lambda self, messages: (
+            self.invocations.append(messages)
+            or AIMessage(content="평가 답변")
+        ),
+    })()
+    monkeypatch.setattr(context_answer, "_model", model)
+
+    answer = context_answer.answer_from_context(
+        "[구조화 기록]\n[action] 테스트",
+        "현재 상태는?",
+    )
+
+    assert answer == "평가 답변"
+    assert isinstance(model.invocations[0][0], SystemMessage)
+    assert model.invocations[0][0].content == context_answer.ORCHESTRATOR_SYSTEM_PROMPT
+    assert isinstance(model.invocations[0][1], HumanMessage)
+    assert "[action] 테스트" in model.invocations[0][1].content
 
 
 def test_run_command_accepts_questions_but_never_a_golden(monkeypatch, tmp_path):
