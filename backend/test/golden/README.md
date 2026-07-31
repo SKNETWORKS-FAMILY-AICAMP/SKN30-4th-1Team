@@ -1,7 +1,8 @@
 # 골든셋 평가 파이프라인 사용법 (TASK-006, 계층 4)
 
 supersede 계층 1~3이 검색 품질을 개선했는지 골든셋(60문항, 2코퍼스)으로 측정한다.
-설계 근거·구성 정의는 `EVAL_DESIGN.md`, 결과 해석은 `docs/EVAL_REPORT.md` 참조.
+설계 근거·구성 정의는 `EVAL_DESIGN.md`, 과거 결과 해석은
+`docs/archive/evaluation/golden-v1/EVAL_REPORT.md` 참조.
 
 ## 사전 조건
 

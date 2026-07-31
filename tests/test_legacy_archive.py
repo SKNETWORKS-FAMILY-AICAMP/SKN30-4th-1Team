@@ -57,7 +57,7 @@ def test_legacy_snapshot_manifest_matches_the_tagged_source():
 def test_production_packages_do_not_import_the_archive():
     offenders = [
         path.relative_to(REPO_ROOT)
-        for package in ("backend", "frontend")
+        for package in ("backend",)
         for path in (REPO_ROOT / package).rglob("*.py")
         if _imports_archive(path)
     ]
@@ -69,7 +69,8 @@ def test_archive_is_excluded_from_the_runtime_build_inputs():
     pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
 
-    assert 'packages = ["backend", "frontend"]' in pyproject
+    assert 'packages = ["backend"]' in pyproject
+    assert "COPY frontend/" not in dockerfile
     assert "COPY archive/" not in dockerfile
 
 
@@ -183,9 +184,6 @@ def test_runtime_qna_entrypoints_are_agentic_only():
     session_router = (REPO_ROOT / "backend" / "chat" / "router.py").read_text(
         encoding="utf-8"
     )
-    streamlit_chat = (REPO_ROOT / "frontend" / "views" / "chat.py").read_text(
-        encoding="utf-8"
-    )
     project_memory = (REPO_ROOT / "backend" / "project_memory.py").read_text(
         encoding="utf-8"
     )
@@ -199,8 +197,7 @@ def test_runtime_qna_entrypoints_are_agentic_only():
     assert "run_agentic_qa" in session_router
     assert "get_chat_model" not in session_router
     assert "_to_langchain_messages" not in session_router
-    assert "run_agentic_qa" in streamlit_chat
-    assert "qa_engine import answer" not in streamlit_chat
+    assert not (REPO_ROOT / "frontend").exists()
     assert "def run_ingest(" not in project_memory
     assert "def answer(" not in retrieval_engine
     assert not (REPO_ROOT / "backend" / "graph.py").exists()

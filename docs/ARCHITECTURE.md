@@ -12,7 +12,7 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 - **처리**: LLM이 결정(decision)·액션(action)·이슈(issue)·리스크(risk)로 구조화 추출 → MySQL + ChromaDB에 이중 저장
 - **관찰**: repo sync 시 머지된 PR과 열린 액션을 LangGraph 기반 Reconciler가 대조해 완료 제안 생성 (승인은 항상 사람)
 - **질의**: 프로젝트 Q&A는 Agentic 오케스트레이터가 SQL 상태·하이브리드 근거·프로젝트 조망 도구를 필요에 따라 호출
-- **UI**: Tauri + React 데스크톱 앱 (macOS/Windows), Streamlit 프로토타입 UI는 레거시로 유지
+- **UI**: Tauri + React 데스크톱 앱 (macOS/Windows)
 
 ```
                          ┌─────────────────────────┐
@@ -69,10 +69,10 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 │   │   ├── delta.py                 # "지난 확인 이후" 델타 브리핑 조회/생성
 │   │   └── query.py                 # Q&A 질의 엔드포인트 (+첨부파일 임시 컨텍스트)
 │   │
-│   ├── chat/                        # 세션형 대화 (암호화 대화 이력)
-│   │   ├── router.py                # /projects/{id}/sessions — 세션 CRUD, 세션 내 질의
-│   │   ├── session_store.py         # 세션·메시지 암호화 저장/조회
-│   │   └── context_builder.py       # tiktoken 기반 프롬프트 컨텍스트 조립(토큰 예산 관리)
+│   ├── chat/                        # deprecated 서버 세션 호환 계층 (구형 클라이언트용)
+│   │   ├── router.py                # /projects/{id}/sessions — deprecated 세션 CRUD·질의
+│   │   ├── session_store.py         # 레거시 세션·메시지 암호화 저장/조회
+│   │   └── context_builder.py       # 레거시 세션 질의의 토큰 예산 관리
 │   │
 │   ├── pipeline/                    # 문서 → 구조화 메모리 변환
 │   │   ├── extractor.py             # LLM 추출 — 소스 타입(회의록/README/커밋/이슈-PR)별 지침 분기, 청크 분할·중복 제거
@@ -129,7 +129,7 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 │   └── fixtures/*.md, *.golden.json # 문서 유형별(짧은 회의록/표 위주 등) 정답 청크 세트
 │
 ├── data/samples/                    # 수동 업로드 데모/실험용 샘플 회의록 (코드에서 참조되지 않음)
-├── meeting_notes/                   # tests/test_frontend_contract.py 가 사용하는 고정 테스트 fixture 회의록
+├── meeting_notes/                   # 수동 검증용 합성 회의록 샘플 (현재 코드에서 직접 참조하지 않음)
 │
 ├── desktop/                         # 데스크톱 앱 (Tauri 2 + React 19 + TypeScript) — 공식 사용자 UI
 │   ├── src/                         # React 프론트엔드
@@ -151,15 +151,14 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 │   ├── scripts/                     # 빌드 스모크 테스트 스크립트 (레이아웃/오프라인 번들)
 │   └── .env.production              # 공개 빌드 설정 (OAuth client ID 등)
 │
-├── frontend/                        # ⚠ 레거시 — Streamlit 프로토타입 UI (초기 검증용, README·로드맵에는 미반영)
-│   │                                 #   공식 사용자 UI는 desktop/(Tauri)이며 이 폴더는 대체되었습니다.
-│   ├── app.py                       # Streamlit 진입점 — 사이드바 프로젝트 선택 + 페이지 네비게이션
-│   ├── views/                       # 업로드/대시보드/채팅/타임라인 페이지
-│   └── components/                  # 메모리 카드, 타임라인 등 재사용 위젯
-│
 ├── docs/                            # 프로젝트 문서
+│   ├── README.md                    # 문서 정본·보관 자료 인덱스
 │   ├── API_명세서.md, .html         # FastAPI 엔드포인트 명세
-│   └── ARCHITECTURE.md, .html       # (본 문서) 시스템 아키텍처
+│   ├── ARCHITECTURE.md              # (본 문서) 시스템 아키텍처
+│   ├── policies/, planning/         # 현재 정책과 남은 작업
+│   ├── handovers/, reports/         # 담당자 계약과 검증 결과
+│   ├── deliverables/                # 제출 산출물 작업 공간
+│   └── archive/                     # 과거 평가·통합·핸드오버 기록
 │
 ├── docker-compose.yml                # MySQL 컨테이너 (schema.sql 자동 적용)
 ├── start-paim.bat                    # Windows 원클릭 실행 (Docker·백엔드·앱 자동 기동)
@@ -186,8 +185,8 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 | `repository.py` | `POST /projects/{id}/repositories`, `.../sync` | GitHub repo 연결, 동기화 트리거 |
 | `suggestion.py` | `.../suggestions/{id}/accept|reject` | 완료 제안 승인/거절 (상태 변경은 항상 사람) |
 | `delta.py` | `GET/POST /projects/{id}/delta`, `.../briefing/delta` | 델타 브리핑 |
-| `query.py` | `POST /projects/{id}/query` | 1회성 Q&A 질의 (첨부파일 임시 컨텍스트 지원) |
-| `chat/router.py` | `/projects/{id}/sessions/...` | 세션 CRUD, 세션 내 질의(`.../{session_id}/query`) — 암호화 대화 이력 |
+| `query.py` | `POST /projects/{id}/query` | 현재 데스크톱의 비영속 Q&A (로컬 최근 대화·첨부를 요청 컨텍스트로만 사용) |
+| `chat/router.py` | `/projects/{id}/sessions/...` | 구형 클라이언트용 deprecated 세션 CRUD·질의 — 암호화 서버 이력 |
 | `github/router.py` | `/github/app/sessions`, `/callback` | GitHub App 설치 플로우, JWT 서명, repo preview |
 | `auth.py` | — | 개발용 임시 사용자 인증 (`DEV_USER_ID`) |
 
@@ -233,11 +232,12 @@ PaiM은 회의록·문서와 GitHub 저장소 활동을 하나의 "살아있는 
 - 문서·Git 적재는 `documents.py`의 백그라운드/동기 처리로 실행하며, 별도 ingest 그래프는 두지 않습니다.
 - 기존 라우터 분기·검증·재기획 그래프는 [archive/legacy_qa_v1](../archive/legacy_qa_v1/README.md)의 비교 기준선으로만 보존합니다.
 
-### 3.7 chat — 암호화 세션 대화
+### 3.7 chat — 데스크톱 local-only 기본 경로와 레거시 호환
 
-- `session_store.py`: 세션·메시지를 `security/session_crypto.py`(AES-256-GCM, `SESSION_MEMORY_KEY`)로 암호화 저장
-- `context_builder.py`: tiktoken으로 토큰 수를 계산해 시스템 프롬프트+요약+최근 메시지를 토큰 예산 안에서 조립
-- 세션 질의 API도 같은 Agentic Q&A를 사용합니다. 기존 컨텍스트 예산·암호화 이력·롤링 요약은 API 전처리에서 만들고, Agentic 도구 오케스트레이터가 답변을 생성한 뒤 기존 저장·응답 형식을 유지합니다.
+- 현재 데스크톱은 채팅 제목·질문·답변·작성 중 초안을 계정·서버 범위의 WebView `localStorage`에 저장하고, `POST /projects/{id}/query`에 최근 대화를 요청 컨텍스트로 전달합니다.
+- `/query`가 받은 질문과 최근 대화는 답변 생성 중 PaiM 서버와 설정된 외부 LLM에 전달될 수 있지만, `chat_sessions`, `chat_messages`, `chat_summaries`에는 저장하지 않습니다.
+- `chat/router.py`, `session_store.py`, `context_builder.py`는 deprecated `/sessions/*`를 사용하는 구형 클라이언트 호환용입니다. 이 경로는 `security/session_crypto.py`로 서버 세션을 암호화 저장하며 현재 데스크톱의 기본 저장 경로가 아닙니다.
+- WebView `localStorage`는 현재 앱 전용 암호화 저장소가 아닙니다. 안전한 전용 저장소 이전은 별도 후속 범위입니다.
 
 ### 3.8 llm — 프로바이더 추상화
 
@@ -268,11 +268,7 @@ Tauri 2(Rust 셸) 위에 React 19 + TypeScript로 구성된 공식 사용자 UI�
 - `src-tauri/`는 네이티브 윈도우/트레이/권한(capabilities)을 구성하는 Rust 셸로, 실제 비즈니스 로직은 담지 않습니다.
 - CI(`.github/workflows/release.yml`)가 태그 push 시 이 앱을 macOS/Windows용으로 빌드해 릴리즈합니다.
 
-## 5. 레거시: `frontend/` (Streamlit)
-
-`frontend/`는 Streamlit 기반 초기 프로토타입 UI입니다. 현재 README·로드맵 어디에도 언급되지 않으며 공식 사용자 UI는 `desktop/`(Tauri)로 대체되었습니다. `pyproject.toml`의 `tool.hatch.build.targets.wheel.packages`에는 여전히 포함되어 패키징되고 있고, `tests/test_frontend_contract.py`가 `meeting_notes/` fixture로 계약 테스트를 유지하고 있어 완전히 죽은 코드는 아니지만, 신규 기능 개발은 `desktop/`을 기준으로 이루어집니다.
-
-## 6. 테스트·평가 자산
+## 5. 테스트·평가 자산
 
 세 디렉토리가 목적이 다른 테스트/평가 도구입니다.
 
@@ -282,9 +278,9 @@ Tauri 2(Rust 셸) 위에 React 19 + TypeScript로 구성된 공식 사용자 UI�
 | `backend/test/golden/` | 현재 Agentic 검색·답변 경로의 golden 평가 | `python backend/test/golden/run_eval.py --help` |
 | `evals/` | 문서 청킹 품질 평가 — golden fixture 대비 청크 분할 정확도 검증 | `python -m evals.eval_chunking` |
 
-샘플 데이터도 목적이 나뉩니다: `meeting_notes/`는 `tests/test_frontend_contract.py`가 참조하는 고정 테스트 fixture이고, `data/samples/`는 코드에서 참조되지 않는 수동 업로드 데모/실험용 샘플입니다.
+`meeting_notes/`와 `data/samples/`는 현재 코드에서 직접 참조하지 않는 수동 업로드·검증용 샘플입니다.
 
-## 7. 데이터 모델 핵심
+## 6. 데이터 모델 핵심
 
 | 카테고리 | 설명 |
 | --- | --- |
@@ -296,12 +292,12 @@ Tauri 2(Rust 셸) 위에 React 19 + TypeScript로 구성된 공식 사용자 UI�
 - `memory.date` = 회의/문서의 기록 날짜, `memory.due_date` = 마감일 (별개 컬럼, migrate_v4)
 - `memory.is_user_verified` = 사용자가 수정한 기록 보호 플래그 — LLM 재처리가 덮어쓰지 않음
 - `memory_suggestions` = Reconciler가 만든 완료 제안, 근거·승인 이력과 함께 보존 (migrate_v5)
-- `chat_sessions`/`chat_messages`/`chat_summaries` = AES-256-GCM 암호화 세션 대화
+- `chat_sessions`/`chat_messages`/`chat_summaries` = deprecated 서버 세션 API의 구형 클라이언트 호환 테이블 (AES-256-GCM 암호화)
 - `project_memory` = 조망형 질문에 쓰이는 응축 요약
 
-## 8. 핵심 흐름
+## 7. 핵심 흐름
 
-### 8.1 문서 업로드 → 기억 적재
+### 7.1 문서 업로드 → 기억 적재
 
 ```
 사용자 업로드 (api/documents.py)
@@ -311,7 +307,7 @@ Tauri 2(Rust 셸) 위에 React 19 + TypeScript로 구성된 공식 사용자 UI�
   → 문서 상태(status)를 polling(api/documents.py: GET .../documents/{id}/status)으로 확인
 ```
 
-### 8.2 GitHub repo 동기화 → 완료 제안
+### 7.2 GitHub repo 동기화 → 완료 제안
 
 ```
 repo 연결/동기화 (api/repository.py: POST .../sync)
@@ -323,23 +319,25 @@ repo 연결/동기화 (api/repository.py: POST .../sync)
   → 승인 시에만 memory.completed_at 갱신
 ```
 
-### 8.3 질문 → 답변
+### 7.3 질문 → 답변
 
 ```
 프로젝트 Q&A (api/query.py)
+  → 데스크톱의 로컬 최근 대화를 요청 history로 전달 (서버 chat 테이블에는 저장하지 않음)
   → 첨부 검증·텍스트 추출 (있을 때만, 임시 근거)
   → agentic_graph.py: 오케스트레이터 LLM
       → search_hybrid_vector_rag / query_sql_state
       → 도구 근거 반환 → 필요한 경우 다음 도구 호출
   → 최종 답변 + 출처 반환 (`route`는 호환성상 `semantic`)
+  → 데스크톱이 질문·답변을 로컬 대화에 저장
 
-세션 질의 (chat/router.py)
+레거시 세션 질의 (chat/router.py, deprecated)
   → context_builder.py 로 암호화 대화 이력과 함께 컨텍스트 조립
-  → Agentic Q&A (프로젝트 질의·Streamlit과 동일한 도구 오케스트레이터)
-  → 기존 세션 저장·롤링 요약·응답 형식 유지
+  → Agentic Q&A (프로젝트 질의와 동일한 도구 오케스트레이터)
+  → 구형 클라이언트 호환을 위해 서버 세션 저장·롤링 요약·응답 형식 유지
 ```
 
-### 8.4 델타 브리핑
+### 7.4 델타 브리핑
 
 ```
 앱 재오픈 (api/delta.py: GET/POST .../delta, .../briefing/delta)
@@ -348,13 +346,13 @@ repo 연결/동기화 (api/repository.py: POST .../sync)
   → LLM이 스탠드업 대체 브리핑으로 요약 (약 8문장)
 ```
 
-## 9. 설계 원칙
+## 8. 설계 원칙
 
 - **정확도 > 재현율**: Reconciler의 완료 매칭은 애매하면 보고하지 않음(high/medium 확신 + 근거 필수). 놓친 제안은 다음 동기화나 사람이 잡을 수 있지만, 틀린 완료 처리는 신뢰를 무너뜨림.
 - **파괴적 변경은 제안-승인, 추가는 자동**: 메모리 적재는 자동이지만 완료 처리처럼 상태를 바꾸는 일은 반드시 사람의 승인을 거침 (human-in-the-loop).
 - **근거 우선 Agentic Q&A**: 오케스트레이터는 읽기 전용 도구를 하나 이상 호출해 근거를 확인한 뒤 답한다. 검증·재계획 같은 안전장치는 평가 결과가 필요할 때만 추가한다.
-- **로컬 우선 + 암호화**: 백엔드는 `127.0.0.1`에만 바인딩, 세션 대화는 AES-256-GCM 암호화 저장.
+- **데스크톱 채팅은 local-only**: 새 데스크톱은 대화와 초안을 현재 WebView `localStorage`에 저장합니다. `/query`에는 답변 생성에 필요한 최근 대화를 전송하지만 서버 chat 테이블에는 저장하지 않으며, 암호화 서버 세션은 deprecated 호환 경로에만 남아 있습니다.
 
-## 10. CI/CD
+## 9. CI/CD
 
 `.github/workflows/release.yml`이 버전 태그(`v*`) push 시 `desktop/`(Tauri) 앱을 macOS `.dmg`, Windows `-setup.exe`/`.msi`로 빌드해 GitHub Releases에 게시합니다. 백엔드는 별도 CI 없이 로컬(`docker compose` + `uv run uvicorn`) 또는 `start-paim.bat`(Windows 원클릭)으로 구동합니다.

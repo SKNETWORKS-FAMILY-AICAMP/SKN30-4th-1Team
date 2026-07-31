@@ -16,14 +16,29 @@
 }
 
 {$PAIM_DOMAIN::80} {
-	# 업로드 상한은 backend/api/documents.py의 10MB보다 약간 위로 잡는다. 프록시가
-	# 과대 업로드를 조기 차단하되, 10~12MB 구간은 애플리케이션까지 도달시켜
-	# "파일 크기는 10 MB를 초과할 수 없습니다" 메시지를 그대로 보여주기 위함이다.
-	request_body {
-		max_size 12MB
+	# 회의 오디오는 데스크톱이 25 MiB까지 허용한다. multipart 경계·date 필드 등
+	# 부가 데이터를 포함해도 프록시에서 먼저 잘리지 않도록 이 경로만 30 MB로 둔다.
+	# 백엔드는 선택된 STT 제공자 상한(OpenAI 25 MiB / CLOVA 200 MiB)과 저장량
+	# quota를 별도로 검증한다.
+	@audio_upload {
+		method POST
+		path /api/v1/projects/*/audio /api/v1/projects/*/audio/
+	}
+	handle @audio_upload {
+		request_body {
+			max_size 30MB
+		}
+		reverse_proxy backend:8000
 	}
 
-	reverse_proxy backend:8000
+	# 그 밖의 요청은 일반 문서 업로드의 10 MiB 상한보다 조금 크게 유지한다.
+	# 10~12 MB 구간은 애플리케이션까지 전달해 백엔드 오류 계약을 보존한다.
+	handle {
+		request_body {
+			max_size 12MB
+		}
+		reverse_proxy backend:8000
+	}
 
 	log {
 		output stdout

@@ -107,8 +107,11 @@ services:
       # 주입해도 운영 컨테이너는 지원 조합으로만 뜬다.
       LLM_PROVIDER: openai
       OPENAI_MODEL: gpt-4.1-mini
-      OPENAI_BASE_URL: ""
-      OPENAI_API_BASE: ""
+      # 빈 문자열은 OpenAI SDK 2.x에서 "미설정"이 아니라 잘못된 상대 URL로
+      # 해석되어 일반 채팅·구조화 추출·임베딩이 UnsupportedProtocol로 실패한다.
+      # 공식 SDK와 LangChain의 호환 변수 양쪽을 같은 공식 endpoint로 고정한다.
+      OPENAI_BASE_URL: "https://api.openai.com/v1"
+      OPENAI_API_BASE: "https://api.openai.com/v1"
       # Dockerfile CMD의 --workers 1과 이중으로 막는다. 이 값이 없으면 uvicorn이
       # 외부 WEB_CONCURRENCY를 읽어 다중 워커로 뜰 수 있다.
       WEB_CONCURRENCY: "1"

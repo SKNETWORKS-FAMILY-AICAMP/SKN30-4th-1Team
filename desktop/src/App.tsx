@@ -95,13 +95,17 @@ import {
   createGithubAppSession,
   fetchGithubAccessToken,
   fetchGithubAppRepositories,
+  fetchGithubAppRepositoryHead,
   fetchGithubAppRepositoryPreview,
   fetchGithubAppSession,
   fetchGithubRepositories,
   fetchGithubRepository,
+  fetchGithubRepositoryHead,
   fetchGithubUserProfile,
+  GITHUB_REMOTE_HEAD_TTL_MS,
   getGithubOAuthErrorMessage,
   getGithubPanelStateLabel,
+  githubCommitShasMatch,
 } from "./github";
 import {
   fetchPaimFormData,
@@ -152,7 +156,6 @@ import {
   loadPaimSettings,
   normalizePaimServerUrl,
   normalizePaimSettings,
-  resolvePaimApiRootUrl,
   savePaimSettings,
   type LanguageSetting,
   type PaiMSettings,
@@ -247,6 +250,11 @@ type GithubOperationState = {
   kind: GithubOperationKind;
   repositoryUrl?: string;
 };
+type GithubRepositoryRefreshOptions = {
+  force?: boolean;
+  onlyIfRemoteStale?: boolean;
+  session?: GithubLoginSessionState | null;
+};
 type LatestProjectOperationToken = {
   controller: AbortController;
   generation: number;
@@ -302,6 +310,14 @@ function beginLatestProjectOperation(
   registry.generations[projectId] = generation;
   registry.controllers[projectId] = controller;
   return { controller, generation, projectId };
+}
+
+function replaceLatestProjectOperation(
+  registry: LatestProjectOperationRegistry,
+  projectId: string,
+): LatestProjectOperationToken {
+  cancelLatestProjectOperation(registry, projectId);
+  return beginLatestProjectOperation(registry, projectId)!;
 }
 
 function isLatestProjectOperationCurrent(
@@ -463,6 +479,7 @@ type ApiRepositoryConnectResponse = {
   repo_id: number;
   status: ApiRepositoryStatus;
   branch?: string;
+  run_id?: string | null;
 };
 
 type ApiRepositoryListItem = {
@@ -471,6 +488,7 @@ type ApiRepositoryListItem = {
   repository_url: string;
   branch: string;
   status: ApiRepositoryStatus;
+  run_id?: string | null;
   connected_at?: string | null;
 };
 
@@ -480,6 +498,7 @@ type ApiRepositoryStatusResponse = {
   provider: string;
   repository_url: string;
   branch: string;
+  run_id?: string | null;
   commit_sha?: string | null;
   indexed_files?: number | null;
   last_error?: string | null;
@@ -525,11 +544,6 @@ type SubmitQuestionOptions = {
   sessionTitle?: string;
   since?: string;
 };
-type ServerTestState = {
-  message: string;
-  status: "idle" | "testing" | "ok" | "error";
-};
-
 type ActionMenuOrigin = "bottom-left" | "bottom-right" | "top-left" | "top-right";
 
 type ActionMenuState = {
@@ -1020,7 +1034,22 @@ function loadProjectState(storageKey: string, allowLegacyFallback = false) {
 
   try {
     const savedState = JSON.parse(savedValue) as Partial<ProjectState>;
-    const projects = savedState.projects ?? [];
+    const projects = (savedState.projects ?? []).map((project) => {
+      const repository = project.githubRepository;
+      if (!repository || repository.remoteCheckStatus !== "checking") {
+        return project;
+      }
+
+      return {
+        ...project,
+        githubRepository: {
+          ...repository,
+          remoteCheckAttemptedAt: repository.remoteCheckedAt ?? null,
+          remoteCheckStatus: "unknown" as const,
+          remoteCheckError: null,
+        },
+      };
+    });
 
     return createProjectState(projects, savedState.selectedProjectId, savedState.selectedSessionId);
   } catch {
@@ -1335,23 +1364,52 @@ function mergeGithubRepositoryInfo(
   currentRepository: GitRepositoryInfo | undefined,
   repository: ApiRepositoryListItem,
 ): GitRepositoryInfo {
+  const isSameRepository =
+    currentRepository?.repoId === repository.id ||
+    (currentRepository !== undefined &&
+      typeof currentRepository.repoId !== "number" &&
+      getGithubRepositoryUrl(currentRepository) === repository.repository_url);
+  const preservedRepository = isSameRepository ? currentRepository : undefined;
+  const canPreserveBranchState = preservedRepository?.branch === repository.branch;
+  const nextRunId =
+    repository.status === "syncing"
+      ? repository.run_id ?? preservedRepository?.syncRunId ?? null
+      : null;
+  const canPreserveRunState =
+    !repository.run_id || preservedRepository?.syncRunId === repository.run_id;
+
   return {
     path: repository.repository_url,
-    name: currentRepository?.name ?? getGithubRepositoryName(repository.repository_url),
+    name: preservedRepository?.name ?? getGithubRepositoryName(repository.repository_url),
     branch: repository.branch,
     isDirty: false,
-    remoteRepo: currentRepository?.remoteRepo ?? getGithubRemoteRepo(repository.repository_url),
-    issuePrStatus: currentRepository?.issuePrStatus ?? "서버 연결됨",
-    visibility: currentRepository?.visibility ?? "public",
-    authProvider: currentRepository?.authProvider ?? "public",
+    remoteRepo: preservedRepository?.remoteRepo ?? getGithubRemoteRepo(repository.repository_url),
+    issuePrStatus: preservedRepository?.issuePrStatus ?? "서버 연결됨",
+    visibility: preservedRepository?.visibility ?? "public",
+    authProvider: preservedRepository?.authProvider ?? "public",
     repoId: repository.id,
     syncStatus: repository.status,
-    syncStartedAt: repository.status === "syncing" ? currentRepository?.syncStartedAt ?? Date.now() : undefined,
+    syncRunId: nextRunId,
+    syncStartedAt:
+      repository.status === "syncing"
+        ? (canPreserveRunState ? preservedRepository?.syncStartedAt : undefined) ?? Date.now()
+        : undefined,
     connectedAt: repository.connected_at ?? undefined,
-    commitSha: currentRepository?.commitSha,
-    indexedFiles: currentRepository?.indexedFiles,
-    lastError: currentRepository?.lastError,
-    syncWarnings: currentRepository?.syncWarnings,
+    commitSha: canPreserveBranchState ? preservedRepository?.commitSha : undefined,
+    remoteHeadSha: canPreserveBranchState ? preservedRepository?.remoteHeadSha : null,
+    remoteCheckedAt: canPreserveBranchState ? preservedRepository?.remoteCheckedAt : null,
+    remoteCheckAttemptedAt: canPreserveBranchState
+      ? preservedRepository?.remoteCheckAttemptedAt
+      : null,
+    remoteCheckStatus: canPreserveBranchState
+      ? preservedRepository?.remoteCheckStatus
+      : "unknown",
+    remoteCheckError: canPreserveBranchState
+      ? preservedRepository?.remoteCheckError
+      : null,
+    indexedFiles: canPreserveBranchState ? preservedRepository?.indexedFiles : undefined,
+    lastError: canPreserveRunState ? preservedRepository?.lastError : null,
+    syncWarnings: canPreserveRunState ? preservedRepository?.syncWarnings : undefined,
   };
 }
 
@@ -1359,6 +1417,17 @@ function applyGithubRepositoryStatus(
   repository: GitRepositoryInfo,
   status: ApiRepositoryStatusResponse,
 ): GitRepositoryInfo {
+  const nextCommitSha = status.commit_sha ?? null;
+  const currentCommitSha = repository.commitSha ?? null;
+  const hasSameCommitSha =
+    (currentCommitSha === null && nextCommitSha === null) ||
+    githubCommitShasMatch(currentCommitSha, nextCommitSha);
+  const canPreserveRemoteCheck =
+    repository.branch === status.branch &&
+    hasSameCommitSha;
+  const canPreserveRunState =
+    !status.run_id || repository.syncRunId === status.run_id;
+
   return {
     ...repository,
     path: status.repository_url,
@@ -1367,8 +1436,24 @@ function applyGithubRepositoryStatus(
     remoteRepo: repository.remoteRepo ?? getGithubRemoteRepo(status.repository_url),
     repoId: status.repo_id,
     syncStatus: status.status,
-    syncStartedAt: status.status === "syncing" ? repository.syncStartedAt ?? Date.now() : undefined,
-    commitSha: status.commit_sha ?? null,
+    syncRunId:
+      status.status === "syncing"
+        ? status.run_id ?? repository.syncRunId ?? null
+        : null,
+    syncStartedAt:
+      status.status === "syncing"
+        ? (canPreserveRunState ? repository.syncStartedAt : undefined) ?? Date.now()
+        : undefined,
+    commitSha: nextCommitSha,
+    remoteHeadSha: canPreserveRemoteCheck ? repository.remoteHeadSha : null,
+    remoteCheckedAt: canPreserveRemoteCheck ? repository.remoteCheckedAt : null,
+    remoteCheckAttemptedAt: canPreserveRemoteCheck
+      ? repository.remoteCheckAttemptedAt
+      : null,
+    remoteCheckStatus: canPreserveRemoteCheck
+      ? repository.remoteCheckStatus
+      : "unknown",
+    remoteCheckError: canPreserveRemoteCheck ? repository.remoteCheckError : null,
     indexedFiles: status.indexed_files ?? null,
     lastError: status.last_error ?? null,
     syncWarnings: parseGithubSyncWarnings(status.sync_warning),
@@ -1527,8 +1612,9 @@ function saveSessionDrafts(storageKey: string, drafts: Map<string, SessionDraft>
   );
   try {
     window.localStorage.setItem(storageKey, JSON.stringify(saved));
+    return true;
   } catch {
-    // Project messages remain intact even when draft storage is full.
+    return false;
   }
 }
 
@@ -1853,7 +1939,6 @@ export function App() {
               <LazyAuthScreen
                 initialMessage={authState.message}
                 onAuthenticated={handleAuthenticated}
-                serverUrl={getPaimApiRootUrl()}
               />
             </>
           </Suspense>
@@ -2004,15 +2089,9 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     setProjectManagementSection,
   } = useWorkspaceRoute();
   const [settings, setSettingsState] = useState(loadPaimSettings);
-  const [serverUrlDraft, setServerUrlDraft] = useState(settings.serverUrl);
   const t = (key: string, vars?: Record<string, number | string>) =>
     translate(settings.language, key, vars);
-  const [serverTestState, setServerTestState] = useState<ServerTestState>({
-    message: "",
-    status: "idle",
-  });
   const [isSettingsResetConfirming, setIsSettingsResetConfirming] = useState(false);
-  const [isServerApplyConfirming, setIsServerApplyConfirming] = useState(false);
   const [appVersion, setAppVersion] = useState(`개발 모드 ${packageJson.version}`);
   const [latestReleaseTag, setLatestReleaseTag] = useState("");
   const [projectFileTreeWidth, setProjectFileTreeWidth] = useState(
@@ -2047,7 +2126,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   const [capabilities, setCapabilities] = useState<PaimCapabilities | null>(null);
   const [capabilitiesError, setCapabilitiesError] = useState("");
   const [capabilitiesRevision, setCapabilitiesRevision] = useState(0);
-  const serverUrlSyncRef = useRef(settings.serverUrl);
   const projectPanelReopenModeRef = useRef<VisibleProjectPanelMode>("open");
   const sidebarResizeRef = useRef<{
     pointerId: number | null;
@@ -2124,10 +2202,19 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   const postGithubSyncRefreshTimeoutsRef = useRef<number[]>([]);
   const demoStatusTimeoutRef = useRef<number | null>(null);
   const githubOperationRegistryRef = useRef(createLatestProjectOperationRegistry());
+  const githubRepositoryActivityRegistryRef = useRef(createLatestProjectOperationRegistry());
+  const githubRepositoryPollRegistryRef = useRef(createLatestProjectOperationRegistry());
+  const githubRepositoryReconcileRegistryRef = useRef(createLatestProjectOperationRegistry());
   const projectFileImportRegistryRef = useRef(createLatestProjectOperationRegistry());
   const ignoredProjectDeltaRef = useRef<Record<string, string>>({});
   const githubLoginSessionsRef = useRef(githubLoginSessions);
   const sessionDraftsRef = useRef(initialSessionDrafts);
+  const attachmentsRef = useRef(attachments);
+  attachmentsRef.current = attachments;
+  const localPersistenceFailureLatchRef = useRef({
+    conversation: false,
+    draft: false,
+  });
   const projectSetupDescriptionBeforeEditRef = useRef<string | null>(null);
   const projectSetupNameBeforeEditRef = useRef<string | null>(null);
   const zoomScaleRef = useRef(zoomScale);
@@ -2283,13 +2370,19 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   const githubConnectingRepositoryUrl = isGithubConnecting
     ? selectedGithubOperation.repositoryUrl ?? null
     : null;
-  const selectedProjectGithubPanelState: GithubPanelState = selectedProject?.githubRepository
-    ? "connected"
-    : selectedProjectGithubSession?.status === "connected"
-      ? "repos"
-      : selectedProjectGithubSession?.status === "pending"
-        ? "authing"
-        : "signedout";
+  const isSelectedProjectGithubReauthPending =
+    selectedProject?.githubRepository?.remoteCheckError === "session_expired" &&
+    selectedProjectGithubSession?.status === "pending";
+  const selectedProjectGithubPanelState: GithubPanelState =
+    isSelectedProjectGithubReauthPending
+      ? "authing"
+      : selectedProject?.githubRepository
+        ? "connected"
+        : selectedProjectGithubSession?.status === "connected"
+          ? "repos"
+          : selectedProjectGithubSession?.status === "pending"
+            ? "authing"
+            : "signedout";
   const selectedProjectDelta =
     isPrimaryProjectContext &&
     selectedProject &&
@@ -2654,11 +2747,59 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     }
   }
 
+  function reportLocalPersistenceResult(
+    storage: "conversation" | "draft",
+    didSave: boolean,
+  ) {
+    if (didSave) {
+      localPersistenceFailureLatchRef.current[storage] = false;
+      return;
+    }
+
+    if (localPersistenceFailureLatchRef.current[storage]) {
+      return;
+    }
+
+    localPersistenceFailureLatchRef.current[storage] = true;
+    setDemoStatus({
+      kind: "warning",
+      ok: false,
+      message:
+        storage === "conversation"
+          ? "로컬 저장 공간이 부족해 최신 대화를 저장하지 못했습니다"
+          : "로컬 저장 공간이 부족해 최신 초안을 저장하지 못했습니다",
+      scope: "overview",
+    });
+  }
+
   function setGithubRepositoryQueryForProject(projectId: string, query: string) {
     setGithubRepositoryQueries((currentQueries) => ({
       ...currentQueries,
       [projectId]: query,
     }));
+  }
+
+  function restoreCancelledGithubRepositoryActivity(projectId: string) {
+    updateGithubRepository(projectId, (repository) =>
+      repository.remoteCheckStatus === "checking"
+        ? {
+            ...repository,
+            remoteCheckAttemptedAt: repository.remoteCheckedAt ?? null,
+            remoteCheckStatus: "unknown",
+            remoteCheckError: null,
+          }
+        : repository,
+    );
+  }
+
+  function cancelGithubRepositoryActivity(projectId: string) {
+    cancelLatestProjectOperation(githubRepositoryActivityRegistryRef.current, projectId);
+    restoreCancelledGithubRepositoryActivity(projectId);
+  }
+
+  function cancelGithubRepositoryReads(projectId: string) {
+    cancelGithubRepositoryActivity(projectId);
+    cancelLatestProjectOperation(githubRepositoryReconcileRegistryRef.current, projectId);
   }
 
   function beginGithubOperation(
@@ -2671,6 +2812,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       return null;
     }
 
+    cancelGithubRepositoryReads(projectId);
     setGithubOperationsByProjectId((currentOperations) => ({
       ...currentOperations,
       [projectId]: { kind, repositoryUrl },
@@ -2697,6 +2839,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
   function cancelGithubOperation(projectId: string) {
     cancelLatestProjectOperation(githubOperationRegistryRef.current, projectId);
+    cancelGithubRepositoryReads(projectId);
     setGithubOperationsByProjectId((currentOperations) => {
       if (!currentOperations[projectId]) {
         return currentOperations;
@@ -2775,63 +2918,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
   function handleLanguageChange(language: LanguageSetting) {
     updateSettings({ language });
-  }
-
-  async function handleTestServerConnection() {
-    const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 3000);
-    const nextServerUrl = resolvePaimApiRootUrl(serverUrlDraft);
-
-    setServerTestState({ message: "연결 확인 중", status: "testing" });
-
-    try {
-      const response = await fetch(`${nextServerUrl}/health`, {
-        headers: { Accept: "application/json" },
-        signal: controller.signal,
-      });
-      if (!response.ok) {
-        throw new Error(`서버가 ${response.status} 상태를 반환했습니다`);
-      }
-      const health = (await response.json()) as ApiHealthResponse;
-
-      if (health.status !== "ok") {
-        throw new Error("서버 상태가 ok가 아닙니다");
-      }
-
-      setServerTestState({ message: "새 주소에 연결할 수 있습니다", status: "ok" });
-    } catch {
-      setServerTestState({ message: "연결 실패", status: "error" });
-    } finally {
-      window.clearTimeout(timeoutId);
-    }
-  }
-
-  function handleApplyServerUrl() {
-    const nextSettings = normalizePaimSettings({ ...settings, serverUrl: serverUrlDraft });
-    const nextServerUrl = resolvePaimApiRootUrl(nextSettings.serverUrl);
-    const willChangeProjectScope =
-      getProjectStorageKey(authUser, canLogout, nextServerUrl) !== projectStorageKey;
-
-    if (willChangeProjectScope && !isServerApplyConfirming) {
-      setIsServerApplyConfirming(true);
-      return;
-    }
-
-    savePaimSettings(nextSettings);
-    setSettingsState(nextSettings);
-    setServerUrlDraft(nextSettings.serverUrl);
-    setIsServerApplyConfirming(false);
-
-    if (willChangeProjectScope) {
-      // 새 서버의 프로젝트와 인증 범위를 섞지 않도록 저장 후 다시 마운트한다.
-      window.location.reload();
-      return;
-    }
-
-    if (serverTestState.status === "ok") {
-      setServerStatus("online");
-    }
-    void syncProjectsWithServer(false);
   }
 
   function handleResetAppSettings() {
@@ -3039,9 +3125,46 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     );
   }
 
-  // GitHub App state가 만료되면 repo 선택부터 다시 시작할 수 있게 인증 상태를 비운다.
+  function handleGithubRemoteSessionExpired(projectId: string) {
+    setGithubLoginSessions((currentSessions) => {
+      const nextSessions = { ...currentSessions };
+      delete nextSessions[projectId];
+      return nextSessions;
+    });
+    setGithubRepositories((currentRepositories) => {
+      const nextRepositories = { ...currentRepositories };
+      delete nextRepositories[projectId];
+      return nextRepositories;
+    });
+    setPendingGithubDisconnectProjectId((currentProjectId) =>
+      currentProjectId === projectId ? null : currentProjectId,
+    );
+    setGithubRepositoryQueryForProject(projectId, "");
+  }
+
+  // GitHub App state가 만료되어도 이미 연결된 repo와 검색 인덱스는 유지한다.
   function handleGithubSessionExpired(projectId: string) {
+    const repository = projectsRef.current.find(
+      (project) => project.id === projectId,
+    )?.githubRepository;
     cancelGithubOperation(projectId);
+    if (repository?.authProvider === "github_app") {
+      updateGithubRepository(projectId, (currentRepository) => ({
+        ...currentRepository,
+        remoteCheckStatus: "error",
+        remoteCheckError: "session_expired",
+        remoteCheckAttemptedAt: Date.now(),
+      }));
+      handleGithubRemoteSessionExpired(projectId);
+      setDemoStatus({
+        ok: false,
+        message: "GitHub 연결이 만료되었습니다. 다시 인증해 주세요",
+        projectId,
+        scope: "github",
+      });
+      return;
+    }
+
     setGithubLoginSessions((currentSessions) => {
       const nextSessions = { ...currentSessions };
       delete nextSessions[projectId];
@@ -3167,21 +3290,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     projectPanelView,
     projectPanelWidth,
   ]);
-
-  useEffect(() => {
-    setServerTestState({ message: "", status: "idle" });
-
-    if (serverUrlSyncRef.current === settings.serverUrl) {
-      return;
-    }
-
-    serverUrlSyncRef.current = settings.serverUrl;
-    const timeoutId = window.setTimeout(() => {
-      void syncProjectsWithServer(false);
-    }, 450);
-
-    return () => window.clearTimeout(timeoutId);
-  }, [settings.serverUrl]);
 
   useEffect(() => {
     setCapabilities(null);
@@ -3460,10 +3568,17 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   ]);
 
   useEffect(() => {
-    window.localStorage.setItem(
-      projectStorageKey,
-      JSON.stringify(createStoredProjectState(projects, selectedProjectId, selectedSessionId)),
-    );
+    let didSave = false;
+    try {
+      window.localStorage.setItem(
+        projectStorageKey,
+        JSON.stringify(createStoredProjectState(projects, selectedProjectId, selectedSessionId)),
+      );
+      didSave = true;
+    } catch {
+      // Keep the in-memory conversation intact and let the user copy it elsewhere.
+    }
+    reportLocalPersistenceResult("conversation", didSave);
   }, [projectStorageKey, projects, selectedProjectId, selectedSessionId]);
 
   useEffect(() => {
@@ -3679,6 +3794,9 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       }
       githubRepositoryPollTimeoutsRef.current.clear();
       abortLatestProjectOperations(githubOperationRegistryRef.current);
+      abortLatestProjectOperations(githubRepositoryActivityRegistryRef.current);
+      abortLatestProjectOperations(githubRepositoryPollRegistryRef.current);
+      abortLatestProjectOperations(githubRepositoryReconcileRegistryRef.current);
       abortLatestProjectOperations(projectFileImportRegistryRef.current);
       postGithubSyncRefreshTimeoutsRef.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
       postGithubSyncRefreshTimeoutsRef.current = [];
@@ -3689,6 +3807,63 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   useEffect(() => {
     setPendingGithubDisconnectProjectId(null);
   }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (
+      projectPanelView !== "github" ||
+      !selectedProjectId ||
+      !showProjectPanel ||
+      isProjectPanelCollapsed
+    ) {
+      return;
+    }
+    if (selectedProject?.serverMissing) {
+      restoreCancelledGithubRepositoryActivity(selectedProjectId);
+      return;
+    }
+
+    const projectId = selectedProjectId;
+    const ownedActivityControllers = new Set<AbortController>();
+    const runOwnedRepositoryRefresh = (refresh: () => Promise<void>) => {
+      const previousController =
+        githubRepositoryActivityRegistryRef.current.controllers[projectId] ?? null;
+      void refresh();
+      const nextController =
+        githubRepositoryActivityRegistryRef.current.controllers[projectId] ?? null;
+      if (nextController && nextController !== previousController) {
+        ownedActivityControllers.add(nextController);
+      }
+    };
+
+    runOwnedRepositoryRefresh(() =>
+      refreshGithubRepositoryActivity(projectId, { onlyIfRemoteStale: true }),
+    );
+
+    const handleWindowFocus = () => {
+      runOwnedRepositoryRefresh(() => refreshGithubRepositoryHead(projectId));
+    };
+    window.addEventListener("focus", handleWindowFocus);
+
+    return () => {
+      window.removeEventListener("focus", handleWindowFocus);
+      const currentController =
+        githubRepositoryActivityRegistryRef.current.controllers[projectId] ?? null;
+      if (currentController && ownedActivityControllers.has(currentController)) {
+        cancelGithubRepositoryActivity(projectId);
+      }
+    };
+  }, [
+    isProjectPanelCollapsed,
+    projectPanelView,
+    selectedProject?.apiProjectId,
+    showProjectPanel,
+    selectedProject?.serverMissing,
+    selectedProject?.githubRepository?.branch,
+    selectedProject?.githubRepository?.commitSha,
+    selectedProject?.githubRepository?.path,
+    selectedProject?.githubRepository?.repoId,
+    selectedProjectId,
+  ]);
 
   useEffect(() => {
     if (audioUploadDraft && audioUploadDraft.projectId !== selectedProjectId) {
@@ -4649,8 +4824,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     );
   }
 
-  function clearGithubRepositoryPoll(projectId: string, repoId: number) {
-    const pollKey = `${projectId}:${repoId}`;
+  function clearGithubRepositoryPollKey(pollKey: string) {
     const timeoutId = githubRepositoryPollTimeoutsRef.current.get(pollKey);
 
     if (typeof timeoutId === "number") {
@@ -4658,6 +4832,32 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     }
 
     githubRepositoryPollTimeoutsRef.current.delete(pollKey);
+    cancelLatestProjectOperation(githubRepositoryPollRegistryRef.current, pollKey);
+  }
+
+  function clearGithubRepositoryPoll(projectId: string, repoId: number) {
+    clearGithubRepositoryPollKey(`${projectId}:${repoId}`);
+  }
+
+  function clearGithubRepositoryPollsForProject(
+    projectId: string,
+    preservedRepoId?: number,
+  ) {
+    const preservedPollKey =
+      typeof preservedRepoId === "number" ? `${projectId}:${preservedRepoId}` : null;
+    const pollKeys = new Set([
+      ...githubRepositoryPollTimeoutsRef.current.keys(),
+      ...Object.keys(githubRepositoryPollRegistryRef.current.controllers),
+    ]);
+
+    for (const pollKey of pollKeys) {
+      if (
+        pollKey.startsWith(`${projectId}:`) &&
+        pollKey !== preservedPollKey
+      ) {
+        clearGithubRepositoryPollKey(pollKey);
+      }
+    }
   }
 
   function refreshAfterGithubSync(projectId: string) {
@@ -4683,6 +4883,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         scope: "overview",
       });
       refreshAfterGithubSync(projectId);
+      void refreshGithubRepositoryActivity(projectId, { force: true });
       return;
     }
 
@@ -4705,18 +4906,73 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     clearGithubRepositoryPoll(projectId, repoId);
 
     const pollKey = `${projectId}:${repoId}`;
+    const project = projectsRef.current.find((candidate) => candidate.id === projectId);
+    const repository = project?.githubRepository;
+    if (
+      !project ||
+      project.serverMissing ||
+      project.apiProjectId !== apiProjectId ||
+      !repository ||
+      repository.repoId !== repoId
+    ) {
+      return;
+    }
+
+    const repositoryUrl = getGithubRepositoryUrl(repository);
+    const branch = repository.branch;
+    const runId = repository.syncRunId ?? null;
+    const serverUrl = getPaimApiRootUrl();
+    const isPollIdentityCurrent = (operation: LatestProjectOperationToken) => {
+      const currentProject = projectsRef.current.find(
+        (candidate) => candidate.id === projectId,
+      );
+      const currentRepository = currentProject?.githubRepository;
+
+      return Boolean(
+        isLatestProjectOperationCurrent(
+          githubRepositoryPollRegistryRef.current,
+          operation,
+        ) &&
+          getPaimApiRootUrl() === serverUrl &&
+          currentProject &&
+          !currentProject.serverMissing &&
+          currentProject.apiProjectId === apiProjectId &&
+          currentRepository &&
+          currentRepository.repoId === repoId &&
+          getGithubRepositoryUrl(currentRepository) === repositoryUrl &&
+          currentRepository.branch === branch &&
+          (currentRepository.syncRunId ?? null) === runId,
+      );
+    };
+
     const timeoutId = window.setTimeout(async () => {
+      if (githubRepositoryPollTimeoutsRef.current.get(pollKey) !== timeoutId) {
+        return;
+      }
+      githubRepositoryPollTimeoutsRef.current.delete(pollKey);
+      const operation = replaceLatestProjectOperation(
+        githubRepositoryPollRegistryRef.current,
+        pollKey,
+      );
+      let shouldScheduleNext = false;
+
       try {
+        if (!isPollIdentityCurrent(operation)) {
+          return;
+        }
         const status = await fetchPaimJson<ApiRepositoryStatusResponse>(
           `/projects/${apiProjectId}/repositories/${repoId}/status`,
+          { signal: operation.controller.signal },
         );
+        if (!isPollIdentityCurrent(operation)) {
+          return;
+        }
 
         updateGithubRepository(projectId, (repository) =>
           applyGithubRepositoryStatus(repository, status),
         );
 
         if (status.status === "indexed" || status.status === "failed") {
-          githubRepositoryPollTimeoutsRef.current.delete(pollKey);
           handleGithubSyncSettled(projectId, status.status);
           return;
         }
@@ -4728,15 +4984,16 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
             syncStartedAt: undefined,
             lastError: "처리 지연 — 나중에 다시 확인",
           }));
-          githubRepositoryPollTimeoutsRef.current.delete(pollKey);
           return;
         }
 
-        scheduleGithubRepositoryStatusPoll(projectId, apiProjectId, repoId, startedAt);
+        shouldScheduleNext = true;
       } catch (error) {
+        if (!isPollIdentityCurrent(operation)) {
+          return;
+        }
         if (isGithubSessionExpiredError(error)) {
           handleGithubSessionExpired(projectId);
-          githubRepositoryPollTimeoutsRef.current.delete(pollKey);
           return;
         }
 
@@ -4746,26 +5003,110 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
           syncStartedAt: undefined,
           lastError: getErrorMessage(error, "GitHub repo 동기화 상태를 확인할 수 없습니다"),
         }));
-        githubRepositoryPollTimeoutsRef.current.delete(pollKey);
         handleGithubSyncSettled(projectId, "failed");
+      } finally {
+        const didFinish = finishLatestProjectOperation(
+          githubRepositoryPollRegistryRef.current,
+          operation,
+        );
+        if (shouldScheduleNext && didFinish) {
+          scheduleGithubRepositoryStatusPoll(projectId, apiProjectId, repoId, startedAt);
+        }
       }
     }, GITHUB_REPOSITORY_SYNC_POLL_INTERVAL_MS);
 
     githubRepositoryPollTimeoutsRef.current.set(pollKey, timeoutId);
   }
 
-  async function syncProjectRepositories(projectId: string, apiProjectId: number) {
+  function resumeGithubRepositoryPollIfNeeded(projectId: string) {
+    const project = projectsRef.current.find((candidate) => candidate.id === projectId);
+    const repository = project?.githubRepository;
+    if (
+      !project ||
+      project.serverMissing ||
+      typeof project.apiProjectId !== "number" ||
+      !repository ||
+      typeof repository.repoId !== "number" ||
+      repository.syncStatus !== "syncing"
+    ) {
+      return;
+    }
+
+    scheduleGithubRepositoryStatusPoll(
+      projectId,
+      project.apiProjectId,
+      repository.repoId,
+      repository.syncStartedAt ?? Date.now(),
+    );
+  }
+
+  function isGithubRepositoryReconcileCurrent(
+    operation: LatestProjectOperationToken,
+    apiProjectId: number,
+    serverUrl: string,
+  ) {
+    const project = projectsRef.current.find(
+      (candidate) => candidate.id === operation.projectId,
+    );
+
+    return (
+      isLatestProjectOperationCurrent(
+        githubRepositoryReconcileRegistryRef.current,
+        operation,
+      ) &&
+      getPaimApiRootUrl() === serverUrl &&
+      project?.apiProjectId === apiProjectId &&
+      !project.serverMissing
+    );
+  }
+
+  async function syncProjectRepositories(
+    projectId: string,
+    apiProjectId: number,
+    retryStatusNotFound = true,
+  ) {
     if (serverStatus === "offline") {
       return;
     }
 
+    const operation = replaceLatestProjectOperation(
+      githubRepositoryReconcileRegistryRef.current,
+      projectId,
+    );
+    const serverUrl = getPaimApiRootUrl();
+
     try {
       const repositories = await fetchPaimJson<ApiRepositoryListItem[]>(
         `/projects/${apiProjectId}/repositories`,
+        { signal: operation.controller.signal },
       );
+      if (!isGithubRepositoryReconcileCurrent(operation, apiProjectId, serverUrl)) {
+        return;
+      }
       const serverRepository = repositories[0];
+      const previousRepository = projectsRef.current.find(
+        (project) => project.id === projectId,
+      )?.githubRepository;
+      const hasSameRepositoryIdentity = Boolean(
+        serverRepository &&
+          previousRepository &&
+          previousRepository.repoId === serverRepository.id &&
+          getGithubRepositoryUrl(previousRepository) === serverRepository.repository_url &&
+          previousRepository.branch === serverRepository.branch,
+      );
+
+      if (!hasSameRepositoryIdentity) {
+        cancelLatestProjectOperation(
+          githubRepositoryActivityRegistryRef.current,
+          projectId,
+        );
+        clearGithubRepositoryPollsForProject(projectId);
+      }
 
       updateProject(projectId, (project) => {
+        if (project.apiProjectId !== apiProjectId || project.serverMissing) {
+          return project;
+        }
         if (!serverRepository) {
           return project.githubRepository?.repoId
             ? {
@@ -4788,9 +5129,42 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         return;
       }
 
-      const status = await fetchPaimJson<ApiRepositoryStatusResponse>(
-        `/projects/${apiProjectId}/repositories/${serverRepository.id}/status`,
-      );
+      let status: ApiRepositoryStatusResponse;
+      try {
+        status = await fetchPaimJson<ApiRepositoryStatusResponse>(
+          `/projects/${apiProjectId}/repositories/${serverRepository.id}/status`,
+          { signal: operation.controller.signal },
+        );
+      } catch (error) {
+        if (!isGithubRepositoryReconcileCurrent(operation, apiProjectId, serverUrl)) {
+          return;
+        }
+        if (
+          retryStatusNotFound &&
+          isPaimApiError(error) &&
+          error.status === 404
+        ) {
+          queueMicrotask(() => {
+            void syncProjectRepositories(projectId, apiProjectId, false);
+          });
+          return;
+        }
+        throw error;
+      }
+      if (!isGithubRepositoryReconcileCurrent(operation, apiProjectId, serverUrl)) {
+        return;
+      }
+      const currentRepository = projectsRef.current.find(
+        (project) => project.id === projectId,
+      )?.githubRepository;
+      if (
+        !currentRepository ||
+        currentRepository.repoId !== status.repo_id ||
+        getGithubRepositoryUrl(currentRepository) !== status.repository_url ||
+        currentRepository.branch !== status.branch
+      ) {
+        return;
+      }
       updateGithubRepository(projectId, (repository) =>
         applyGithubRepositoryStatus(repository, status),
       );
@@ -4799,6 +5173,9 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         scheduleGithubRepositoryStatusPoll(projectId, apiProjectId, serverRepository.id);
       }
     } catch (error) {
+      if (!isGithubRepositoryReconcileCurrent(operation, apiProjectId, serverUrl)) {
+        return;
+      }
       if (isGithubSessionExpiredError(error)) {
         handleGithubSessionExpired(projectId);
         return;
@@ -4810,6 +5187,11 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         projectId,
         scope: "github",
       });
+    } finally {
+      finishLatestProjectOperation(
+        githubRepositoryReconcileRegistryRef.current,
+        operation,
+      );
     }
   }
 
@@ -4845,7 +5227,18 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       ...repository,
       repoId: response.repo_id,
       syncStatus: response.status,
-      syncStartedAt: response.status === "syncing" ? repository.syncStartedAt ?? Date.now() : undefined,
+      syncRunId:
+        response.status === "syncing"
+          ? response.run_id ?? repository.syncRunId ?? null
+          : null,
+      syncStartedAt:
+        response.status === "syncing"
+          ? (
+              !response.run_id || repository.syncRunId === response.run_id
+                ? repository.syncStartedAt
+                : undefined
+            ) ?? Date.now()
+          : undefined,
       lastError: null,
       syncWarnings: undefined,
     }));
@@ -6711,6 +7104,415 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       });
   }
 
+  function isGithubRemoteAttemptFresh(repository: GitRepositoryInfo, now = Date.now()) {
+    const attemptedAt = repository.remoteCheckAttemptedAt ?? repository.remoteCheckedAt;
+    return (
+      typeof attemptedAt === "number" &&
+      Number.isFinite(attemptedAt) &&
+      now >= attemptedAt &&
+      now - attemptedAt < GITHUB_REMOTE_HEAD_TTL_MS
+    );
+  }
+
+  function isGithubRepositoryIdentityCurrent(
+    projectId: string,
+    apiProjectId: number | null,
+    repoId: number | null,
+    repositoryUrl: string,
+    branch: string,
+    commitSha: string | null,
+  ) {
+    const currentProject = projectsRef.current.find(
+      (candidate) => candidate.id === projectId,
+    );
+    const currentRepository = currentProject?.githubRepository;
+    return Boolean(
+      currentProject &&
+        !currentProject.serverMissing &&
+        (currentProject.apiProjectId ?? null) === apiProjectId &&
+        currentRepository &&
+        (currentRepository.repoId ?? null) === repoId &&
+        getGithubRepositoryUrl(currentRepository) === repositoryUrl &&
+        currentRepository.branch === branch &&
+        (currentRepository.commitSha ?? null) === commitSha,
+    );
+  }
+
+  async function refreshGithubRepositoryActivity(
+    projectId: string,
+    options: GithubRepositoryRefreshOptions = {},
+  ) {
+    const project = projectsRef.current.find((candidate) => candidate.id === projectId);
+    const repository = project?.githubRepository;
+    const repositoryUrl = repository ? getGithubRepositoryUrl(repository) : "";
+    const session =
+      options.session === undefined
+        ? githubLoginSessionsRef.current[projectId] ?? null
+        : options.session;
+
+    if (!project || !repository || !repositoryUrl) {
+      return;
+    }
+    if (project.serverMissing) {
+      restoreCancelledGithubRepositoryActivity(projectId);
+      return;
+    }
+    if (repository.authProvider === "github_app" && !session?.state) {
+      updateGithubRepository(projectId, (currentRepository) => ({
+        ...currentRepository,
+        remoteCheckAttemptedAt: Date.now(),
+        remoteCheckStatus: "error",
+        remoteCheckError: "session_expired",
+      }));
+      handleGithubRemoteSessionExpired(projectId);
+      return;
+    }
+    if (
+      options.onlyIfRemoteStale &&
+      isGithubRemoteAttemptFresh(repository)
+    ) {
+      return;
+    }
+
+    const operation = options.force
+      ? replaceLatestProjectOperation(
+          githubRepositoryActivityRegistryRef.current,
+          projectId,
+        )
+      : beginLatestProjectOperation(
+          githubRepositoryActivityRegistryRef.current,
+          projectId,
+        );
+    if (!operation) {
+      return;
+    }
+
+    const apiProjectId = project.apiProjectId ?? null;
+    const repoId = repository.repoId ?? null;
+    const branch = repository.branch;
+    const commitSha = repository.commitSha ?? null;
+    const serverUrl = getPaimApiRootUrl();
+    const attemptedAt = Date.now();
+
+    updateGithubRepository(projectId, (currentRepository) =>
+      (currentRepository.repoId ?? null) === repoId &&
+      currentRepository.branch === branch &&
+      getGithubRepositoryUrl(currentRepository) === repositoryUrl
+        ? {
+            ...currentRepository,
+            remoteCheckAttemptedAt: attemptedAt,
+            remoteCheckStatus: "checking",
+            remoteCheckError: null,
+          }
+        : currentRepository,
+    );
+
+    try {
+      const preview = session?.state
+        ? await fetchGithubAppRepositoryPreview(
+            repositoryUrl,
+            session.state,
+            operation.controller.signal,
+            branch,
+          )
+        : await fetchGithubRepository(
+            repositoryUrl,
+            session?.accessToken ?? null,
+            operation.controller.signal,
+            branch,
+          );
+
+      if (
+        !isLatestProjectOperationCurrent(
+          githubRepositoryActivityRegistryRef.current,
+          operation,
+        ) ||
+        getPaimApiRootUrl() !== serverUrl ||
+        !isGithubRepositoryIdentityCurrent(
+          projectId,
+          apiProjectId,
+          repoId,
+          repositoryUrl,
+          branch,
+          commitSha,
+        )
+      ) {
+        return;
+      }
+
+      updateProject(projectId, (currentProject) => {
+        const currentRepository = currentProject.githubRepository;
+        if (
+          !currentRepository ||
+          (currentRepository.repoId ?? null) !== repoId ||
+          getGithubRepositoryUrl(currentRepository) !== repositoryUrl ||
+          currentRepository.branch !== branch ||
+          (currentRepository.commitSha ?? null) !== commitSha
+        ) {
+          return currentProject;
+        }
+
+        const remoteHeadSha = preview.repository.remoteHeadSha ?? null;
+        const checkedAt = Date.now();
+        return {
+          ...currentProject,
+          githubEvents: preview.events,
+          githubRepository: {
+            ...currentRepository,
+            name: preview.repository.name,
+            remoteRepo: preview.repository.remoteRepo,
+            issuePrStatus: preview.repository.issuePrStatus,
+            visibility: preview.repository.visibility,
+            authProvider: preview.repository.authProvider,
+            remoteHeadSha,
+            remoteCheckedAt: checkedAt,
+            remoteCheckAttemptedAt: checkedAt,
+            remoteCheckStatus:
+              currentRepository.commitSha && remoteHeadSha
+                ? githubCommitShasMatch(currentRepository.commitSha, remoteHeadSha)
+                  ? "current"
+                  : "needs_sync"
+                : "unknown",
+            remoteCheckError: null,
+          },
+        };
+      });
+    } catch (error) {
+      if (
+        !isLatestProjectOperationCurrent(
+          githubRepositoryActivityRegistryRef.current,
+          operation,
+        ) ||
+        getPaimApiRootUrl() !== serverUrl ||
+        !isGithubRepositoryIdentityCurrent(
+          projectId,
+          apiProjectId,
+          repoId,
+          repositoryUrl,
+          branch,
+          commitSha,
+        )
+      ) {
+        return;
+      }
+      const sessionExpired = isGithubSessionExpiredError(error);
+      const failedAt = Date.now();
+      updateProject(projectId, (currentProject) => {
+        const currentRepository = currentProject.githubRepository;
+        if (
+          !currentRepository ||
+          (currentRepository.repoId ?? null) !== repoId ||
+          getGithubRepositoryUrl(currentRepository) !== repositoryUrl ||
+          currentRepository.branch !== branch ||
+          (currentRepository.commitSha ?? null) !== commitSha
+        ) {
+          return currentProject;
+        }
+
+        return {
+          ...currentProject,
+          githubRepository: {
+            ...currentRepository,
+            remoteCheckAttemptedAt: failedAt,
+            remoteCheckStatus: "error",
+            remoteCheckError: sessionExpired ? "session_expired" : "unavailable",
+          },
+        };
+      });
+      if (sessionExpired) {
+        handleGithubRemoteSessionExpired(projectId);
+      }
+    } finally {
+      finishLatestProjectOperation(
+        githubRepositoryActivityRegistryRef.current,
+        operation,
+      );
+    }
+  }
+
+  async function refreshGithubRepositoryHead(
+    projectId: string,
+    options: GithubRepositoryRefreshOptions = {},
+  ) {
+    const project = projectsRef.current.find((candidate) => candidate.id === projectId);
+    const repository = project?.githubRepository;
+    const repositoryUrl = repository ? getGithubRepositoryUrl(repository) : "";
+    const session =
+      options.session === undefined
+        ? githubLoginSessionsRef.current[projectId] ?? null
+        : options.session;
+
+    if (!project || !repository || !repositoryUrl) {
+      return;
+    }
+    if (project.serverMissing) {
+      restoreCancelledGithubRepositoryActivity(projectId);
+      return;
+    }
+    if (repository.authProvider === "github_app" && !session?.state) {
+      updateGithubRepository(projectId, (currentRepository) => ({
+        ...currentRepository,
+        remoteCheckAttemptedAt: Date.now(),
+        remoteCheckStatus: "error",
+        remoteCheckError: "session_expired",
+      }));
+      handleGithubRemoteSessionExpired(projectId);
+      return;
+    }
+    if (!options.force && isGithubRemoteAttemptFresh(repository)) {
+      return;
+    }
+
+    const operation = options.force
+      ? replaceLatestProjectOperation(
+          githubRepositoryActivityRegistryRef.current,
+          projectId,
+        )
+      : beginLatestProjectOperation(
+          githubRepositoryActivityRegistryRef.current,
+          projectId,
+        );
+    if (!operation) {
+      return;
+    }
+
+    const apiProjectId = project.apiProjectId ?? null;
+    const repoId = repository.repoId ?? null;
+    const branch = repository.branch;
+    const commitSha = repository.commitSha ?? null;
+    const serverUrl = getPaimApiRootUrl();
+    const attemptedAt = Date.now();
+
+    updateGithubRepository(projectId, (currentRepository) =>
+      (currentRepository.repoId ?? null) === repoId &&
+      currentRepository.branch === branch &&
+      getGithubRepositoryUrl(currentRepository) === repositoryUrl
+        ? {
+            ...currentRepository,
+            remoteCheckAttemptedAt: attemptedAt,
+            remoteCheckStatus: "checking",
+            remoteCheckError: null,
+          }
+        : currentRepository,
+    );
+
+    try {
+      const head = session?.state
+        ? await fetchGithubAppRepositoryHead(
+            repositoryUrl,
+            branch,
+            session.state,
+            operation.controller.signal,
+          )
+        : await fetchGithubRepositoryHead(
+            repositoryUrl,
+            branch,
+            session?.accessToken ?? null,
+            operation.controller.signal,
+          );
+
+      if (
+        !isLatestProjectOperationCurrent(
+          githubRepositoryActivityRegistryRef.current,
+          operation,
+        ) ||
+        getPaimApiRootUrl() !== serverUrl ||
+        !isGithubRepositoryIdentityCurrent(
+          projectId,
+          apiProjectId,
+          repoId,
+          repositoryUrl,
+          branch,
+          commitSha,
+        )
+      ) {
+        return;
+      }
+
+      updateProject(projectId, (currentProject) => {
+        const currentRepository = currentProject.githubRepository;
+        if (
+          !currentRepository ||
+          (currentRepository.repoId ?? null) !== repoId ||
+          getGithubRepositoryUrl(currentRepository) !== repositoryUrl ||
+          currentRepository.branch !== branch ||
+          head.branch !== branch ||
+          (currentRepository.commitSha ?? null) !== commitSha
+        ) {
+          return currentProject;
+        }
+
+        const checkedAt = Date.now();
+        return {
+          ...currentProject,
+          githubRepository: {
+            ...currentRepository,
+            remoteHeadSha: head.remoteHeadSha,
+            remoteCheckedAt: checkedAt,
+            remoteCheckAttemptedAt: checkedAt,
+            remoteCheckStatus:
+              currentRepository.commitSha && head.remoteHeadSha
+                ? githubCommitShasMatch(currentRepository.commitSha, head.remoteHeadSha)
+                  ? "current"
+                  : "needs_sync"
+                : "unknown",
+            remoteCheckError: null,
+          },
+        };
+      });
+    } catch (error) {
+      if (
+        !isLatestProjectOperationCurrent(
+          githubRepositoryActivityRegistryRef.current,
+          operation,
+        ) ||
+        getPaimApiRootUrl() !== serverUrl ||
+        !isGithubRepositoryIdentityCurrent(
+          projectId,
+          apiProjectId,
+          repoId,
+          repositoryUrl,
+          branch,
+          commitSha,
+        )
+      ) {
+        return;
+      }
+      const sessionExpired = isGithubSessionExpiredError(error);
+      const failedAt = Date.now();
+      updateProject(projectId, (currentProject) => {
+        const currentRepository = currentProject.githubRepository;
+        if (
+          !currentRepository ||
+          (currentRepository.repoId ?? null) !== repoId ||
+          getGithubRepositoryUrl(currentRepository) !== repositoryUrl ||
+          currentRepository.branch !== branch ||
+          (currentRepository.commitSha ?? null) !== commitSha
+        ) {
+          return currentProject;
+        }
+
+        return {
+          ...currentProject,
+          githubRepository: {
+            ...currentRepository,
+            remoteCheckAttemptedAt: failedAt,
+            remoteCheckStatus: "error",
+            remoteCheckError: sessionExpired ? "session_expired" : "unavailable",
+          },
+        };
+      });
+      if (sessionExpired) {
+        handleGithubRemoteSessionExpired(projectId);
+      }
+    } finally {
+      finishLatestProjectOperation(
+        githubRepositoryActivityRegistryRef.current,
+        operation,
+      );
+    }
+  }
+
   async function handleStartGithubLogin(projectId: string) {
     const targetProject = projects.find((project) => project.id === projectId);
 
@@ -6925,6 +7727,12 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
           projectId,
           scope: "github",
         });
+        if (targetProject.githubRepository) {
+          void refreshGithubRepositoryActivity(projectId, {
+            force: true,
+            session: nextSession,
+          });
+        }
         return;
       }
 
@@ -6988,6 +7796,12 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         projectId,
         scope: "github",
       });
+      if (targetProject.githubRepository) {
+        void refreshGithubRepositoryActivity(projectId, {
+          force: true,
+          session: nextSession,
+        });
+      }
     } catch (error) {
       if (!isGithubOperationCurrent(operation)) {
         return;
@@ -7334,7 +8148,18 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
           repoId: connected.repo_id,
           branch: connected.branch ?? repository.branch,
           syncStatus: connected.status,
-          syncStartedAt: connected.status === "syncing" ? repository.syncStartedAt ?? Date.now() : undefined,
+          syncRunId:
+            connected.status === "syncing"
+              ? connected.run_id ?? repository.syncRunId ?? null
+              : null,
+          syncStartedAt:
+            connected.status === "syncing"
+              ? (
+                  !connected.run_id || repository.syncRunId === connected.run_id
+                    ? repository.syncStartedAt
+                    : undefined
+                ) ?? Date.now()
+              : undefined,
           lastError: null,
           syncWarnings: undefined,
         }));
@@ -7442,6 +8267,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         return;
       }
 
+      clearGithubRepositoryPollsForProject(projectId);
       cancelGithubOperation(projectId);
       try {
         await fetchPaimJson<void>(
@@ -7450,6 +8276,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         );
       } catch (error) {
         if (isGithubSessionExpiredError(error)) {
+          resumeGithubRepositoryPollIfNeeded(projectId);
           handleGithubSessionExpired(projectId);
           return;
         }
@@ -7457,6 +8284,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
         const detail = getErrorMessage(error, "GitHub repo 연결을 해제할 수 없습니다");
 
         if (!/repository not found/i.test(detail)) {
+          resumeGithubRepositoryPollIfNeeded(projectId);
           setDemoStatus({
             ok: false,
             message: detail,
@@ -7466,9 +8294,8 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
           return;
         }
       }
-
-      clearGithubRepositoryPoll(projectId, repoId);
     } else {
+      clearGithubRepositoryPollsForProject(projectId);
       cancelGithubOperation(projectId);
     }
 
@@ -8031,7 +8858,9 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       return;
     }
 
+    clearGithubRepositoryPollsForProject(projectId);
     if (!(await deleteServerProject(targetProject))) {
+      resumeGithubRepositoryPollIfNeeded(projectId);
       return;
     }
 
@@ -8081,50 +8910,75 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
     return `${projectId}\u0000${sessionId ?? "__project_detail__"}`;
   }
 
+  function persistSessionDrafts() {
+    const didSave = saveSessionDrafts(
+      sessionDraftStorageKey,
+      sessionDraftsRef.current,
+    );
+    reportLocalPersistenceResult("draft", didSave);
+    return didSave;
+  }
+
+  function persistDraft(
+    projectId: string,
+    sessionId: string | null,
+    nextPrompt: string,
+    nextAttachments: Attachment[],
+    allowProjectDetail: boolean,
+  ) {
+    if (!projectId || (!sessionId && !allowProjectDetail)) {
+      return;
+    }
+
+    const key = getSessionDraftKey(projectId, sessionId);
+    if (!nextPrompt.trim() && nextAttachments.length === 0) {
+      sessionDraftsRef.current.delete(key);
+    } else {
+      sessionDraftsRef.current.set(key, {
+        attachments: [...nextAttachments],
+        prompt: nextPrompt,
+      });
+    }
+    persistSessionDrafts();
+  }
+
   function handlePromptChange(nextPrompt: string) {
     setPrompt(nextPrompt);
 
     const projectId = selectedProjectIdRef.current;
     const sessionId = selectedSessionIdRef.current;
-    if (!projectId || (!sessionId && mainViewRef.current !== "project-detail")) {
-      return;
-    }
-
-    const key = getSessionDraftKey(projectId, sessionId);
-    if (!nextPrompt.trim() && attachments.length === 0) {
-      sessionDraftsRef.current.delete(key);
-      saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
-      return;
-    }
-
-    sessionDraftsRef.current.set(key, {
-      attachments: [...attachments],
-      prompt: nextPrompt,
-    });
-    saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
+    persistDraft(
+      projectId ?? "",
+      sessionId,
+      nextPrompt,
+      attachmentsRef.current,
+      mainViewRef.current === "project-detail",
+    );
   }
 
   // 상세 composer와 각 채팅을 떠나도 작성 중인 텍스트·첨부가 남도록
   // 프로젝트/세션별 초안을 메모리에 보관한다.
   function rememberCurrentDraft() {
+    const isVisibleChatDraft =
+      mainViewRef.current === "chat" && Boolean(selectedSessionId);
+    const isVisibleProjectDetailDraft =
+      mainViewRef.current === "project-detail" && !selectedSessionId;
     if (
       !selectedProjectId ||
-      (!selectedSessionId && mainViewRef.current !== "project-detail")
+      (!isVisibleChatDraft && !isVisibleProjectDetailDraft)
     ) {
       return;
     }
 
     // 세션 전환 클릭은 React state commit보다 먼저 들어올 수 있으므로 현재 DOM 값을 우선한다.
     const currentPrompt = promptTextareaRef.current?.value ?? prompt;
-    const key = getSessionDraftKey(selectedProjectId, selectedSessionId);
-    if (!currentPrompt.trim() && attachments.length === 0) {
-      sessionDraftsRef.current.delete(key);
-      saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
-      return;
-    }
-
-    sessionDraftsRef.current.set(key, { attachments: [...attachments], prompt: currentPrompt });
-    saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
+    persistDraft(
+      selectedProjectId,
+      selectedSessionId,
+      currentPrompt,
+      attachmentsRef.current,
+      mainViewRef.current === "project-detail",
+    );
   }
 
   function showSessionDraft(projectId: string, sessionId: string | null) {
@@ -8132,13 +8986,15 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       ? sessionDraftsRef.current.get(getSessionDraftKey(projectId, sessionId))
       : undefined;
 
+    const nextAttachments = draft ? [...draft.attachments] : [];
+    attachmentsRef.current = nextAttachments;
     setPrompt(draft?.prompt ?? "");
-    setAttachments(draft ? [...draft.attachments] : []);
+    setAttachments(nextAttachments);
   }
 
   function forgetSessionDraft(projectId: string, sessionId: string | null) {
     sessionDraftsRef.current.delete(getSessionDraftKey(projectId, sessionId));
-    saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
+    persistSessionDrafts();
   }
 
   function forgetProjectDrafts(projectId: string) {
@@ -8151,11 +9007,12 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       }
     });
     if (didChange) {
-      saveSessionDrafts(sessionDraftStorageKey, sessionDraftsRef.current);
+      persistSessionDrafts();
     }
   }
 
   function resetVisibleDraft() {
+    attachmentsRef.current = [];
     setPrompt("");
     setAttachments([]);
   }
@@ -8263,9 +9120,60 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
       return;
     }
 
+    const targetProjectId = selectedProject.id;
+    const targetSessionId = selectedSession?.id ?? null;
+    const targetView = mainView === "project-detail" ? "project-detail" : "chat";
+    const targetDraftKey = getSessionDraftKey(targetProjectId, targetSessionId);
+    const targetDraftWasPresent = sessionDraftsRef.current.has(targetDraftKey);
+    const targetDraftSnapshot: SessionDraft = {
+      attachments: [...attachmentsRef.current],
+      prompt: promptTextareaRef.current?.value ?? prompt,
+    };
     const nextAttachments = await Promise.all(supportedPaths.map(createAttachment));
 
-    setAttachments((currentAttachments) => [...currentAttachments, ...nextAttachments]);
+    const targetProject = projectsRef.current.find(
+      (project) => project.id === targetProjectId,
+    );
+    if (
+      !targetProject ||
+      (targetSessionId !== null &&
+        !targetProject.sessions.some((session) => session.id === targetSessionId))
+    ) {
+      return;
+    }
+
+    const isTargetContextVisible =
+      selectedProjectIdRef.current === targetProjectId &&
+      selectedSessionIdRef.current === targetSessionId &&
+      mainViewRef.current === targetView;
+
+    if (isTargetContextVisible) {
+      const updatedAttachments = [...attachmentsRef.current, ...nextAttachments];
+      attachmentsRef.current = updatedAttachments;
+      setAttachments(updatedAttachments);
+      persistDraft(
+        targetProjectId,
+        targetSessionId,
+        promptTextareaRef.current?.value ?? prompt,
+        updatedAttachments,
+        targetView === "project-detail",
+      );
+      return;
+    }
+
+    const latestTargetDraft = sessionDraftsRef.current.get(targetDraftKey);
+    const targetDraftBase =
+      latestTargetDraft ??
+      (targetDraftWasPresent
+        ? { attachments: [], prompt: "" }
+        : targetDraftSnapshot);
+    persistDraft(
+      targetProjectId,
+      targetSessionId,
+      targetDraftBase.prompt,
+      [...targetDraftBase.attachments, ...nextAttachments],
+      targetView === "project-detail",
+    );
   }
 
   // 로컬 이미지 파일이면 프론트 표시용 미리보기 URL을 만든다.
@@ -8347,8 +9255,17 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   }
 
   function removeAttachment(attachmentId: string) {
-    setAttachments((currentAttachments) =>
-      currentAttachments.filter((attachment) => attachment.id !== attachmentId),
+    const updatedAttachments = attachmentsRef.current.filter(
+      (attachment) => attachment.id !== attachmentId,
+    );
+    attachmentsRef.current = updatedAttachments;
+    setAttachments(updatedAttachments);
+    persistDraft(
+      selectedProjectIdRef.current ?? "",
+      selectedSessionIdRef.current,
+      promptTextareaRef.current?.value ?? prompt,
+      updatedAttachments,
+      mainViewRef.current === "project-detail",
     );
   }
 
@@ -8726,11 +9643,11 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
               <dd>{formatAccountCreatedAt(authUser?.created_at, settings.language)}</dd>
             </div>
             <div>
-              <dt>{t("서버 상태")}</dt>
+              <dt>{t("서비스 상태")}</dt>
               <dd>
                 <span className="profile-connection" data-status={serverStatus}>
                   <span aria-hidden="true" className="profile-connection-dot" />
-                  {serverStatus === "online" ? t("서버 연결됨") : t("서버 오프라인")}
+                  {serverStatus === "online" ? t("연결됨") : t("오프라인")}
                 </span>
               </dd>
             </div>
@@ -8738,7 +9655,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
 
           {authUser ? (
             <p className="profile-note">
-              {t("계정 정보는 현재 연결된 PaiM 서버에서 관리됩니다.")}
+              {t("계정 정보는 PaiM에서 안전하게 관리됩니다.")}
             </p>
           ) : (
             <Banner
@@ -8752,14 +9669,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
   }
 
   function renderSettingsPage() {
-    const effectiveServerUrl = settings.serverUrl || getPaimApiRootUrl() || DEFAULT_PAIM_API_ROOT_URL;
-    const normalizedServerUrlDraft = normalizePaimServerUrl(serverUrlDraft);
-    const isServerUrlDirty = normalizedServerUrlDraft !== normalizePaimServerUrl(settings.serverUrl);
-    const draftServerUrl = resolvePaimApiRootUrl(normalizedServerUrlDraft);
-    const willServerApplyReload =
-      isServerUrlDirty &&
-      getProjectStorageKey(authUser, canLogout, draftServerUrl) !== projectStorageKey;
-
     return (
       <WorkspacePageLayout
         ariaLabel={t("설정")}
@@ -8840,85 +9749,6 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
             </SegmentedControl>
           </section>
 
-          <section className="settings-group" aria-label={t("서버 주소")}>
-            <div className="settings-copy">
-              <h2>{t("서버 주소")}</h2>
-              <p>{t("비우면 기본 주소 {url}로 돌아갑니다.", { url: DEFAULT_PAIM_API_ROOT_URL })}</p>
-            </div>
-            <div className="settings-control-stack">
-              <div className="settings-inline-control">
-                <TextInput
-                  isLabelHidden
-                  label={t("PaiM 서버 주소")}
-                  onChange={(value) => {
-                    setServerUrlDraft(value);
-                    setServerTestState({ message: "", status: "idle" });
-                    setIsServerApplyConfirming(false);
-                  }}
-                  placeholder={DEFAULT_PAIM_API_ROOT_URL}
-                  value={serverUrlDraft}
-                  width="100%"
-                />
-              </div>
-              <div className="settings-server-actions">
-                <Button
-                  isLoading={serverTestState.status === "testing"}
-                  label={t("연결 테스트")}
-                  onClick={() => void handleTestServerConnection()}
-                  variant="secondary"
-                />
-                {isServerApplyConfirming ? (
-                  <Button
-                    label={t("취소")}
-                    onClick={() => setIsServerApplyConfirming(false)}
-                    variant="secondary"
-                  />
-                ) : null}
-                <Button
-                  isDisabled={!isServerUrlDirty || serverTestState.status === "testing"}
-                  label={
-                    isServerApplyConfirming
-                      ? t("전환하고 다시 시작")
-                      : willServerApplyReload
-                        ? t("서버 전환 적용")
-                        : t("주소 적용")
-                  }
-                  onClick={handleApplyServerUrl}
-                  variant={isServerApplyConfirming ? "primary" : "secondary"}
-                />
-              </div>
-              <p
-                className="settings-status"
-                aria-atomic="true"
-                role="status"
-              >
-                <StatusDot
-                  label={serverStatus === "online" ? t("서버 연결됨") : t("서버 오프라인")}
-                  variant={serverStatus === "online" ? "success" : "error"}
-                />
-                {t(serverStatus === "online" ? "현재 연결됨 · {url}{message}" : "현재 오프라인 · {url}{message}", {
-                  message: "",
-                  url: effectiveServerUrl,
-                })}
-              </p>
-              {isServerUrlDirty ? (
-                <p
-                  aria-live="polite"
-                  className="settings-draft-status"
-                  data-status={isServerApplyConfirming ? "warning" : serverTestState.status}
-                >
-                  {isServerApplyConfirming
-                    ? t("적용하면 앱이 다시 시작되고 새 서버의 프로젝트로 전환됩니다.")
-                    : serverTestState.message
-                      ? t(serverTestState.message)
-                      : willServerApplyReload
-                        ? t("새 서버 주소입니다. 연결을 확인한 뒤 적용하세요.")
-                        : t("적용하지 않은 변경 사항이 있습니다.")}
-                </p>
-              ) : null}
-            </div>
-          </section>
-
           <section className="settings-group" aria-label={t("완료 제안 민감도")}>
             <div className="settings-copy">
               <h2>{t("완료 제안 민감도")}</h2>
@@ -8967,7 +9797,7 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
               <p aria-live="polite">
                 {isSettingsResetConfirming
                   ? t("계속하려면 초기화를 확인하세요. 화면·언어·분석 표시와 패널 배치만 기본값으로 되돌립니다.")
-                  : t("프로젝트·대화·계정·서버 주소는 유지하고 앱 설정만 기본값으로 되돌립니다.")}
+                  : t("프로젝트·대화·계정은 유지하고 앱 설정만 기본값으로 되돌립니다.")}
               </p>
             </div>
             <div className="settings-confirm-actions">
@@ -10648,6 +11478,9 @@ function WorkspaceApp({ authUser, canLogout, initialServerOffline, onLogout }: W
                       }
                       onQueryChange={(query) =>
                         setGithubRepositoryQueryForProject(selectedProject.id, query)
+                      }
+                      onRefreshRepository={() =>
+                        void refreshGithubRepositoryHead(selectedProject.id, { force: true })
                       }
                       onResetLogin={() => handleResetGithubLogin(selectedProject.id)}
                       onStartLogin={() => void handleStartGithubLogin(selectedProject.id)}

@@ -1,3 +1,6 @@
+import time
+from unittest.mock import patch
+
 from fastapi.testclient import TestClient
 
 from backend.github import router as github_api
@@ -55,3 +58,88 @@ def test_desktop_origin_is_allowed_by_cors():
 
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:7420"
+
+
+def test_repository_preview_head_only_uses_encoded_requested_branch():
+    client = TestClient(app)
+
+    with patch(
+        "backend.github.router._json_request",
+        return_value=[{"sha": "abc123"}],
+    ) as github_request:
+        response = client.post(
+            "/github/app/repository-preview",
+            json={
+                "repository_url": "https://github.com/acme/pocket",
+                "branch": "release/1.x",
+                "head_only": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "branch": "release/1.x",
+        "remoteHeadSha": "abc123",
+    }
+    github_request.assert_called_once_with(
+        "GET",
+        "/repos/acme/pocket/commits?sha=release%2F1.x&per_page=1",
+        token=None,
+    )
+
+
+def test_repository_preview_uses_requested_branch_for_activity():
+    client = TestClient(app)
+
+    with patch(
+        "backend.github.router._json_request",
+        side_effect=[
+            {
+                "default_branch": "main",
+                "full_name": "acme/pocket",
+                "html_url": "https://github.com/acme/pocket",
+                "name": "pocket",
+                "private": False,
+            },
+            [{"sha": "abc123", "commit": {"message": "release", "author": {}}}],
+            [],
+            [],
+        ],
+    ) as github_request:
+        response = client.post(
+            "/github/app/repository-preview",
+            json={
+                "repository_url": "https://github.com/acme/pocket",
+                "branch": "release/1.x",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["repository"]["branch"] == "release/1.x"
+    assert response.json()["repository"]["remoteHeadSha"] == "abc123"
+    assert github_request.call_args_list[1].args[1] == (
+        "/repos/acme/pocket/commits?sha=release%2F1.x&per_page=6"
+    )
+
+
+def test_repository_preview_head_only_preserves_expired_app_session_signal():
+    state = "expired-preview-state"
+    client = TestClient(app, raise_server_exceptions=False)
+    github_api._sessions.clear()
+    github_api._expired_states.clear()
+    github_api._expired_states[state] = time.time()
+    try:
+        response = client.post(
+            "/github/app/repository-preview",
+            json={
+                "repository_url": "https://github.com/acme/pocket",
+                "state": state,
+                "branch": "main",
+                "head_only": True,
+            },
+        )
+
+        assert response.status_code == 410
+        assert response.json()["code"] == "SESSION_EXPIRED"
+    finally:
+        github_api._expired_states.clear()

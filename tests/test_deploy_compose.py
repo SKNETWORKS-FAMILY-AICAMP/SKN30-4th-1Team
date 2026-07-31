@@ -112,8 +112,8 @@ def test_backend_pins_agentic_openai_contract(prod: dict):
     env = prod["services"]["backend"]["environment"]
     assert env["LLM_PROVIDER"] == "openai"
     assert env["OPENAI_MODEL"] == "gpt-4.1-mini"
-    assert env["OPENAI_BASE_URL"] == ""
-    assert env["OPENAI_API_BASE"] == ""
+    assert env["OPENAI_BASE_URL"] == "https://api.openai.com/v1"
+    assert env["OPENAI_API_BASE"] == "https://api.openai.com/v1"
 
 
 def test_backend_reads_env_file(prod: dict):
@@ -152,6 +152,18 @@ def test_caddyfile_starts_with_global_options_block():
         if line.strip() and not line.strip().startswith("#")
     ]
     assert lines[0] == "{", "전역 옵션 블록이 먼저 와야 한다"
+
+
+def test_caddy_separates_audio_and_document_upload_limits():
+    """25 MiB 데스크톱 오디오가 일반 문서용 12 MB 프록시 상한에 막히면 안 된다."""
+    raw = (_ROOT / "deploy" / "Caddyfile").read_text(encoding="utf-8")
+    assert "method POST" in raw
+    assert "path /api/v1/projects/*/audio /api/v1/projects/*/audio/" in raw
+    assert "max_size 30MB" in raw
+    assert "max_size 12MB" in raw
+    assert raw.index("handle @audio_upload") < raw.index("max_size 30MB")
+    assert raw.index("max_size 30MB") < raw.index("handle {")
+    assert raw.index("handle {") < raw.index("max_size 12MB")
 
 
 @pytest.mark.parametrize(

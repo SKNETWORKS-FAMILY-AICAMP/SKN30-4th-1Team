@@ -5,7 +5,13 @@ import unicodedata
 from pathlib import Path
 from typing import Callable
 
-from .pipeline.converters import ConversionError, ErrorCode, convert
+from .pipeline.converters import (
+    ConversionError,
+    ErrorCode,
+    convert,
+    supported_suffixes as converter_supported_suffixes,
+    text_converter,
+)
 
 
 # pypdf는 strict=False 복구 과정에서 손상된 CMap token 등 문서 유래 bytes를
@@ -88,29 +94,40 @@ def _delegate(filename: str, data: bytes) -> str:
         raise DocumentContentError(exc.message) from exc
 
 
-def _read_pdf(data: bytes) -> str:
-    return _delegate("document.pdf", data)
-
-
-def _read_docx(data: bytes) -> str:
-    return _delegate("document.docx", data)
-
-
 DocumentParser = Callable[[bytes], str]
+_STRICT_TEXT_SUFFIXES = frozenset(text_converter.SUFFIXES)
+
+
+def _parser_for_suffix(suffix: str) -> DocumentParser:
+    """converter 확장자를 기존 문자열 추출 계약에 맞는 파서로 연결한다."""
+    if suffix in _STRICT_TEXT_SUFFIXES:
+        # 문서 입력 경계는 converter의 관대한 UTF-16/대체문자 폴백보다 엄격한
+        # UTF-8/CP949 계약을 유지한다.
+        return _decode_text
+
+    converter_filename = f"document{suffix}"
+
+    def parse_with_converter(data: bytes) -> str:
+        return _delegate(converter_filename, data)
+
+    return parse_with_converter
+
+
+# 지원 확장자의 단일 기준은 pipeline converter registry다. 문서 API 허용 집합과
+# capabilities가 별도 목록을 갖지 않게 하되, 각 형식의 기존 검증/오류 계약은 위
+# adapter에서 그대로 유지한다.
 DOCUMENT_PARSERS: dict[str, DocumentParser] = {
-    ".md": _decode_text,
-    # .markdown은 변환기 레지스트리(pipeline/converters)가 이미 지원한다. 여기서
-    # 빠지면 업로드·질의가 400으로 거절해 기존 지원 포맷이 회귀한다.
-    ".markdown": _decode_text,
-    ".txt": _decode_text,
-    ".pdf": _read_pdf,
-    ".docx": _read_docx,
+    suffix: _parser_for_suffix(suffix)
+    for suffix in converter_supported_suffixes()
 }
-ALLOWED_SUFFIXES = set(DOCUMENT_PARSERS)
+ALLOWED_SUFFIXES = set(converter_supported_suffixes())
 
 
 def supported_extensions() -> list[str]:
-    return sorted(suffix.removeprefix(".") for suffix in DOCUMENT_PARSERS)
+    return sorted(
+        suffix.removeprefix(".")
+        for suffix in converter_supported_suffixes()
+    )
 
 
 def supported_formats_label() -> str:
@@ -132,8 +149,8 @@ def validate_document_bytes(filename: str, data: bytes) -> None:
     변환기 내부 실패는 성격이 다르므로 400(업로드)·placeholder(질의)로 처리된다.
 
     텍스트 계열은 여기서 디코딩까지 시도한다 — 인코딩 위반은 파싱이 아니라 입력
-    경계의 문제이기 때문이다. 바이너리 계열은 매직만 보고, 내용의 제어문자 검사는
-    추출 직후(정규화 전) 변환기 안에서 수행한다.
+    경계의 문제이기 때문이다. 알려진 바이너리 계열은 매직을 보고, 매직 계약이 없는
+    바이너리 계열은 해당 converter가 내용 검증을 담당한다.
     """
     suffix = Path(filename).suffix.lower()
     if suffix not in DOCUMENT_PARSERS:
@@ -141,15 +158,15 @@ def validate_document_bytes(filename: str, data: bytes) -> None:
             f"지원하지 않는 문서 형식입니다. ({supported_formats_label()})"
         )
 
-    magic = _MAGIC_PREFIXES.get(suffix)
-    if magic is not None:
-        if not data.startswith(magic):
-            raise DocumentContentError(
-                f"{suffix[1:].upper()} 확장자와 실제 파일 형식이 일치하지 않습니다."
-            )
+    if suffix in _STRICT_TEXT_SUFFIXES:
+        _decode_text(data)
         return
 
-    _decode_text(data)
+    magic = _MAGIC_PREFIXES.get(suffix)
+    if magic is not None and not data.startswith(magic):
+        raise DocumentContentError(
+            f"{suffix[1:].upper()} 확장자와 실제 파일 형식이 일치하지 않습니다."
+        )
 
 
 def extract_document_text(filename: str, data: bytes) -> str:

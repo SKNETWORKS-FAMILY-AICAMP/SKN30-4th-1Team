@@ -5,6 +5,7 @@ description = "LLM 기반 AI 프로젝트 매니저 — 의사결정 맥락 기�
 requires-python = ">=3.11"
 dependencies = [
     "fastapi",
+    "python-multipart>=0.0.20",
     "uvicorn",
     "anthropic",
     "openai",
@@ -19,7 +20,6 @@ dependencies = [
     "langgraph",
     "pydantic",
     "python-dotenv",
-    "streamlit>=1.58.0",
     "pypdf>=6.14.2",
     "python-docx>=1.1.2",
     "tiktoken",
@@ -34,7 +34,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["backend", "frontend"]
+packages = ["backend"]
 
 [dependency-groups]
 dev = [
@@ -50,4 +50,3 @@ eval = [
 
 [project.scripts]
 paim-server = "backend.main:serve"
-paim-ui = "frontend.app_runner:main"

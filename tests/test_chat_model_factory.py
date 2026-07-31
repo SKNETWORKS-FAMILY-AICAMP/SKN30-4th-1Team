@@ -6,6 +6,9 @@
 import pytest
 
 
+_OPENAI_OFFICIAL_BASE_URL = "https://api.openai.com/v1"
+
+
 def test_import_without_api_key(monkeypatch):
     """API 키 없이도 모듈 import가 성공해야 한다 (lazy init 검증)."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -31,6 +34,26 @@ def test_get_chat_model_openai_default_model(monkeypatch):
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
     from backend.llm.chat_model_factory import get_chat_model
     assert get_chat_model().model_name == "gpt-4.1-mini"
+
+
+def test_openai_clients_use_pinned_official_base_url(monkeypatch):
+    """운영 Compose의 빈 base URL 회귀가 채팅·추출·임베딩을 깨뜨리지 않아야 한다."""
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-dummy")
+    monkeypatch.setenv("OPENAI_BASE_URL", _OPENAI_OFFICIAL_BASE_URL)
+    monkeypatch.setenv("OPENAI_API_BASE", _OPENAI_OFFICIAL_BASE_URL)
+
+    from backend.llm.chat_model_factory import get_chat_model
+    from backend.llm.openai_client import OpenAIClient
+    from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
+
+    chat_model = get_chat_model()
+    extraction_client = OpenAIClient()
+    embedding_client = OpenAIEmbeddingFunction(model_name="text-embedding-3-small")
+
+    assert str(chat_model.root_client.base_url).rstrip("/") == _OPENAI_OFFICIAL_BASE_URL
+    assert str(extraction_client.client.base_url).rstrip("/") == _OPENAI_OFFICIAL_BASE_URL
+    assert str(embedding_client.client.base_url).rstrip("/") == _OPENAI_OFFICIAL_BASE_URL
 
 
 def test_get_chat_model_fast_falls_back_to_quality(monkeypatch):
