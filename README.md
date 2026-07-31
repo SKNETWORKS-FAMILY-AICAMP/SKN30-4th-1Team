@@ -160,14 +160,20 @@ flowchart TB
 ```mermaid
 flowchart TB
     REQUEST["질문 · 임시 첨부"]
-    ORCHESTRATOR["LangGraph Orchestrator LLM<br/>Tool 선택 · Observation 판단<br/>최종 답변 생성"]
-    TOOLS["Project Memory Tools · 2개<br/>SQL State<br/>Hybrid RAG"]
+    ORCHESTRATOR["LangGraph Orchestrator LLM<br/>질문 해석 · Tool 선택"]
+    SQL_TOOL["TOOL 01<br/>SQL State"]
+    RAG_TOOL["TOOL 02<br/>Hybrid RAG"]
+    DECIDE["동일 Orchestrator LLM<br/>Observation 판단<br/>추가 Tool 또는 최종 답변"]
     EVIDENCE_GUARD["Evidence Guard<br/>출처 · 실질 근거 검증"]
     ANSWER["근거와 출처가 있는 답변"]
 
     REQUEST --> ORCHESTRATOR
-    ORCHESTRATOR <-->|"Tool Call ↔ Observation"| TOOLS
-    ORCHESTRATOR -->|"근거 확보 · 최종 응답"| EVIDENCE_GUARD
+    ORCHESTRATOR -->|"Tool Call"| SQL_TOOL
+    ORCHESTRATOR -->|"Tool Call"| RAG_TOOL
+    SQL_TOOL -->|"Observation"| DECIDE
+    RAG_TOOL -->|"Observation"| DECIDE
+    DECIDE -. "추가 Tool" .-> ORCHESTRATOR
+    DECIDE -->|"최종 답변"| EVIDENCE_GUARD
     EVIDENCE_GUARD --> ANSWER
 
     classDef source fill:#EAF2FF,stroke:#4F7CAC,color:#172A3A,stroke-width:2px
@@ -177,14 +183,14 @@ flowchart TB
     classDef result fill:#172A3A,stroke:#0F172A,color:#FFFFFF,stroke-width:3px
 
     class REQUEST source
-    class ORCHESTRATOR agent
-    class TOOLS tool
+    class ORCHESTRATOR,DECIDE agent
+    class SQL_TOOL,RAG_TOOL tool
     class EVIDENCE_GUARD guard
     class ANSWER result
     linkStyle default stroke:#94A3B8,stroke-width:2px
 ```
 
-오케스트레이터 LLM은 첫 Tool 호출을 반드시 수행하고, `tool_call → observation → 다음 판단`을 최대 5라운드 반복합니다. 두 Tool은 프로젝트 메모리의 근거만 반환하며 사용자 답변을 직접 만들지 않습니다. 근거가 충분해지면 오케스트레이터 LLM이 최종 답변을 생성하고, 서버가 출처와 실질 근거를 다시 검증한 뒤 반환합니다.
+오케스트레이터 LLM은 첫 Tool 호출을 반드시 수행하고, `query_sql_state`(SQL State)와 `search_hybrid_vector_rag`(Hybrid RAG) 중 필요한 Tool을 선택합니다. 각 Tool의 Observation은 같은 LLM으로 돌아가며, LLM은 근거가 부족하면 최대 5라운드까지 Tool을 추가 호출하고 충분하면 최종 답변을 생성합니다. Tool은 프로젝트 메모리의 근거만 반환하고 서버는 마지막으로 출처와 실질 근거를 검증합니다.
 
 ### 상태 변경 안전장치
 
